@@ -48,6 +48,24 @@ from malca.review.dustycult import DustyCultAvailability, upsert_dustycult_fit
 from malca.review.store import upsert_candidates_frame
 
 
+def test_queue_filter_state_restores_catalog_neighbor_radius_and_presets() -> None:
+    saved = {
+        "catalog_neighbor_radius_arcsec": 99,
+        "exclude_known_catalog_neighbors": ["yes"],
+        "exclude_dipper_catalog_neighbors": [],
+    }
+
+    normalized = review_app._normalize_saved_queue_filter_ui_state(saved)
+    values = review_app._queue_filter_ui_values_from_state(saved)
+    params = review_app._queue_filter_params_from_ui_state(normalized, None, None)
+
+    assert normalized["catalog_neighbor_radius_arcsec"] == 30.0
+    assert values[3:6] == (30.0, ["yes"], [])
+    assert params["catalog_neighbor_radius_arcsec"] == 30.0
+    assert params["exclude_known_catalog_neighbors"] is True
+    assert params["exclude_dipper_catalog_neighbors"] is False
+
+
 def test_update_sed_panel_renders_graph(monkeypatch) -> None:
     def fake_load(candidate_id, extinction_mode, theme_mode):
         fig = go.Figure()
@@ -539,6 +557,7 @@ def test_vetting_known_variable_preset_leaves_uncertain_types_visible() -> None:
 
     assert bool_values_by_col["vetting_likely_known"] == "False"
     assert bool_values_by_col["microlens_match"] == "False"
+    assert bool_values_by_col["nearby_vsx_dipper_contaminant"] == "False"
     assert select_values_by_col["vsx_class"] == [
         "GCAS",
         "BE",
@@ -565,6 +584,7 @@ def test_vetting_known_variable_preset_leaves_uncertain_types_visible() -> None:
     dipper_bool_values_by_col = dict(zip(review_app.VETTING_KNOWN_BOOL_FILTERS, dipper_bool_values))
     assert dipper_bool_values_by_col["vetting_likely_known"] == "Any"
     assert dipper_bool_values_by_col["microlens_match"] == "Any"
+    assert dipper_bool_values_by_col["nearby_vsx_dipper_contaminant"] == "False"
     assert dipper_select_values_by_col["vsx_class"] == ["GCAS", "BE", "EA", "UXOR", "YSO/DIP", "BE|GCAS|SDOR|WR"]
     assert dipper_select_values_by_col["asassn_var_type"] == ["YSO"]
     assert dipper_select_values_by_col["gaia_var_class"] == ["ECL", "YSO"]
@@ -608,6 +628,7 @@ def test_vetting_dipper_contaminant_preset_selects_target_safe_simbad_values() -
 
     assert bool_values_by_col["vetting_likely_known"] == "Any"
     assert bool_values_by_col["microlens_match"] == "Any"
+    assert bool_values_by_col["nearby_vsx_dipper_contaminant"] == "False"
     assert select_values_by_col["simbad_otype"] == [
         "EB*",
         "SB*",
@@ -642,13 +663,13 @@ def test_vetting_filter_toggles_preserve_other_filters_and_shared_values() -> No
 
     known_bool_values, known_select_values = review_app._apply_vetting_known_filter_toggle(
         options,
-        current_bool_values=["Any", "Any"],
+        current_bool_values=["Any", "Any", "Any"],
         current_select_values=current_select_values,
         policy="known_variables",
         enabled=True,
     )
 
-    assert known_bool_values == ["False", "False"]
+    assert known_bool_values == ["False", "False", "False"]
     assert known_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR", "DSCT"]
     assert known_select_values[yso_idx] == []
 
@@ -662,7 +683,7 @@ def test_vetting_filter_toggles_preserve_other_filters_and_shared_values() -> No
         other_enabled=True,
     )
 
-    assert both_bool_values == ["False", "False"]
+    assert both_bool_values == ["False", "False", "False"]
     assert both_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR", "DSCT"]
     assert both_select_values[yso_idx] == ["Class II"]
 
@@ -676,7 +697,7 @@ def test_vetting_filter_toggles_preserve_other_filters_and_shared_values() -> No
         other_enabled=True,
     )
 
-    assert dipper_only_bool_values == ["Any", "Any"]
+    assert dipper_only_bool_values == ["Any", "Any", "False"]
     assert dipper_only_select_values[vsx_idx] == ["USER_ONLY", "EA", "UXOR"]
     assert dipper_only_select_values[yso_idx] == ["Class II"]
 
@@ -690,7 +711,7 @@ def test_vetting_filter_toggles_preserve_other_filters_and_shared_values() -> No
         other_enabled=False,
     )
 
-    assert user_only_bool_values == ["Any", "Any"]
+    assert user_only_bool_values == ["Any", "Any", "Any"]
     assert user_only_select_values[vsx_idx] == ["USER_ONLY"]
     assert user_only_select_values[yso_idx] == []
 

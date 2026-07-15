@@ -53,6 +53,51 @@ def test_find_nearby_vsx_queries_vizier_and_normalizes_top_three(monkeypatch) ->
     assert instance.catalog == nearby.VSX_VIZIER_CATALOG
 
 
+def test_find_nearby_vsx_preserves_query_coordinate_precision(monkeypatch) -> None:
+    raw_ra = 116.759448477255
+    raw_dec = -64.6196919451473
+
+    class PrecisionSensitiveVizier:
+        def __init__(self, *, columns, row_limit):
+            self.columns = columns
+            self.row_limit = row_limit
+            self.TIMEOUT = None
+
+        def query_region(self, target, *, radius, catalog):
+            ra = float(target.ra.deg)
+            dec = float(target.dec.deg)
+            if abs(ra - raw_ra) > 1e-10 or abs(dec - raw_dec) > 1e-10:
+                return []
+            return [
+                Table(
+                    rows=[
+                        (
+                            84717,
+                            "ASAS J074703-6437.2",
+                            116.75953674316406,
+                            -64.61978149414062,
+                            "ESD|EC",
+                            0.92655,
+                        )
+                    ],
+                    names=["OID", "Name", "RAJ2000", "DEJ2000", "Type", "Period"],
+                )
+            ]
+
+    monkeypatch.setattr(nearby, "Vizier", PrecisionSensitiveVizier)
+
+    neighbors = nearby.find_nearby_vsx(
+        raw_ra,
+        raw_dec,
+        limit=3,
+        radius_arcsec=3.0,
+        timeout_sec=5.0,
+    )
+
+    assert [item.name for item in neighbors] == ["ASAS J074703-6437.2"]
+    assert neighbors[0].vsx_type == "ESD|EC"
+
+
 def test_find_nearby_vsx_returns_empty_on_query_failure(monkeypatch) -> None:
     class FailingVizier:
         def __init__(self, *, columns, row_limit):

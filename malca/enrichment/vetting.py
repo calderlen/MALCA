@@ -91,6 +91,7 @@ from malca.config import (
     NEOWISE_VET_WORKERS as CFG_NEOWISE_VET_WORKERS,
     CRTS_CHUNK_SIZE as CFG_CRTS_CHUNK_SIZE,
     GAIA_EPOCH_VET_CHUNK_SIZE as CFG_GAIA_EPOCH_VET_CHUNK_SIZE,
+    VSX_ALL_CATALOG_PATH,
     ATLAS_POLL_INTERVAL as CFG_ATLAS_POLL_INTERVAL,
     ATLAS_MAX_POLL as CFG_ATLAS_MAX_POLL,
     VETTING_HTTP_TIMEOUT,
@@ -104,11 +105,18 @@ from malca.config import (
     AAVSO_MAX_PAGES,
     AAVSO_RESULTS_PER_PAGE,
 )
+from malca.catalogs.evidence import (
+    CATALOG_NEIGHBOR_FILENAME,
+    DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
+    catalog_neighbor_record,
+    normalize_catalog_neighbor_frame,
+)
 from malca.catalogs.gaia_ids import parse_gaia_source_id
 from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 from malca.core.utils import batch_tap_crossmatch
 from malca.products.candidates import select_passing_candidates_if_present
-from malca.io.table_io import read_feature_table, write_feature_table
+from malca.products.feature_layers import feature_value_series
+from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 
 
 
@@ -2118,6 +2126,853 @@ def crossmatch_tns(
 
     print(f"TNS: {matched} transient matches")
     return df
+
+
+# =============================================================================
+# LONG-FORM CATALOG NEIGHBOR EVIDENCE
+# =============================================================================
+
+
+CATALOG_NEIGHBOR_V1_CATALOGS = (
+    "vsx",
+    "simbad",
+    "asassn_variables",
+    "ztf_periodic_variables",
+    "tns",
+    "microlensing_catalogs",
+)
+CATALOG_NEIGHBOR_DEFAULT_CHUNK_SIZE = 250
+CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC = 120.0
+VSX_BUILTIN_ALL_CATALOG_PATH = Path("input/vsx/vsx_all.parquet")
+VSX_BUILTIN_RAW_CATALOG_PATH = Path("input/vsx/vsxcat.090525.csv")
+VSX_LOCAL_CATALOG_MIN_ROWS = 5_000_000
+
+
+@contextlib.contextmanager
+def _temporary_xmatch_timeout(timeout_sec: float | None):
+    previous_timeout = getattr(XMatch, "TIMEOUT", None)
+    if timeout_sec is not None:
+        XMatch.TIMEOUT = float(timeout_sec)
+    try:
+        yield
+    finally:
+        if timeout_sec is not None and previous_timeout is not None:
+            XMatch.TIMEOUT = previous_timeout
+
+
+def _catalog_neighbor_chunks(coords: pd.DataFrame, chunk_size: int):
+    step = max(1, int(chunk_size))
+    total = (len(coords) + step - 1) // step
+    for chunk_number, start in enumerate(range(0, len(coords), step), start=1):
+        yield chunk_number, total, coords.iloc[start : start + step].copy()
+
+
+def _catalog_neighbor_coord_series(df: pd.DataFrame, axis: str) -> pd.Series:
+    for column in (axis, f"{axis}_deg"):
+        if column in df.columns:
+            values = pd.to_numeric(df[column], errors="coerce")
+            if values.notna().any():
+                return values
+    for path in (
+        f"external_stats.{axis}",
+        f"external_stats.{axis}_deg",
+        f"derived_stats.{axis}",
+        f"derived_stats.{axis}_deg",
+        f"lc_stats.{axis}",
+        f"lc_stats.{axis}_deg",
+    ):
+        layer = path.split(".", 1)[0]
+        if layer not in df.columns:
+            continue
+        values = pd.to_numeric(feature_value_series(df, path), errors="coerce")
+        if values.notna().any():
+            return values
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _catalog_neighbor_coords(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    ra_values = _catalog_neighbor_coord_series(work, "ra")
+    dec_values = _catalog_neighbor_coord_series(work, "dec")
+
+    rows = []
+    for idx, row in work.iterrows():
+        try:
+            ra = float(ra_values.loc[idx])
+            dec = float(dec_values.loc[idx])
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(ra) or not np.isfinite(dec):
+            continue
+        rows.append({
+            "candidate_id": _candidate_cache_id(work, idx),
+            "ra_deg": ra,
+            "dec_deg": dec,
+            "_source_index": idx,
+        })
+    coords = pd.DataFrame(rows)
+    if coords.empty:
+        return pd.DataFrame(columns=["candidate_id", "ra_deg", "dec_deg", "_source_index"])
+    coords["candidate_id"] = coords["candidate_id"].astype(str)
+    return coords.drop_duplicates(subset=["candidate_id"]).reset_index(drop=True)
+
+
+def _row_value(row: pd.Series, names: tuple[str, ...], default=None):
+    lowered = {str(col).lower(): col for col in row.index}
+    for name in names:
+        key = name if name in row.index else lowered.get(name.lower())
+        if key is None:
+            continue
+        value = _xmatch_row_scalar(row, key, default)
+        if value is not None:
+            try:
+                if pd.isna(value):
+                    continue
+            except Exception:
+                pass
+            return value
+    return default
+
+
+def _numeric_row_value(row: pd.Series, names: tuple[str, ...], default=np.nan) -> float:
+    value = _row_value(row, names, default)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if np.isfinite(out) else default
+
+
+def _row_candidate_id(row: pd.Series, idx_to_candidate_id: dict[object, str]) -> str:
+    candidate_id = _row_value(row, ("candidate_id", "CandidateID", "source_id"), "")
+    if _safe_text(candidate_id):
+        return _safe_text(candidate_id)
+    idx_value = _row_value(row, ("_idx",), None)
+    if idx_value in idx_to_candidate_id:
+        return idx_to_candidate_id[idx_value]
+    try:
+        idx_int = int(idx_value)
+    except (TypeError, ValueError):
+        return ""
+    return idx_to_candidate_id.get(idx_int, "")
+
+
+def _coords_with_upload_idx(coords: pd.DataFrame) -> tuple[pd.DataFrame, dict[object, str]]:
+    upload = pd.DataFrame({
+        "_idx": np.arange(len(coords), dtype=int),
+        "ra": coords["ra_deg"].to_numpy(dtype=float),
+        "dec": coords["dec_deg"].to_numpy(dtype=float),
+    })
+    idx_map = dict(zip(upload["_idx"].tolist(), coords["candidate_id"].astype(str).tolist()))
+    return upload, idx_map
+
+
+def _records_from_xmatch_frame(
+    frame: pd.DataFrame,
+    *,
+    catalog: str,
+    class_column: str,
+    idx_to_candidate_id: dict[object, str] | None = None,
+    object_id_keys: tuple[str, ...] = (),
+    object_name_keys: tuple[str, ...] = (),
+    class_keys: tuple[str, ...] = (),
+    period_keys: tuple[str, ...] = (),
+    sep_keys: tuple[str, ...] = ("sep_arcsec", "angDist", "_r", "separation", "Sep"),
+    query_radius_arcsec: float,
+) -> list[dict[str, object]]:
+    if frame is None or frame.empty:
+        return []
+    idx_to_candidate_id = idx_to_candidate_id or {}
+    records = []
+    for _, row in frame.iterrows():
+        candidate_id = _row_candidate_id(row, idx_to_candidate_id)
+        sep = _numeric_row_value(row, sep_keys)
+        if not candidate_id or not np.isfinite(sep):
+            continue
+        records.append(
+            catalog_neighbor_record(
+                candidate_id=candidate_id,
+                catalog=catalog,
+                object_id=_row_value(row, object_id_keys, ""),
+                object_name=_row_value(row, object_name_keys, ""),
+                class_value=_row_value(row, class_keys, ""),
+                class_column=class_column,
+                sep_arcsec=sep,
+                period_days=_row_value(row, period_keys, None),
+                query_radius_arcsec=query_radius_arcsec,
+                raw=row.to_dict(),
+            )
+        )
+    return records
+
+
+def _catalog_column_from_aliases(columns: list[str], aliases: tuple[str, ...]) -> str | None:
+    column_set = set(columns)
+    lowered = {str(col).casefold(): str(col) for col in columns}
+    for alias in aliases:
+        if alias in column_set:
+            return alias
+        found = lowered.get(alias.casefold())
+        if found is not None:
+            return found
+    return None
+
+
+def _parquet_schema_columns(path: Path) -> list[str]:
+    try:
+        import pyarrow.parquet as pq
+
+        return list(pq.read_schema(path).names)
+    except Exception:
+        return list(pd.read_parquet(path).columns)
+
+
+def _parquet_num_rows(path: Path) -> int | None:
+    try:
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        return None
+
+
+def _is_builtin_vsx_catalog_path(path: Path) -> bool:
+    try:
+        return path.expanduser().resolve() == VSX_BUILTIN_ALL_CATALOG_PATH.expanduser().resolve()
+    except Exception:
+        return path == VSX_BUILTIN_ALL_CATALOG_PATH
+
+
+def _validate_vsx_local_catalog_ready(path: Path) -> None:
+    if not _is_builtin_vsx_catalog_path(path):
+        return
+
+    raw_path = VSX_BUILTIN_RAW_CATALOG_PATH
+    if raw_path.exists() and path.stat().st_mtime < raw_path.stat().st_mtime:
+        raise RuntimeError(
+            "VSX local parquet is older than the raw VSX catalog. "
+            "Wait for the download to finish, then rebuild it with "
+            "conda run --no-capture-output -n malca python -u scripts/download_vsx_catalog.py "
+            "--skip-download --overwrite"
+        )
+
+    n_rows = _parquet_num_rows(path)
+    if n_rows is not None and n_rows < VSX_LOCAL_CATALOG_MIN_ROWS:
+        raise RuntimeError(
+            f"VSX local parquet appears incomplete: {path} has {n_rows:,} row(s), "
+            f"expected at least {VSX_LOCAL_CATALOG_MIN_ROWS:,}. "
+            "Wait for the full VSX download/conversion to finish before running the neighbor backfill."
+        )
+
+
+def _iter_parquet_row_groups(path: Path, columns: list[str], *, show_progress: bool):
+    try:
+        import pyarrow.parquet as pq
+
+        parquet_file = pq.ParquetFile(path)
+    except Exception:
+        yield read_parquet_table(path, columns=columns)
+        return
+
+    row_groups = range(parquet_file.num_row_groups)
+    if show_progress:
+        row_groups = tqdm(row_groups, desc="catalog-neighbors:VSX local", unit="rowgroup")
+    for row_group in row_groups:
+        yield parquet_file.read_row_group(int(row_group), columns=columns).to_pandas()
+
+
+def _vsx_variable_status(value: object) -> bool | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        flag = int(float(text))
+    except ValueError:
+        return None
+    if flag in {0, 1}:
+        return True
+    if flag in {2, 3}:
+        return False
+    return None
+
+
+def _collect_vsx_local_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    catalog_path: Path | str = VSX_ALL_CATALOG_PATH,
+    show_progress: bool,
+) -> list[dict[str, object]]:
+    path = Path(catalog_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"VSX local catalog not found: {path}")
+    _validate_vsx_local_catalog_ready(path)
+
+    schema_columns = _parquet_schema_columns(path)
+    ra_col = _catalog_column_from_aliases(schema_columns, ("ra", "RAJ2000", "RAdeg"))
+    dec_col = _catalog_column_from_aliases(schema_columns, ("dec", "DEJ2000", "DEdeg"))
+    if ra_col is None or dec_col is None:
+        raise ValueError(f"VSX local catalog missing RA/Dec columns: {path}")
+
+    id_col = _catalog_column_from_aliases(schema_columns, ("id_vsx", "OID", "oid"))
+    name_col = _catalog_column_from_aliases(schema_columns, ("name", "Name"))
+    class_col = _catalog_column_from_aliases(schema_columns, ("class", "Type", "type", "VarType"))
+    period_col = _catalog_column_from_aliases(schema_columns, ("period", "Period", "Per"))
+    flag_col = _catalog_column_from_aliases(schema_columns, ("var_flag", "V", "flag"))
+    read_columns = []
+    for column in (id_col, name_col, ra_col, dec_col, class_col, period_col, flag_col):
+        if column is not None and column not in read_columns:
+            read_columns.append(column)
+
+    if show_progress:
+        print(f"  catalog-neighbors:vsx: using local VSX catalog {path}", flush=True)
+
+    src_coords = SkyCoord(ra=coords["ra_deg"].values, dec=coords["dec_deg"].values, unit="deg")
+    records: list[dict[str, object]] = []
+    for chunk in _iter_parquet_row_groups(path, read_columns, show_progress=show_progress):
+        if chunk.empty:
+            continue
+        ra_values = pd.to_numeric(chunk[ra_col], errors="coerce").astype(float).to_numpy()
+        dec_values = pd.to_numeric(chunk[dec_col], errors="coerce").astype(float).to_numpy()
+        valid = np.isfinite(ra_values) & np.isfinite(dec_values)
+        if not valid.any():
+            continue
+
+        cat = chunk.loc[valid].reset_index(drop=True)
+        cat_coords = SkyCoord(ra=ra_values[valid], dec=dec_values[valid], unit="deg")
+        idx_cat, idx_src, sep2d, _ = src_coords.search_around_sky(cat_coords, radius_arcsec * u.arcsec)
+        for cat_i, src_i, sep in zip(np.asarray(idx_cat, dtype=int), np.asarray(idx_src, dtype=int), sep2d.arcsec):
+            row = cat.iloc[int(cat_i)]
+            vsx_status = _vsx_variable_status(row.get(flag_col)) if flag_col is not None else None
+            records.append(
+                catalog_neighbor_record(
+                    candidate_id=coords.iloc[int(src_i)]["candidate_id"],
+                    catalog="vsx",
+                    object_id=row.get(id_col, "") if id_col is not None else "",
+                    object_name=row.get(name_col, "") if name_col is not None else "",
+                    class_value=row.get(class_col, "") if class_col is not None else "",
+                    class_column="vsx_class",
+                    sep_arcsec=float(sep),
+                    period_days=row.get(period_col, None) if period_col is not None else None,
+                    is_known_variable=vsx_status,
+                    is_dipper_contaminant=False if vsx_status is False else None,
+                    query_radius_arcsec=radius_arcsec,
+                    raw=row.to_dict(),
+                )
+            )
+    return records
+
+
+def _collect_vsx_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    chunk_size: int,
+    method: Literal["tap", "xmatch"],
+    xmatch_timeout_sec: float | None,
+    show_progress: bool,
+) -> list[dict[str, object]]:
+    local_vsx_path = Path(VSX_ALL_CATALOG_PATH).expanduser()
+    if local_vsx_path.is_file():
+        return _collect_vsx_local_catalog_neighbors(
+            coords,
+            radius_arcsec=radius_arcsec,
+            catalog_path=local_vsx_path,
+            show_progress=show_progress,
+        )
+    if show_progress:
+        print(
+            f"  catalog-neighbors:vsx: local catalog not found at {local_vsx_path}; "
+            f"falling back to {method}",
+            flush=True,
+        )
+
+    if method == "tap":
+        upload, idx_map = _coords_with_upload_idx(coords)
+        result = batch_tap_crossmatch(
+            upload,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table='"B/vsx/vsx"',
+            select_cols='c."OID", c."Name", c."RAJ2000", c."DEJ2000", c."Type", c."Period"',
+            ra_col="RAJ2000",
+            dec_col="DEJ2000",
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=show_progress,
+            desc="catalog-neighbors:VSX TAP",
+            timeout=float(xmatch_timeout_sec or CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC),
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
+        )
+        return _records_from_xmatch_frame(
+            result,
+            catalog="vsx",
+            class_column="vsx_class",
+            idx_to_candidate_id=idx_map,
+            object_id_keys=("OID", "oid"),
+            object_name_keys=("Name", "name"),
+            class_keys=("Type", "type", "VarType"),
+            period_keys=("Period", "period", "Per"),
+            query_radius_arcsec=radius_arcsec,
+        )
+
+    from malca.enrich.neighbor import _query_catalog_bulk
+
+    result = _query_catalog_bulk(
+        coords[["candidate_id", "ra_deg", "dec_deg"]],
+        catalog="B/vsx/vsx",
+        radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        xmatch_timeout_sec=xmatch_timeout_sec,
+        show_progress=show_progress,
+        progress_desc="catalog-neighbors:vsx",
+    )
+    return _records_from_xmatch_frame(
+        result,
+        catalog="vsx",
+        class_column="vsx_class",
+        object_id_keys=("OID", "oid"),
+        object_name_keys=("Name", "name"),
+        class_keys=("Type", "type", "VarType"),
+        period_keys=("Period", "period", "Per"),
+        query_radius_arcsec=radius_arcsec,
+    )
+
+
+def _collect_simbad_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    chunk_size: int,
+    xmatch_timeout_sec: float | None,
+    show_progress: bool,
+) -> list[dict[str, object]]:
+    from malca.enrich.neighbor import XMatchChunkTimeoutError, query_xmatch_chunk
+
+    frames: list[pd.DataFrame] = []
+    for chunk_number, total_chunks, chunk in _catalog_neighbor_chunks(coords, chunk_size):
+        if show_progress:
+            print(
+                f"  catalog-neighbors:simbad: chunk {chunk_number}/{total_chunks} "
+                f"({len(chunk)} rows)",
+                flush=True,
+            )
+        try:
+            chunk_frame = query_xmatch_chunk(
+                chunk[["candidate_id", "ra_deg", "dec_deg"]],
+                cat2="simbad",
+                radius_arcsec=radius_arcsec,
+                timeout_sec=xmatch_timeout_sec,
+            )
+        except XMatchChunkTimeoutError as exc:
+            print(
+                f"Warning: catalog-neighbors:simbad chunk {chunk_number}/{total_chunks} timed out: {exc}",
+                flush=True,
+            )
+            continue
+        except Exception as exc:
+            print(
+                f"Warning: catalog-neighbors:simbad chunk {chunk_number}/{total_chunks} failed: {exc}",
+                flush=True,
+            )
+            continue
+        if show_progress:
+            print(
+                f"  catalog-neighbors:simbad: chunk {chunk_number}/{total_chunks} "
+                f"matched {len(chunk_frame)} row(s)",
+                flush=True,
+            )
+        if not chunk_frame.empty:
+            frames.append(chunk_frame)
+    frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if frame.empty:
+        return []
+
+    col_map = {}
+    has_otype = any(str(c).lower() == "otype" for c in frame.columns)
+    for col in frame.columns:
+        cl = str(col).lower()
+        if cl == "main_id" and col != "main_id":
+            col_map[col] = "main_id"
+        elif cl == "main_type" and not has_otype and col != "otype":
+            col_map[col] = "otype"
+        elif cl == "nbref" and col != "nbref":
+            col_map[col] = "nbref"
+    frame = frame.rename(columns=col_map)
+    if frame.columns.duplicated().any():
+        frame = frame.loc[:, ~frame.columns.duplicated(keep="first")]
+
+    records = []
+    for _, row in frame.iterrows():
+        main_id = _row_value(row, ("main_id",), "")
+        otype = _row_value(row, ("otype", "main_type"), "")
+        sep_value = _row_value(row, ("angDist", "sep_arcsec"), np.nan)
+        main_id, otype, sep = _normalize_simbad_xmatch_fields(row, main_id, otype, sep_value)
+        candidate_id = _row_candidate_id(row, {})
+        if not candidate_id or pd.isna(sep):
+            continue
+        records.append(
+            catalog_neighbor_record(
+                candidate_id=candidate_id,
+                catalog="simbad",
+                object_id=main_id,
+                object_name=main_id,
+                class_value=otype,
+                class_column="simbad_otype",
+                sep_arcsec=sep,
+                query_radius_arcsec=radius_arcsec,
+                raw=row.to_dict(),
+            )
+        )
+    return records
+
+
+def _collect_asassn_local_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    local_csv: Path | str | None,
+) -> list[dict[str, object]]:
+    path = resolve_asassn_var_local_csv(local_csv)
+    cat = _load_asassn_local_catalog(path)
+    if cat.empty:
+        return []
+    src_coords = SkyCoord(ra=coords["ra_deg"].values, dec=coords["dec_deg"].values, unit="deg")
+    cat_coords = SkyCoord(
+        ra=cat["RAJ2000"].to_numpy(dtype=float),
+        dec=cat["DEJ2000"].to_numpy(dtype=float),
+        unit="deg",
+    )
+    idx_cat, idx_src, sep2d, _ = src_coords.search_around_sky(cat_coords, radius_arcsec * u.arcsec)
+    records = []
+    type_col = "ML_classification" if "ML_classification" in cat.columns else "Type"
+    period_col = "Period" if "Period" in cat.columns else "Per"
+    for cat_i, src_i, sep in zip(np.asarray(idx_cat, dtype=int), np.asarray(idx_src, dtype=int), sep2d.arcsec):
+        row = cat.iloc[int(cat_i)]
+        records.append(
+            catalog_neighbor_record(
+                candidate_id=coords.iloc[int(src_i)]["candidate_id"],
+                catalog="asassn_variables",
+                object_id=row.get("ID", ""),
+                object_name=row.get("ID", ""),
+                class_value=row.get(type_col, ""),
+                class_column="asassn_var_type",
+                sep_arcsec=float(sep),
+                period_days=row.get(period_col, None),
+                query_radius_arcsec=radius_arcsec,
+                raw=row.to_dict(),
+            )
+        )
+    return records
+
+
+def _collect_asassn_tap_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    chunk_size: int,
+    xmatch_timeout_sec: float | None,
+    show_progress: bool,
+) -> list[dict[str, object]]:
+    upload, idx_map = _coords_with_upload_idx(coords)
+    result = batch_tap_crossmatch(
+        upload,
+        tap_url=VIZIER_TAP_URL,
+        catalog_table=f'"{ASASSN_VAR_CATALOG}"',
+        select_cols='c."ASASSN-V", c."Per", c."Type"',
+        ra_col="RAJ2000",
+        dec_col="DEJ2000",
+        match_radius_arcsec=radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=4,
+        verbose=show_progress,
+        desc="catalog-neighbors:ASAS-SN II/366 TAP",
+        timeout=float(xmatch_timeout_sec or CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC),
+        raise_on_all_failed=True,
+        raise_on_failed_chunk=True,
+    )
+    return _records_from_xmatch_frame(
+        result,
+        catalog="asassn_variables",
+        class_column="asassn_var_type",
+        idx_to_candidate_id=idx_map,
+        object_id_keys=("ASASSN-V", "ASASSN_V", "ASASSNV"),
+        object_name_keys=("ASASSN-V", "ASASSN_V", "ASASSNV"),
+        class_keys=("Type", "TYPE"),
+        period_keys=("Per", "PER"),
+        query_radius_arcsec=radius_arcsec,
+    )
+
+
+def _collect_microlensing_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+) -> list[dict[str, object]]:
+    catalog = fetch_microlensing_event_catalog(show_tqdm=False)
+    if catalog.empty:
+        return []
+    src_coords = SkyCoord(ra=coords["ra_deg"].values, dec=coords["dec_deg"].values, unit="deg")
+    cat_coords = SkyCoord(
+        ra=catalog["ra"].to_numpy(dtype=float),
+        dec=catalog["dec"].to_numpy(dtype=float),
+        unit="deg",
+    )
+    idx_cat, idx_src, sep2d, _ = src_coords.search_around_sky(cat_coords, radius_arcsec * u.arcsec)
+    records = []
+    for cat_i, src_i, sep in zip(np.asarray(idx_cat, dtype=int), np.asarray(idx_src, dtype=int), sep2d.arcsec):
+        row = catalog.iloc[int(cat_i)]
+        records.append(
+            catalog_neighbor_record(
+                candidate_id=coords.iloc[int(src_i)]["candidate_id"],
+                catalog="microlensing_catalogs",
+                object_id=row.get("event_id", ""),
+                object_name=row.get("alias", "") or row.get("event_id", ""),
+                class_value=row.get("source", ""),
+                class_column="microlens_catalog",
+                sep_arcsec=float(sep),
+                period_days=row.get("timescale_days", None),
+                is_known_variable=True,
+                query_radius_arcsec=radius_arcsec,
+                raw=row.to_dict(),
+            )
+        )
+    return records
+
+
+def _collect_ztf_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    chunk_size: int,
+    method: Literal["tap", "xmatch"],
+    xmatch_timeout_sec: float | None,
+    show_progress: bool,
+) -> list[dict[str, object]]:
+    if method == "xmatch":
+        from malca.enrich.neighbor import XMatchChunkTimeoutError, query_xmatch_chunk
+
+        frames: list[pd.DataFrame] = []
+        for chunk_number, total_chunks, chunk in _catalog_neighbor_chunks(coords, chunk_size):
+            if show_progress:
+                print(
+                    f"  catalog-neighbors:ztf_periodic_variables: chunk "
+                    f"{chunk_number}/{total_chunks} ({len(chunk)} rows)",
+                    flush=True,
+                )
+            try:
+                chunk_frame = query_xmatch_chunk(
+                    chunk[["candidate_id", "ra_deg", "dec_deg"]],
+                    cat2="vizier:J/ApJS/249/18/table2",
+                    radius_arcsec=radius_arcsec,
+                    timeout_sec=xmatch_timeout_sec,
+                )
+            except XMatchChunkTimeoutError as exc:
+                print(
+                    "Warning: catalog-neighbors:ztf_periodic_variables "
+                    f"chunk {chunk_number}/{total_chunks} timed out: {exc}",
+                    flush=True,
+                )
+                continue
+            except Exception as exc:
+                print(
+                    "Warning: catalog-neighbors:ztf_periodic_variables "
+                    f"chunk {chunk_number}/{total_chunks} failed: {exc}",
+                    flush=True,
+                )
+                continue
+            if show_progress:
+                print(
+                    f"  catalog-neighbors:ztf_periodic_variables: chunk "
+                    f"{chunk_number}/{total_chunks} matched {len(chunk_frame)} row(s)",
+                    flush=True,
+                )
+            if not chunk_frame.empty:
+                frames.append(chunk_frame)
+        result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        idx_map: dict[object, str] = {}
+    else:
+        upload, idx_map = _coords_with_upload_idx(coords)
+        result = batch_tap_crossmatch(
+            upload,
+            tap_url=VIZIER_TAP_URL,
+            catalog_table='"J/ApJS/249/18/table2"',
+            select_cols='c."Type", c."Per", c."gAmp", c."rAmp"',
+            ra_col="RAJ2000",
+            dec_col="DEJ2000",
+            match_radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            n_workers=4,
+            verbose=show_progress,
+            desc="catalog-neighbors:ZTF vars TAP",
+            timeout=float(xmatch_timeout_sec or CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC),
+            raise_on_all_failed=True,
+            raise_on_failed_chunk=True,
+        )
+    return _records_from_xmatch_frame(
+        result,
+        catalog="ztf_periodic_variables",
+        class_column="ztf_var_type",
+        idx_to_candidate_id=idx_map,
+        object_id_keys=("ZTF", "Name", "ID"),
+        object_name_keys=("ZTF", "Name", "ID"),
+        class_keys=("Type", "TYPE"),
+        period_keys=("Per", "PER"),
+        query_radius_arcsec=radius_arcsec,
+    )
+
+
+def _collect_tns_catalog_neighbors(
+    coords: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    local_csvs: list[Path] | None = None,
+) -> list[dict[str, object]]:
+    paths = list(local_csvs) if local_csvs else TNS_LOCAL_CSVS
+    loaded = _load_tns_catalog(paths)
+    if loaded is None:
+        return []
+    cat, cat_coord = loaded
+    src_coord = SkyCoord(ra=coords["ra_deg"].values, dec=coords["dec_deg"].values, unit="deg")
+    idx_cat, idx_src, sep2d, _ = src_coord.search_around_sky(cat_coord, radius_arcsec * u.arcsec)
+    records = []
+    for cat_i, src_i, sep in zip(np.asarray(idx_cat, dtype=int), np.asarray(idx_src, dtype=int), sep2d.arcsec):
+        row = cat.iloc[int(cat_i)]
+        records.append(
+            catalog_neighbor_record(
+                candidate_id=coords.iloc[int(src_i)]["candidate_id"],
+                catalog="tns",
+                object_id=row.get("name", ""),
+                object_name=row.get("name", ""),
+                class_value=row.get("type", ""),
+                class_column="tns_type",
+                sep_arcsec=float(sep),
+                is_known_variable=True,
+                query_radius_arcsec=radius_arcsec,
+                raw=row.to_dict(),
+            )
+        )
+    return records
+
+
+def collect_catalog_neighbors(
+    df: pd.DataFrame,
+    *,
+    radius_arcsec: float = DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
+    chunk_size: int = CATALOG_NEIGHBOR_DEFAULT_CHUNK_SIZE,
+    method: Literal["tap", "xmatch"] = "xmatch",
+    catalogs: tuple[str, ...] | list[str] | None = None,
+    local_asassn_csv: Path | str | None = None,
+    xmatch_timeout_sec: float | None = CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC,
+    show_progress: bool = False,
+) -> pd.DataFrame:
+    """Collect all review-relevant catalog neighbors within ``radius_arcsec``."""
+    coords = _catalog_neighbor_coords(df)
+    if coords.empty:
+        if show_progress:
+            print("Catalog neighbors: 0 candidates with usable coordinates", flush=True)
+        return normalize_catalog_neighbor_frame(None)
+
+    radius_arcsec = float(radius_arcsec)
+    selected = tuple(catalogs or CATALOG_NEIGHBOR_V1_CATALOGS)
+    all_records: list[dict[str, object]] = []
+    if show_progress:
+        timeout_text = "none" if xmatch_timeout_sec is None else f"{float(xmatch_timeout_sec):g}s"
+        print(
+            f"Catalog neighbors: {len(coords)} candidate(s), radius={radius_arcsec:g}\"; "
+            f"catalogs={', '.join(selected)}; chunk_size={int(chunk_size)}; "
+            f"xmatch_timeout={timeout_text}",
+            flush=True,
+        )
+
+    def _run(label: str, fn: Callable[[], list[dict[str, object]]]) -> None:
+        if label not in selected:
+            return
+        t0 = time.perf_counter()
+        if show_progress:
+            print(f"Catalog neighbors/{label}: starting", flush=True)
+        try:
+            records = fn()
+        except Exception as exc:
+            print(f"Warning: catalog-neighbor collection failed for {label}: {exc}", flush=True)
+            return
+        print(
+            f"Catalog neighbors/{label}: {len(records)} row(s) "
+            f"in {time.perf_counter() - t0:.1f}s",
+            flush=True,
+        )
+        all_records.extend(records)
+
+    _run(
+        "vsx",
+        lambda: _collect_vsx_catalog_neighbors(
+            coords,
+            radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            method=method,
+            xmatch_timeout_sec=xmatch_timeout_sec,
+            show_progress=show_progress,
+        ),
+    )
+    _run(
+        "simbad",
+        lambda: _collect_simbad_catalog_neighbors(
+            coords,
+            radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            xmatch_timeout_sec=xmatch_timeout_sec,
+            show_progress=show_progress,
+        ),
+    )
+    _run(
+        "asassn_variables",
+        lambda: (
+            _collect_asassn_local_catalog_neighbors(
+                coords,
+                radius_arcsec=radius_arcsec,
+                local_csv=local_asassn_csv,
+            )
+            if method == "xmatch"
+            else _collect_asassn_tap_catalog_neighbors(
+                coords,
+                radius_arcsec=radius_arcsec,
+                chunk_size=chunk_size,
+                xmatch_timeout_sec=xmatch_timeout_sec,
+                show_progress=show_progress,
+            )
+        ),
+    )
+    _run(
+        "ztf_periodic_variables",
+        lambda: _collect_ztf_catalog_neighbors(
+            coords,
+            radius_arcsec=radius_arcsec,
+            chunk_size=chunk_size,
+            method=method,
+            xmatch_timeout_sec=xmatch_timeout_sec,
+            show_progress=show_progress,
+        ),
+    )
+    _run(
+        "tns",
+        lambda: _collect_tns_catalog_neighbors(coords, radius_arcsec=radius_arcsec),
+    )
+    _run(
+        "microlensing_catalogs",
+        lambda: _collect_microlensing_catalog_neighbors(coords, radius_arcsec=radius_arcsec),
+    )
+    out = normalize_catalog_neighbor_frame(all_records)
+    if show_progress:
+        print(f"Catalog neighbors: normalized {len(out)} total row(s)", flush=True)
+    return out
 
 
 # =============================================================================
@@ -5836,6 +6691,8 @@ def vet_candidates(
     skip_existing: bool = False,
     cache_dir: Path | str | None = None,
     refresh_cache: bool = False,
+    catalog_neighbor_output_dir: Path | str | None = None,
+    catalog_neighbor_radius_arcsec: float = DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
 ) -> pd.DataFrame:
     """
     Run all vetting queries on a candidate DataFrame.
@@ -5866,6 +6723,10 @@ def vet_candidates(
         the input table. Checkpoints are always skipped this way.
     cache_dir : Directory for persistent vetting caches.
     refresh_cache : Force cache-backed modules to requery remote services.
+    catalog_neighbor_output_dir : If set, write long-form catalog-neighbor
+        evidence to ``catalog_neighbors.parquet`` in this directory.
+    catalog_neighbor_radius_arcsec : Query radius for long-form catalog
+        neighbors. The review UI can filter at any radius up to this value.
 
     Returns
     -------
@@ -6038,6 +6899,41 @@ def vet_candidates(
         _run_module("NEOWISE LCs", query_neowise_lightcurves,
                     output_dir=neowise_output_dir, workers=neowise_workers,
                     refresh_cache=refresh_cache)
+
+    if catalog_neighbor_output_dir is not None:
+        neighbor_catalogs = ["vsx"]
+        if run_simbad:
+            neighbor_catalogs.append("simbad")
+        if run_asassn_var:
+            neighbor_catalogs.append("asassn_variables")
+        if run_ztf_var:
+            neighbor_catalogs.append("ztf_periodic_variables")
+        if run_tns:
+            neighbor_catalogs.append("tns")
+        if run_microlens:
+            neighbor_catalogs.append("microlensing_catalogs")
+
+        neighbor_dir = Path(catalog_neighbor_output_dir)
+        neighbor_path = neighbor_dir / CATALOG_NEIGHBOR_FILENAME
+        try:
+            t0 = time.perf_counter()
+            catalog_neighbors = collect_catalog_neighbors(
+                df,
+                radius_arcsec=catalog_neighbor_radius_arcsec,
+                chunk_size=1000,
+                method=method,
+                catalogs=neighbor_catalogs,
+                show_progress=False,
+            )
+            neighbor_dir.mkdir(parents=True, exist_ok=True)
+            write_parquet_table(catalog_neighbors, neighbor_path)
+            print(
+                f"  Catalog neighbors saved to {neighbor_path} "
+                f"({len(catalog_neighbors)} rows, radius={float(catalog_neighbor_radius_arcsec):g}\") "
+                f"in {time.perf_counter() - t0:.1f}s\n"
+            )
+        except Exception as exc:
+            print(f"Warning: failed to write catalog-neighbor sidecar: {exc}")
 
     # Summary
     _print_vetting_summary(df, total_start)

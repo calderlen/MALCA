@@ -97,7 +97,12 @@ from malca.products.run_metadata import (
     load_summary_state,
     preserve_imported_run_snapshots,
 )
-from malca.review.store import db_connect, import_candidates
+from malca.catalogs.evidence import (
+    CATALOG_NEIGHBOR_FILENAME,
+    CATALOG_NEIGHBOR_OUTPUT_SUBDIR,
+    DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
+)
+from malca.review.store import db_connect, import_candidates, upsert_catalog_neighbor_rows
 from concurrent.futures import ProcessPoolExecutor
 from malca.core.stats import compute_stats, _enrich_row_worker
 from malca.stv.tag import RAW_MEDIAN_SUSPECT_COL, apply_tags, filter_camera_medians
@@ -258,6 +263,7 @@ RUN_REUSE_PARAM_ATTRS = (
     "vetting_min_score",
     "vetting_simbad_radius",
     "vetting_asassn_radius",
+    "vetting_catalog_neighbor_radius",
     "no_vetting_simbad",
     "no_vetting_gaia_var",
     "no_vetting_gaia_epoch",
@@ -473,6 +479,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "vetting_min_score": None,
     "vetting_simbad_radius": 5.0,
     "vetting_asassn_radius": 5.0,
+    "vetting_catalog_neighbor_radius": DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
     "no_vetting_simbad": False,
     "no_vetting_gaia_var": False,
     "no_vetting_gaia_epoch": False,
@@ -532,6 +539,11 @@ def load_side_table(path: Path) -> pd.DataFrame:
 
 def load_passing_table(path: Path, *, columns: list[str] | None = None) -> pd.DataFrame:
     return expand_feature_layers(_select_passing_candidates(read_passing_feature_table(path, columns=columns)))
+
+
+def load_review_import_table(path: Path) -> pd.DataFrame:
+    """Read passing candidates for review import without flattening feature layers."""
+    return _select_passing_candidates(read_feature_table(path))
 
 
 def _effective_enrich_workers(args: argparse.Namespace) -> tuple[int, str | None]:
@@ -2116,6 +2128,7 @@ def main():
             "vetting_min_score": args.vetting_min_score,
             "vetting_simbad_radius": args.vetting_simbad_radius,
             "vetting_asassn_radius": args.vetting_asassn_radius,
+            "vetting_catalog_neighbor_radius": args.vetting_catalog_neighbor_radius,
             # Step 13b/13c: Extended external enrichment
             "run_external_lcs": args.run_external_lcs,
             "run_multi_survey_features": args.run_multi_survey_features,
@@ -3512,6 +3525,7 @@ def main():
                     log(f"Filtered to {len(df_vet)} candidates with score >= {args.vetting_min_score} (from {before})")
 
                 vetting_checkpoint = results_dir / "lc_events_vetting_CHECKPOINT.parquet"
+                catalog_neighbor_output_dir = results_dir / CATALOG_NEIGHBOR_OUTPUT_SUBDIR
                 df_vet = vet_candidates(
                     df_vet,
                     run_simbad=not args.no_vetting_simbad,
@@ -3528,11 +3542,16 @@ def main():
                     asassn_radius_arcsec=args.vetting_asassn_radius,
                     atlas_token=args.vetting_atlas_token,
                     checkpoint_path=vetting_checkpoint,
+                    catalog_neighbor_output_dir=catalog_neighbor_output_dir,
+                    catalog_neighbor_radius_arcsec=args.vetting_catalog_neighbor_radius,
                 )
 
                 vetting_output = results_dir / "lc_events_vetted.parquet"
                 save_table(df_vet, vetting_output)
                 log(f"Vetting output: {vetting_output}")
+                catalog_neighbor_path = catalog_neighbor_output_dir / CATALOG_NEIGHBOR_FILENAME
+                if catalog_neighbor_path.exists():
+                    log(f"Catalog-neighbor sidecar: {catalog_neighbor_path}")
 
                 def _count_col(col, empty=""):
                     s = df_vet.get(col, pd.Series(dtype=str))
@@ -3549,6 +3568,8 @@ def main():
                     "chandra_xray_det": int(df_vet.get("chandra_det", pd.Series(dtype=bool)).sum()),
                     "structured_xray_det": int(df_vet.get("xray_det", pd.Series(dtype=bool)).sum()),
                     "likely_known": int(df_vet.get("vetting_likely_known", pd.Series(dtype=bool)).sum()),
+                    "catalog_neighbor_radius_arcsec": float(args.vetting_catalog_neighbor_radius),
+                    "catalog_neighbor_output": str(catalog_neighbor_path),
                 }
                 with open(run_summary_file, "w") as f:
                     json.dump(summary, f, indent=2, default=str)
@@ -3657,7 +3678,7 @@ def main():
 
             if _import_file is not None:
                 conn = db_connect(review_db_path)
-                df_import = load_passing_table(_import_file)
+                df_import = load_review_import_table(_import_file)
                 if df_import.empty:
                     conn.close()
                     log(f"No passing candidates to import into {review_db_path}")
@@ -3671,6 +3692,24 @@ def main():
                         characterize_before_import=False,
                         vet_before_import=False,
                     )
+                    catalog_neighbor_path = (
+                        results_dir
+                        / CATALOG_NEIGHBOR_OUTPUT_SUBDIR
+                        / CATALOG_NEIGHBOR_FILENAME
+                    )
+                    if catalog_neighbor_path.exists():
+                        try:
+                            catalog_neighbor_rows = load_side_table(catalog_neighbor_path)
+                            n_catalog_neighbors = upsert_catalog_neighbor_rows(
+                                conn,
+                                catalog_neighbor_rows,
+                            )
+                            log(
+                                f"Imported {n_catalog_neighbors} catalog-neighbor rows "
+                                f"into {review_db_path}"
+                            )
+                        except Exception as catalog_neighbor_exc:
+                            log(f"Warning: catalog-neighbor review import failed: {catalog_neighbor_exc}")
                     if sed_photometry_output.exists():
                         try:
                             from malca.review.sed import upsert_sed_rows

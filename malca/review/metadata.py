@@ -6,7 +6,7 @@ import numbers
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlencode
 
 import pandas as pd
 
@@ -359,6 +359,10 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("VSX class", "vsx_class"),
         ("VSX period (d)", "vsx_period"),
         ("VSX sep (arcsec)", "vsx_sep_arcsec"),
+        ("Nearby VSX dipper contaminant", "nearby_vsx_dipper_contaminant"),
+        ("Nearby VSX dipper class", "nearby_vsx_dipper_class"),
+        ("Nearby VSX dipper sep (arcsec)", "nearby_vsx_dipper_sep_arcsec"),
+        ("Nearby VSX dipper period (d)", "nearby_vsx_dipper_period"),
         ("SIMBAD ID", "simbad_main_id"),
         ("SIMBAD type", "simbad_otype"),
         ("SIMBAD refs", "simbad_nbref"),
@@ -868,10 +872,12 @@ _CATALOG_CONTEXT_TEXT_FIELDS = (
     "alerce_lc_class",
     "alerce_stamp_class",
     "yso_class",
+    "nearby_vsx_dipper_class",
     "catalog_source",
 )
 _CATALOG_CONTEXT_BOOL_FIELDS = (
     "microlens_match",
+    "nearby_vsx_dipper_contaminant",
     "gaia_var_flag",
     "gaia_epoch_available",
     "period_vsx_match",
@@ -883,6 +889,8 @@ _CATALOG_CONTEXT_BOOL_FIELDS = (
 _CATALOG_CONTEXT_NUMERIC_FIELDS = (
     "vsx_period",
     "vsx_sep_arcsec",
+    "nearby_vsx_dipper_period",
+    "nearby_vsx_dipper_sep_arcsec",
     "microlens_te_days",
     "microlens_sep_arcsec",
     "asassn_var_period",
@@ -1061,6 +1069,7 @@ _FIXED_DECIMAL_KEYS: dict[str, int] = {
     "baseline_mag": 3,
     "phot_g_mean_mag": 3,
     "vsx_sep_arcsec": 2,
+    "nearby_vsx_dipper_sep_arcsec": 2,
     "simbad_sep_arcsec": 2,
     "erosita_sep_arcsec": 2,
     "chandra_sep_arcsec": 2,
@@ -1339,7 +1348,7 @@ def _jd_to_mpc_iso(jd: float) -> str | None:
 
 def build_external_lookup_links(
     payload: dict[str, Any],
-    radius_arcsec: float = 10.0,
+    radius_arcsec: float = 30.0,
 ) -> list[tuple[str, str]]:
     """Build ``(label, url)`` pairs for external astronomical services.
 
@@ -1411,9 +1420,25 @@ def build_external_lookup_links(
 
     # -- AAVSO VSX ------------------------------------------------------------
     if has_coords:
+        vsx_query = urlencode(
+            {
+                "view": "results.submit1",
+                "ql": "1",
+                "getCoordinates": "0",
+                "plotType": "Search",
+                "targetcenter": f"{ra} {dec}",
+                "format": "d",
+                "fieldsize": radius_arcsec,
+                "fieldunit": "3",
+                "geometry": "r",
+                "order": "9",
+                "filter[]": ["0", "1", "2", "3"],
+            },
+            doseq=True,
+        )
         links.append((
             "VSX",
-            f"https://www.aavso.org/vsx/index.php?view=results.get&coords={ra}+{dec}&format=d&num=1",
+            f"https://vsx.aavso.org/index.php?{vsx_query}",
         ))
 
     # -- ALeRCE ---------------------------------------------------------------

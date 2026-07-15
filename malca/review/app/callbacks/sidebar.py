@@ -44,6 +44,11 @@ _TEXT_STATES: list[tuple[str, str]] = []
 _SELECT_STATES: list[tuple[str, str]] = []
 _QUEUE_FILTER_APP_STATE_KEY = "dash_queue_filter_ui_state_v1"
 _REVIEW_GUI_STATE_APP_STATE_KEY = "dash_review_gui_state_v1"
+_VETTING_RADIUS_STATE = ('vetting-radius-arcsec', 'catalog_neighbor_radius_arcsec')
+_VETTING_POLICY_STATES = (
+    ('vetting-known-variables-policy', 'exclude_known_catalog_neighbors'),
+    ('vetting-dipper-contaminants-policy', 'exclude_dipper_catalog_neighbors'),
+)
 
 for _grp_name, _grp_items in _SIDEBAR_GROUPS:
     for _ftype, _col in _grp_items:
@@ -64,6 +69,8 @@ _FILTER_VALUE_STATES = (
     [State('filter-unreviewed', 'value'),
      State('filter-failed', 'value'),
      State('select-filter-mode', 'value')]
+    + [State(_VETTING_RADIUS_STATE[0], 'value')]
+    + [State(cid, 'value') for cid, _ in _VETTING_POLICY_STATES]
     + [State(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [State(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [State(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -76,6 +83,8 @@ _FILTER_VALUE_INPUTS = (
     [Input('filter-unreviewed', 'value'),
      Input('filter-failed', 'value'),
      Input('select-filter-mode', 'value')]
+    + [Input(_VETTING_RADIUS_STATE[0], 'value')]
+    + [Input(cid, 'value') for cid, _ in _VETTING_POLICY_STATES]
     + [Input(cid, 'value') for cid, _ in _BOOL_MODE_STATES]
     + [Input(cid, 'value') for cid, _ in _NUM_INPUT_STATES]
     + [Input(cid, 'value') for cid, _ in _TEXT_STATES]
@@ -88,6 +97,8 @@ _FILTER_VALUE_OUTPUTS = (
     [Output('filter-unreviewed', 'value', allow_duplicate=True),
      Output('filter-failed', 'value', allow_duplicate=True),
      Output('select-filter-mode', 'value', allow_duplicate=True)]
+    + [Output(_VETTING_RADIUS_STATE[0], 'value', allow_duplicate=True)]
+    + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _VETTING_POLICY_STATES]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _BOOL_MODE_STATES]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _NUM_INPUT_STATES]
     + [Output(cid, 'value', allow_duplicate=True) for cid, _ in _TEXT_STATES]
@@ -103,5 +114,4 @@ _TEXT_OPTION_INPUTS = [Input(cid, 'options') for cid, _ in _TEXT_STATES]
 _SELECT_OPTION_INPUTS = [Input(cid, 'options') for cid, _ in _SELECT_STATES]
 _TEXT_VALUE_STATES = [State(cid, 'value') for cid, _ in _TEXT_STATES]
 _SELECT_VALUE_STATES = [State(cid, 'value') for cid, _ in _SELECT_STATES]
-
 

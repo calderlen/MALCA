@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
+from urllib.parse import parse_qs, urlparse
 
 
 def _install_review_app_import_stubs() -> None:
@@ -37,6 +38,7 @@ def _install_review_app_import_stubs() -> None:
 
 _install_review_app_import_stubs()
 
+from malca.review.metadata import build_external_lookup_links
 from malca.review.app import _render_vetting_banner
 from malca.vsx.nearby import VsxNeighbor
 
@@ -80,6 +82,28 @@ def _component_hrefs(node) -> list[str]:
     hrefs = [str(href)] if href else []
     hrefs.extend(_component_hrefs(getattr(node, "children", None)))
     return hrefs
+
+
+def test_external_lookup_vsx_link_uses_arcsec_search_with_distance_order() -> None:
+    default_url = dict(build_external_lookup_links({"ra": 10.0, "dec": -20.0}))["VSX"]
+    assert parse_qs(urlparse(default_url).query)["fieldsize"] == ["30.0"]
+
+    links = build_external_lookup_links({"ra": 10.0, "dec": -20.0}, radius_arcsec=12.5)
+    vsx_url = dict(links)["VSX"]
+    parsed = urlparse(vsx_url)
+    query = parse_qs(parsed.query)
+
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "vsx.aavso.org"
+    assert parsed.path == "/index.php"
+    assert query["view"] == ["results.submit1"]
+    assert query["targetcenter"] == ["10.0 -20.0"]
+    assert query["format"] == ["d"]
+    assert query["fieldsize"] == ["12.5"]
+    assert query["fieldunit"] == ["3"]
+    assert query["geometry"] == ["r"]
+    assert query["order"] == ["9"]
+    assert query["filter[]"] == ["0", "1", "2", "3"]
 
 
 def test_vetting_banner_does_not_mark_gaia_flag_only_as_known() -> None:
@@ -161,7 +185,7 @@ def test_vetting_banner_renders_nearby_vsx_as_informational_panel(monkeypatch) -
         assert ra == 10.0
         assert dec == 20.0
         assert limit == 3
-        assert radius_arcsec == 60.0
+        assert radius_arcsec == 12.0
         return [
             VsxNeighbor(
                 sep_arcsec=1.23,
@@ -194,7 +218,8 @@ def test_vetting_banner_renders_nearby_vsx_as_informational_panel(monkeypatch) -
             "vetting_likely_known": False,
             "ra": 10.0,
             "dec": 20.0,
-        }
+        },
+        radius_arcsec=12.0,
     )
 
     text = " ".join(_component_text(banner))

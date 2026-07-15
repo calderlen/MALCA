@@ -678,7 +678,10 @@ def _vetting_known_filter_preset(
         bool_values = ['False' for _col in VETTING_KNOWN_BOOL_FILTERS]
     elif policy == 'dipper_contaminants':
         predicate = is_dipper_contaminant_type_value
-        bool_values = ['Any' for _col in VETTING_KNOWN_BOOL_FILTERS]
+        bool_values = [
+            'False' if _col == 'nearby_vsx_dipper_contaminant' else 'Any'
+            for _col in VETTING_KNOWN_BOOL_FILTERS
+        ]
     else:
         raise ValueError(f"Unknown vetting known filter policy: {policy}")
 
@@ -768,21 +771,52 @@ def _make_filter_group(name: str, items: list, *, default_open: bool = False):
     if name == 'Vetting':
         children.append(
             html.Div([
-                html.Button(
-                    'Exclude Known Variables',
-                    id='vetting-known-variables-btn',
-                    n_clicks=0,
-                    className=_vetting_filter_toggle_button_class(False),
-                    title='Toggle exclusion of definite known variable or transient catalog labels while keeping candidate and generic SIMBAD labels visible.',
-                ),
-                html.Button(
-                    'Exclude Dipper Contaminants',
-                    id='vetting-dipper-contaminants-btn',
-                    n_clicks=0,
-                    className=_vetting_filter_toggle_button_class(False),
-                    title='Toggle exclusion of definite catalog labels for known dippers or common dipper mimics while keeping uncertain labels visible.',
-                ),
-            ], style={'display': 'flex', 'gap': '6px', 'flexWrap': 'wrap', 'margin-bottom': '6px'})
+                html.Div([
+                    html.Label(
+                        'Vetting radius (arcsec):',
+                        htmlFor='vetting-radius-arcsec',
+                        style={'marginRight': '6px', 'fontSize': '11px', 'fontWeight': 600},
+                    ),
+                    dcc.Input(
+                        id='vetting-radius-arcsec',
+                        type='number',
+                        value=DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC,
+                        min=0,
+                        max=MAX_REVIEW_VETTING_RADIUS_ARCSEC,
+                        step=1,
+                        debounce=True,
+                        style={'width': '72px', 'fontSize': '11px'},
+                    ),
+                    dcc.Checklist(
+                        id='vetting-known-variables-policy',
+                        options=[{'label': '', 'value': 'yes'}],
+                        value=[],
+                        style={'display': 'none'},
+                    ),
+                    dcc.Checklist(
+                        id='vetting-dipper-contaminants-policy',
+                        options=[{'label': '', 'value': 'yes'}],
+                        value=[],
+                        style={'display': 'none'},
+                    ),
+                ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '6px'}),
+                html.Div([
+                    html.Button(
+                        'Exclude Known Variables',
+                        id='vetting-known-variables-btn',
+                        n_clicks=0,
+                        className=_vetting_filter_toggle_button_class(False),
+                        title='Toggle exclusion of catalog-neighbor known variables/transients within the selected vetting radius.',
+                    ),
+                    html.Button(
+                        'Exclude Dipper Contaminants',
+                        id='vetting-dipper-contaminants-btn',
+                        n_clicks=0,
+                        className=_vetting_filter_toggle_button_class(False),
+                        title='Toggle exclusion of catalog-neighbor dipper contaminants within the selected vetting radius.',
+                    ),
+                ], style={'display': 'flex', 'gap': '6px', 'flexWrap': 'wrap'}),
+            ], style={'margin-bottom': '6px'})
         )
     for ftype, col in items:
         if ftype == 'bool':

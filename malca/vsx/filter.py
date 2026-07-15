@@ -91,6 +91,21 @@ vsx_columns = ["id_vsx",
 tqdm.pandas(desc="Filtering VSX by class")
 
 
+VSX_FLOAT_COLUMNS = ["ra", "dec", "mag_max", "mag_min", "epoch", "period"]
+VSX_INTEGER_COLUMNS = [
+    "id_vsx",
+    "var_flag",
+    "l_max",
+    "u_max",
+    "f_min",
+    "l_min",
+    "u_min",
+    "u_epoch",
+    "l_period",
+    "u_period",
+]
+
+
 EXCLUDE = set([
                                                    
     "E","EA","EB","E-DO","EP","EW","EC","ED","ESD",                     
@@ -244,11 +259,19 @@ def filter_vsx_classes(var_string):
 def load_vsx_catalog(path: Path | str = DEFAULT_VSX_FILE) -> pd.DataFrame:
     """Load the raw VSX catalog and coerce numeric columns."""
     df = pd.read_fwf(path, colspecs=colspecs, names=vsx_columns, dtype=str)
-    for col in ["ra", "dec", "mag_max", "mag_min", "epoch", "period"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ["id_vsx", "var_flag", "l_max", "u_max", "f_min", "l_min", "u_min", "u_epoch", "l_period", "u_period"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-    return df
+    return coerce_vsx_catalog_columns(df)
+
+
+def coerce_vsx_catalog_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Coerce raw VSX fixed-width fields to MALCA's expected dtypes."""
+    out = df.copy()
+    for col in VSX_FLOAT_COLUMNS:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in VSX_INTEGER_COLUMNS:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+    return out
 
 
 def normalize_vsx_catalog(df_vsx: pd.DataFrame) -> pd.DataFrame:

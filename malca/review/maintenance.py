@@ -12,14 +12,22 @@ from astropy.coordinates import SkyCoord
 import numpy as np
 import pandas as pd
 
-from malca.catalogs.evidence import normalize_catalog_evidence, normalize_catalog_evidence_record
+from malca.catalogs.evidence import (
+    CATALOG_NEIGHBOR_FILENAME,
+    CATALOG_NEIGHBOR_OUTPUT_SUBDIR,
+    DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC,
+    normalize_catalog_evidence,
+    normalize_catalog_evidence_record,
+)
 from malca.config import VSX_CROSSMATCH_PATH, VSX_MAX_SEP_ARCSEC, VSX_RAW_CATALOG_PATH
 from malca.review.store import (
     db_connect,
+    get_candidate_payload,
     load_candidates_file,
     merge_candidate_results,
     merge_vetting_results,
     replace_candidate_payload_fields,
+    upsert_catalog_neighbor_rows,
 )
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
@@ -606,6 +614,10 @@ CATALOG_EVIDENCE_COLUMNS = (
     "vsx_sep_arcsec",
     "vsx_period",
     "vsx_class",
+    "nearby_vsx_dipper_contaminant",
+    "nearby_vsx_dipper_class",
+    "nearby_vsx_dipper_sep_arcsec",
+    "nearby_vsx_dipper_period",
     "asassn_var_name",
     "asassn_var_period",
     "asassn_var_type",
@@ -938,6 +950,153 @@ def repair_catalog_evidence_run(
     return stats
 
 
+CATALOG_NEIGHBOR_BACKFILL_CANDIDATE_FILENAMES = (
+    "lc_events_external_lcs.parquet",
+    "lc_events_vetted.parquet",
+    "lc_events_spectra.parquet",
+    "lc_events_neighbors.parquet",
+    "lc_events_characterized.parquet",
+    "lc_events_classified.parquet",
+    "lc_events.parquet",
+)
+
+
+def _catalog_neighbor_default_output(run_dir: Path | None) -> Path:
+    if run_dir is None:
+        return Path(CATALOG_NEIGHBOR_OUTPUT_SUBDIR) / CATALOG_NEIGHBOR_FILENAME
+    return run_dir / "results" / CATALOG_NEIGHBOR_OUTPUT_SUBDIR / CATALOG_NEIGHBOR_FILENAME
+
+
+def _catalog_neighbor_candidate_path(run_dir: Path) -> Path | None:
+    results_dir = run_dir / "results"
+    for filename in CATALOG_NEIGHBOR_BACKFILL_CANDIDATE_FILENAMES:
+        path = results_dir / filename
+        if path.exists():
+            return path
+    return None
+
+
+def _load_catalog_neighbor_candidate_file(path: Path) -> pd.DataFrame:
+    try:
+        return load_candidates_file(path)
+    except ValueError:
+        return read_parquet_table(path)
+
+
+def _load_catalog_neighbor_review_candidates(review_db: Path) -> pd.DataFrame:
+    with closing(db_connect(review_db)) as conn:
+        ids = [
+            str(row[0])
+            for row in conn.execute("SELECT candidate_id FROM candidates ORDER BY candidate_id").fetchall()
+        ]
+        return pd.DataFrame([get_candidate_payload(conn, candidate_id) for candidate_id in ids])
+
+
+def _load_catalog_neighbor_backfill_candidates(
+    *,
+    input_path: Path | None,
+    run_dir: Path | None,
+    review_db: Path | None,
+) -> tuple[pd.DataFrame, Path | None]:
+    if input_path is not None:
+        path = input_path.expanduser().resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"Candidate input not found: {path}")
+        return _load_catalog_neighbor_candidate_file(path), path
+
+    if run_dir is not None:
+        path = _catalog_neighbor_candidate_path(run_dir)
+        if path is not None:
+            return _load_catalog_neighbor_candidate_file(path), path
+
+    if review_db is not None:
+        return _load_catalog_neighbor_review_candidates(review_db.expanduser().resolve()), None
+
+    raise FileNotFoundError("Provide --input, --run-dir with result parquets, or --review-db")
+
+
+def backfill_catalog_neighbors_run(
+    *,
+    run_dir: Path | None,
+    review_db: Path | None,
+    input_path: Path | None,
+    output_path: Path | None,
+    radius_arcsec: float,
+    method: str,
+    catalogs: list[str] | tuple[str, ...] | None,
+    chunk_size: int,
+    xmatch_timeout_sec: float | None,
+    update_db: bool,
+) -> dict[str, object]:
+    from malca.enrichment.vetting import (
+        CATALOG_NEIGHBOR_DEFAULT_CHUNK_SIZE,
+        CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC,
+        collect_catalog_neighbors,
+    )
+
+    resolved_run_dir = run_dir.expanduser().resolve() if run_dir is not None else None
+    resolved_review_db = review_db.expanduser().resolve() if review_db is not None else None
+    if resolved_review_db is None and resolved_run_dir is not None:
+        default_db = resolved_run_dir / "review" / "review.db"
+        if default_db.exists():
+            resolved_review_db = default_db
+    if update_db and resolved_review_db is None:
+        raise FileNotFoundError("--review-db is required for DB update when --run-dir has no review/review.db")
+    if output_path is None:
+        output_path = _catalog_neighbor_default_output(resolved_run_dir)
+    output_path = output_path.expanduser().resolve()
+
+    candidates, source_path = _load_catalog_neighbor_backfill_candidates(
+        input_path=input_path,
+        run_dir=resolved_run_dir,
+        review_db=resolved_review_db,
+    )
+    selected_catalogs = tuple(catalogs) if catalogs else None
+    effective_chunk_size = int(chunk_size or CATALOG_NEIGHBOR_DEFAULT_CHUNK_SIZE)
+    effective_timeout = (
+        CATALOG_NEIGHBOR_DEFAULT_XMATCH_TIMEOUT_SEC
+        if xmatch_timeout_sec is None
+        else float(xmatch_timeout_sec)
+    )
+    print(
+        "Catalog-neighbor backfill: "
+        f"source={source_path if source_path is not None else resolved_review_db}; "
+        f"candidates={len(candidates)}; radius={float(radius_arcsec):g}\"; "
+        f"method={method}; chunk_size={effective_chunk_size}; "
+        f"xmatch_timeout={effective_timeout:g}s",
+        flush=True,
+    )
+    neighbors = collect_catalog_neighbors(
+        candidates,
+        radius_arcsec=radius_arcsec,
+        method="xmatch" if method == "xmatch" else "tap",
+        catalogs=selected_catalogs,
+        chunk_size=effective_chunk_size,
+        xmatch_timeout_sec=effective_timeout,
+        show_progress=True,
+    )
+    print(f"Catalog-neighbor backfill: writing sidecar {output_path}", flush=True)
+    write_parquet_table(neighbors, output_path)
+
+    db_rows = 0
+    if update_db:
+        print(f"Catalog-neighbor backfill: importing into {resolved_review_db}", flush=True)
+        with closing(db_connect(resolved_review_db)) as conn:
+            db_rows = upsert_catalog_neighbor_rows(conn, neighbors)
+
+    return {
+        "candidate_rows": int(len(candidates)),
+        "neighbor_rows": int(len(neighbors)),
+        "output": str(output_path),
+        "source": str(source_path) if source_path is not None else str(resolved_review_db),
+        "review_db": str(resolved_review_db) if resolved_review_db is not None else None,
+        "db_rows": int(db_rows),
+        "radius_arcsec": float(radius_arcsec),
+        "chunk_size": effective_chunk_size,
+        "xmatch_timeout_sec": effective_timeout,
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="malca review-maint",
@@ -1000,6 +1159,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     repair_catalog.add_argument("--asassn-radius", type=float, default=5.0, help="ASAS-SN variable match radius in arcsec")
     repair_catalog.add_argument("--skip-asassn-var", action="store_true", help="Only repair VSX evidence")
     repair_catalog.add_argument("--no-backup", action="store_true", help="Do not create .bak files before writing")
+
+    backfill_neighbors = subparsers.add_parser(
+        "backfill-catalog-neighbors",
+        help="Collect long-form catalog neighbors and optionally import them into a review DB",
+    )
+    backfill_neighbors.add_argument("--run-dir", type=Path, default=None, help="MALCA run directory; default output is <run-dir>/results/vetting_catalog_neighbors/catalog_neighbors.parquet")
+    backfill_neighbors.add_argument("--review-db", type=Path, default=None, help="Review SQLite DB (default with --run-dir: <run-dir>/review/review.db if present)")
+    backfill_neighbors.add_argument("--input", type=Path, default=None, help="Candidate parquet/CSV input override")
+    backfill_neighbors.add_argument("--output", type=Path, default=None, help="Output sidecar parquet")
+    backfill_neighbors.add_argument("--radius", type=float, default=DEFAULT_CATALOG_NEIGHBOR_QUERY_RADIUS_ARCSEC, help="Catalog-neighbor collection radius in arcsec")
+    backfill_neighbors.add_argument("--method", choices=["xmatch", "tap"], default="xmatch", help="Remote crossmatch method for catalogs that support both")
+    backfill_neighbors.add_argument("--catalogs", type=str, default=None, help="Comma-separated v1 catalogs to collect (default: all)")
+    backfill_neighbors.add_argument("--chunk-size", type=int, default=250, help="Rows per remote crossmatch chunk")
+    backfill_neighbors.add_argument("--xmatch-timeout", type=float, default=120.0, help="Timeout in seconds for each remote XMatch/TAP chunk")
+    backfill_neighbors.add_argument("--no-db-update", action="store_true", help="Write the sidecar but do not import it into the review DB")
     return parser
 
 
@@ -1020,6 +1194,35 @@ def main() -> None:
         print(
             f"Repaired {stats['parquets_repaired']} result parquet(s); "
             f"updated {stats['db_candidates_updated']} DB candidate(s)."
+        )
+        return
+
+    if args.command == "backfill-catalog-neighbors":
+        stats = backfill_catalog_neighbors_run(
+            run_dir=args.run_dir,
+            review_db=args.review_db,
+            input_path=args.input,
+            output_path=args.output,
+            radius_arcsec=args.radius,
+            method=args.method,
+            catalogs=(
+                [value.strip() for value in str(args.catalogs).split(",") if value.strip()]
+                if args.catalogs
+                else None
+            ),
+            chunk_size=args.chunk_size,
+            xmatch_timeout_sec=args.xmatch_timeout,
+            update_db=not args.no_db_update,
+        )
+        db_note = (
+            f"; imported {stats['db_rows']} row(s) into {stats['review_db']}"
+            if stats.get("review_db") and not args.no_db_update
+            else ""
+        )
+        print(
+            f"Collected {stats['neighbor_rows']} catalog-neighbor row(s) "
+            f"for {stats['candidate_rows']} candidate(s) at radius "
+            f"{stats['radius_arcsec']:g} arcsec. Sidecar: {stats['output']}{db_note}."
         )
         return
 

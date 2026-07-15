@@ -406,6 +406,7 @@ _EXTERNAL_EXACT_COLUMNS = {
 
 _EXTERNAL_PREFIXES = (
     "vsx_",
+    "nearby_vsx_",
     "simbad_",
     "gaia_var_",
     "gaia_eb_",

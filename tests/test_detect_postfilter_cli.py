@@ -26,6 +26,7 @@ from malca.stv.pipeline import (
     _first_existing_candidate_result,
     load_side_table,
     load_passing_table,
+    load_review_import_table,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
     _select_passing_candidates,
@@ -37,6 +38,7 @@ from malca.stv.pipeline import (
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 from malca.io.table_io import write_feature_table, write_parquet_table
+from malca.products.product_schema import assert_stv_product_schema
 
 
 def _base_args() -> argparse.Namespace:
@@ -389,6 +391,33 @@ def test_load_passing_table_expands_layer_features(tmp_path: Path) -> None:
     assert float(out.loc[out.index[0], "ra"]) == 10.0
     assert float(out.loc[out.index[0], "dec"]) == 20.0
     assert str(out.loc[out.index[0], "gaia_id"]) == "123"
+
+
+def test_load_review_import_table_preserves_layer_first_schema(tmp_path: Path) -> None:
+    path = tmp_path / "lc_events_external_lcs.parquet"
+    write_feature_table(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv-a", "stv-b"],
+                "timescale": ["stv", "stv"],
+                "lc_path": ["a.dat3", "b.dat3"],
+                "ra": [10.0, 11.0],
+                "dec": [20.0, 21.0],
+                "baseline_mag": [13.1, 14.2],
+                "gaia_var_class": ["ECL", "LPV"],
+                "failed_any": [False, True],
+            }
+        ),
+        path,
+    )
+
+    out = load_review_import_table(path)
+
+    assert out["candidate_id"].tolist() == ["stv-a"]
+    assert "baseline_mag" not in out.columns
+    assert "gaia_var_class" not in out.columns
+    assert {"lc_stats", "external_stats", "derived_stats"}.issubset(out.columns)
+    assert_stv_product_schema(out, stage="review_import")
 
 
 def test_filter_stage_skip_requires_existing_output_and_no_new_event_attempts(tmp_path: Path) -> None:

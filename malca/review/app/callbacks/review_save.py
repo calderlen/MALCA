@@ -543,7 +543,7 @@ def queue_plot_render_request(idx, current_candidate_id, plot_mode, overlay_valu
             'theme': theme_mode or DEFAULT_THEME,
             'baseline_opacity': float(baseline_opacity if baseline_opacity is not None else 0.5),
             'round_sigfigs': bool(True if round_sigfigs is None else ('yes' in round_sigfigs)),
-            'link_radius': float(link_radius) if link_radius is not None else 10.0,
+            'link_radius': float(link_radius) if link_radius is not None else 30.0,
             'override_period': override_period,
             'override_period_source': override_period_source,
             'phase_period_pending': bool(phase_period_pending),

@@ -49,6 +49,13 @@ def _coerce_numeric_input_value(raw_value: object) -> float | None:
     return value
 
 
+def _coerce_catalog_neighbor_radius_value(raw_value: object) -> float:
+    value = _coerce_numeric_input_value(raw_value)
+    if value is None:
+        value = DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC
+    return max(0.0, min(float(value), MAX_REVIEW_VETTING_RADIUS_ARCSEC))
+
+
 def _coerce_text_filter_value(raw_value: object) -> str:
     text = str(raw_value).strip() if raw_value is not None else ''
     return text or 'Any'
@@ -282,7 +289,10 @@ def _queue_filter_ui_state_from_values(*state_values: object) -> dict[str, objec
         'filter_unreviewed': _coerce_yes_checklist_value(next(it)),
         'filter_failed': _coerce_yes_checklist_value(next(it)),
         'select_filter_mode': _coerce_select_filter_mode_value(next(it)),
+        'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(next(it)),
     }
+    for _, fkey in _VETTING_POLICY_STATES:
+        state[fkey] = _coerce_yes_checklist_value(next(it))
     for _, fkey in _BOOL_MODE_STATES:
         state[fkey] = _coerce_bool_mode_value(next(it))
     for _, fkey in _NUM_INPUT_STATES:
@@ -308,7 +318,12 @@ def _normalize_saved_queue_filter_ui_state(raw_state: object) -> dict[str, objec
             raw_state.get('filter_failed', ['yes'] if _coerce_bool(raw_state.get('require_failed_any_false')) else [])
         ),
         'select_filter_mode': _coerce_select_filter_mode_value(raw_state.get('select_filter_mode')),
+        'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(
+            raw_state.get('catalog_neighbor_radius_arcsec')
+        ),
     }
+    for _, fkey in _VETTING_POLICY_STATES:
+        state[fkey] = _coerce_yes_checklist_value(raw_state.get(fkey))
     for _, fkey in _BOOL_MODE_STATES:
         state[fkey] = _coerce_bool_mode_value(raw_state.get(fkey))
     for _, fkey in _NUM_INPUT_STATES:
@@ -334,7 +349,10 @@ def _queue_filter_ui_values_from_state(raw_state: object) -> tuple[object, ...] 
         state['filter_unreviewed'],
         state['filter_failed'],
         _select_filter_mode_checklist_value(state['select_filter_mode']),
+        state['catalog_neighbor_radius_arcsec'],
     ]
+    for _, fkey in _VETTING_POLICY_STATES:
+        values.append(state[fkey])
     for _, fkey in _BOOL_MODE_STATES:
         values.append(state[fkey])
     for _, fkey in _NUM_INPUT_STATES:
@@ -400,17 +418,13 @@ _SIDEBAR_FILTER_OUTPUTS = (
 )
 
 _VETTING_KNOWN_FILTER_OUTPUTS = (
-    [Output('select-filter-mode', 'value', allow_duplicate=True)]
-    + [Output(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
-    + [Output(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
-    + [Output('vetting-known-variables-btn', 'className'),
-       Output('vetting-dipper-contaminants-btn', 'className')]
+    [Output('vetting-known-variables-policy', 'value', allow_duplicate=True),
+     Output('vetting-dipper-contaminants-policy', 'value', allow_duplicate=True)]
 )
 
 _VETTING_KNOWN_FILTER_CURRENT_STATES = (
-    [State('select-filter-mode', 'value')]
-    + [State(f'{_col_id(col)}-mode', 'value') for col in VETTING_KNOWN_BOOL_FILTERS]
-    + [State(f'exclude-{_col_id(col)}', 'value') for col in VETTING_KNOWN_SELECT_FILTERS]
+    [State('vetting-known-variables-policy', 'value'),
+     State('vetting-dipper-contaminants-policy', 'value')]
 )
 
 _VETTING_KNOWN_FILTER_OPTION_STATES = (
@@ -429,6 +443,10 @@ def _vetting_filter_toggle_active(n_clicks: object) -> bool:
         return int(n_clicks or 0) % 2 == 1
     except (TypeError, ValueError):
         return False
+
+
+def _vetting_policy_checklist_value(active: bool) -> list[str]:
+    return ['yes'] if active else []
 
 
 def _merge_unique_filter_values(current_values: object, added_values: object) -> list[str]:
@@ -461,9 +479,10 @@ def _apply_vetting_known_filter_toggle(
         select_options,
         policy=policy,
     )
+    other_bool_values = ['Any' for _col in VETTING_KNOWN_BOOL_FILTERS]
     other_select_values = [[] for _col in VETTING_KNOWN_SELECT_FILTERS]
     if other_policy and other_enabled:
-        _other_bool_values, other_select_values = _vetting_known_filter_preset(
+        other_bool_values, other_select_values = _vetting_known_filter_preset(
             select_options,
             policy=other_policy,
         )
@@ -475,14 +494,14 @@ def _apply_vetting_known_filter_toggle(
     if len(bool_values) < len(VETTING_KNOWN_BOOL_FILTERS):
         bool_values.extend(['Any'] * (len(VETTING_KNOWN_BOOL_FILTERS) - len(bool_values)))
 
-    if policy == 'known_variables':
+    for idx, policy_preset in enumerate(policy_bool_values):
+        if policy_preset == 'Any':
+            continue
+        other_preset = other_bool_values[idx] if idx < len(other_bool_values) else 'Any'
         if enabled:
-            bool_values = list(policy_bool_values)
-        else:
-            bool_values = [
-                'Any' if current == preset else current
-                for current, preset in zip(bool_values, policy_bool_values)
-            ]
+            bool_values[idx] = policy_preset
+        elif bool_values[idx] == policy_preset:
+            bool_values[idx] = other_preset if other_enabled and other_preset != 'Any' else 'Any'
 
     current_select_lists = list(current_select_values or [])[:len(VETTING_KNOWN_SELECT_FILTERS)]
     if len(current_select_lists) < len(VETTING_KNOWN_SELECT_FILTERS):
@@ -590,7 +609,12 @@ def _queue_filter_params_from_ui_state(
         'only_unreviewed': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_unreviewed')),
         'require_failed_any_false': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_failed')),
         'select_filter_mode': _coerce_select_filter_mode_value(ui_state.get('select_filter_mode')),
+        'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(
+            ui_state.get('catalog_neighbor_radius_arcsec')
+        ),
     }
+    for _, fkey in _VETTING_POLICY_STATES:
+        filter_params[fkey] = 'yes' in _coerce_yes_checklist_value(ui_state.get(fkey))
     for _, fkey in _BOOL_MODE_STATES:
         filter_params[fkey] = _coerce_bool_mode_value(ui_state.get(fkey))
     raw_numeric_filters = {
@@ -733,57 +757,47 @@ else:
     _VETTING_KNOWN_FILTER_OUTPUTS,
     [Input('vetting-known-variables-btn', 'n_clicks'),
      Input('vetting-dipper-contaminants-btn', 'n_clicks')],
-    [*_VETTING_KNOWN_FILTER_CURRENT_STATES, *_VETTING_KNOWN_FILTER_OPTION_STATES],
+    _VETTING_KNOWN_FILTER_CURRENT_STATES,
     prevent_initial_call=True,
 )
 def apply_vetting_known_type_filters(known_clicks, contaminant_clicks, *callback_values):
-    """Toggle the known-variable and dipper-contaminant vetting filters."""
+    """Toggle compound catalog-neighbor vetting policies."""
     triggered_id = getattr(callback_context, 'triggered_id', None)
     policy = _VETTING_KNOWN_TOGGLE_POLICIES.get(triggered_id)
     if policy is None:
         raise dash.exceptions.PreventUpdate
 
-    known_enabled = _vetting_filter_toggle_active(known_clicks)
-    contaminant_enabled = _vetting_filter_toggle_active(contaminant_clicks)
     if triggered_id == 'vetting-known-variables-btn' and not known_clicks:
         raise dash.exceptions.PreventUpdate
     if triggered_id == 'vetting-dipper-contaminants-btn' and not contaminant_clicks:
         raise dash.exceptions.PreventUpdate
 
-    _current_select_mode, *rest = callback_values
-    current_bool_values = rest[:len(VETTING_KNOWN_BOOL_FILTERS)]
-    rest = rest[len(VETTING_KNOWN_BOOL_FILTERS):]
-    current_select_values = rest[:len(VETTING_KNOWN_SELECT_FILTERS)]
-    rest = rest[len(VETTING_KNOWN_SELECT_FILTERS):]
-    queue_source_scope, *option_lists = rest
-
-    select_options_by_col = dict(zip(VETTING_KNOWN_SELECT_FILTERS, option_lists))
-    select_options_by_col = _fresh_vetting_known_select_options(
-        queue_source_scope,
-        select_options_by_col,
-    )
-
-    enabled = known_enabled if policy == 'known_variables' else contaminant_enabled
-    other_policy = 'dipper_contaminants' if policy == 'known_variables' else 'known_variables'
-    other_enabled = contaminant_enabled if policy == 'known_variables' else known_enabled
-    bool_values, select_values = _apply_vetting_known_filter_toggle(
-        select_options_by_col,
-        policy=policy,
-        enabled=enabled,
-        other_policy=other_policy,
-        other_enabled=other_enabled,
-        current_bool_values=current_bool_values,
-        current_select_values=current_select_values,
-    )
-
-    select_filter_mode = [] if enabled else no_update
+    known_value, contaminant_value = callback_values
+    known_enabled = 'yes' in _coerce_yes_checklist_value(known_value)
+    contaminant_enabled = 'yes' in _coerce_yes_checklist_value(contaminant_value)
+    if policy == 'known_variables':
+        known_enabled = not known_enabled
+    elif policy == 'dipper_contaminants':
+        contaminant_enabled = not contaminant_enabled
 
     return (
-        select_filter_mode,
-        *bool_values,
-        *select_values,
-        _vetting_filter_toggle_button_class(known_enabled),
-        _vetting_filter_toggle_button_class(contaminant_enabled),
+        _vetting_policy_checklist_value(known_enabled),
+        _vetting_policy_checklist_value(contaminant_enabled),
+    )
+
+
+@app.callback(
+    [Output('vetting-known-variables-btn', 'className'),
+     Output('vetting-dipper-contaminants-btn', 'className')],
+    [Input('vetting-known-variables-policy', 'value'),
+     Input('vetting-dipper-contaminants-policy', 'value')],
+    prevent_initial_call=False,
+)
+def sync_vetting_known_button_classes(known_value, contaminant_value):
+    """Reflect restored catalog-neighbor vetting policy state in preset buttons."""
+    return (
+        _vetting_filter_toggle_button_class('yes' in _coerce_yes_checklist_value(known_value)),
+        _vetting_filter_toggle_button_class('yes' in _coerce_yes_checklist_value(contaminant_value)),
     )
 
 

@@ -14,10 +14,12 @@ SPECIAL_FILTERS = {
 
 # Catalog/type filters controlled by the vetting presets. The broad preset
 # selects definite variable/non-target labels; the dipper-contaminant preset
-# leaves boolean flags unset and selects only targeted definite dipper mimics.
+# selects targeted definite dipper mimics plus nearby ASAS-SN-confusion VSX
+# contaminants without marking those neighbors as target-identity matches.
 VETTING_KNOWN_BOOL_FILTERS = (
     "vetting_likely_known",
     "microlens_match",
+    "nearby_vsx_dipper_contaminant",
 )
 
 VETTING_KNOWN_SELECT_FILTERS = (
@@ -252,7 +254,7 @@ def is_known_variable_type_value(column: str, value: object) -> bool:
     col = str(column or "").strip()
     upper = text.upper()
 
-    if col == "vsx_class":
+    if col in {"vsx_class", "nearby_vsx_dipper_class"}:
         return _is_vsx_definite_known_type(text)
     if col == "asassn_var_type":
         return not _has_uncertainty_flag(text) and upper not in _ASASSN_GENERIC_CLASSES
@@ -277,7 +279,7 @@ def is_dipper_contaminant_type_value(column: str, value: object) -> bool:
     col = str(column or "").strip()
     upper = text.upper()
 
-    if col in {"vsx_class", "asassn_var_type"}:
+    if col in {"vsx_class", "asassn_var_type", "nearby_vsx_dipper_class"}:
         return _is_vsx_dipper_contaminant_type(text)
     if col == "gaia_var_class":
         return not _has_uncertainty_flag(text) and bool(_bar_tokens(text) & _GAIA_DIPPER_CONTAMINANT_TOKENS)
@@ -321,6 +323,10 @@ SIDEBAR_GROUPS = [
         ("select", "alerce_lc_class"),
         ("select", "yso_class"),
         ("text", "catalog_source"),
+        ("bool", "nearby_vsx_dipper_contaminant"),
+        ("select", "nearby_vsx_dipper_class"),
+        ("num", "nearby_vsx_dipper_sep_arcsec"),
+        ("num", "nearby_vsx_dipper_period"),
         ("text", "asassn_var_name"),
         ("num", "asassn_var_period"),
         ("num", "vsx_period"),

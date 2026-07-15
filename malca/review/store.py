@@ -32,6 +32,12 @@ from malca.products.feature_layers import (
     parse_layer_value,
     to_layer_first_frame,
 )
+from malca.catalogs.evidence import (
+    CATALOG_NEIGHBOR_COLUMNS,
+    DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC,
+    MAX_REVIEW_VETTING_RADIUS_ARCSEC,
+    normalize_catalog_neighbor_frame,
+)
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
@@ -816,6 +822,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("vsx_class",                "TEXT",    "select"),
     ("vsx_sep_arcsec",           "REAL",    "float"),
     ("vsx_period",               "REAL",    "float"),
+    ("nearby_vsx_dipper_contaminant", "INTEGER", "bool"),
+    ("nearby_vsx_dipper_class",  "TEXT",    "select"),
+    ("nearby_vsx_dipper_sep_arcsec", "REAL", "float"),
+    ("nearby_vsx_dipper_period", "REAL",    "float"),
     ("sfr_name",                 "TEXT",    "text"),
     ("sfr_sep_arcmin",           "REAL",    "float"),
     ("cluster_name",             "TEXT",    "text"),
@@ -1343,7 +1353,11 @@ _FLOAT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "float"}
 _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 _COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
-_FALSE_INCLUDES_UNSET_BOOL_COLS = {"microlens_match", "vetting_likely_known"}
+_FALSE_INCLUDES_UNSET_BOOL_COLS = {
+    "microlens_match",
+    "nearby_vsx_dipper_contaminant",
+    "vetting_likely_known",
+}
 _REVIEW_FLOAT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "num"}
 _REVIEW_TEXT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "text"}
 _REVIEW_SELECT_COLS = {col for col, kind in REVIEW_FILTER_COLUMN_TYPES.items() if kind == "select"}
@@ -1688,6 +1702,76 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_photometry_unique
         ON sed_photometry(candidate_id, source, band)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS catalog_neighbors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id TEXT NOT NULL,
+            catalog TEXT NOT NULL,
+            object_id TEXT,
+            object_name TEXT,
+            class_value TEXT,
+            sep_arcsec REAL NOT NULL,
+            period_days REAL,
+            rank INTEGER,
+            is_known_variable INTEGER DEFAULT 0,
+            is_dipper_contaminant INTEGER DEFAULT 0,
+            query_radius_arcsec REAL,
+            raw_json TEXT,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_catalog_neighbor_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(catalog_neighbors)").fetchall()
+    }
+    catalog_neighbor_column_defs = {
+        "candidate_id": "TEXT",
+        "catalog": "TEXT",
+        "object_id": "TEXT",
+        "object_name": "TEXT",
+        "class_value": "TEXT",
+        "sep_arcsec": "REAL",
+        "period_days": "REAL",
+        "rank": "INTEGER",
+        "is_known_variable": "INTEGER DEFAULT 0",
+        "is_dipper_contaminant": "INTEGER DEFAULT 0",
+        "query_radius_arcsec": "REAL",
+        "raw_json": "TEXT",
+    }
+    for col, dtype in catalog_neighbor_column_defs.items():
+        if col.lower() not in existing_catalog_neighbor_lower:
+            try:
+                conn.execute(f"ALTER TABLE catalog_neighbors ADD COLUMN {col} {dtype}")
+                existing_catalog_neighbor_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_candidate
+        ON catalog_neighbors(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_catalog_sep
+        ON catalog_neighbors(catalog, sep_arcsec)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_known_sep
+        ON catalog_neighbors(is_known_variable, sep_arcsec)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_dipper_sep
+        ON catalog_neighbors(is_dipper_contaminant, sep_arcsec)
         """
     )
     conn.execute(
@@ -2070,6 +2154,56 @@ def load_app_state(conn: sqlite3.Connection, key: str, default: str = "") -> str
     return default if row is None else str(row[0])
 
 
+def upsert_catalog_neighbor_rows(
+    conn: sqlite3.Connection,
+    rows: pd.DataFrame | list[dict[str, object]] | None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Replace long-form catalog-neighbor rows for touched candidate/catalog pairs."""
+    frame = normalize_catalog_neighbor_frame(rows)
+    if frame.empty:
+        return 0
+
+    pairs = (
+        frame[["candidate_id", "catalog"]]
+        .drop_duplicates()
+        .astype(str)
+        .itertuples(index=False, name=None)
+    )
+    for candidate_id, catalog in pairs:
+        conn.execute(
+            "DELETE FROM catalog_neighbors WHERE candidate_id = ? AND catalog = ?",
+            (candidate_id, catalog),
+        )
+
+    placeholders = ", ".join(["?"] * len(CATALOG_NEIGHBOR_COLUMNS))
+    sql = (
+        f"INSERT INTO catalog_neighbors ({', '.join(CATALOG_NEIGHBOR_COLUMNS)}) "
+        f"VALUES ({placeholders})"
+    )
+    values: list[tuple[object, ...]] = []
+    for _, row in frame.iterrows():
+        row_values: list[object] = []
+        for column in CATALOG_NEIGHBOR_COLUMNS:
+            value = row[column]
+            if column in {"is_known_variable", "is_dipper_contaminant"}:
+                row_values.append(int(bool(value)))
+            elif value is None:
+                row_values.append(None)
+            else:
+                try:
+                    row_values.append(None if pd.isna(value) else value)
+                except Exception:
+                    row_values.append(value)
+        values.append(tuple(row_values))
+
+    conn.executemany(sql, values)
+    if commit:
+        conn.commit()
+    return len(values)
+
+
 def import_candidates(
     conn: sqlite3.Connection,
     df: pd.DataFrame,
@@ -2300,6 +2434,14 @@ def import_candidates(
     return upsert_candidates_frame(conn, df_use, default_source_path=str(source_path))
 
 
+def _catalog_neighbor_filter_radius(value: object) -> float:
+    radius = _to_float(value)
+    if radius is None:
+        radius = DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC
+    radius = max(0.0, min(float(radius), MAX_REVIEW_VETTING_RADIUS_ARCSEC))
+    return radius
+
+
 def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[object]]:
     """Build queue WHERE clauses and bound params from filter parameters."""
     if filters is None:
@@ -2318,6 +2460,38 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
     # --- failed_any shortcut ---
     if filters.get('require_failed_any_false'):
         where.append("(c.failed_any IS NULL OR c.failed_any = 0)")
+
+    catalog_neighbor_radius = _catalog_neighbor_filter_radius(
+        filters.get("catalog_neighbor_radius_arcsec")
+    )
+    if _as_bool(filters.get("exclude_known_catalog_neighbors")):
+        where.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM catalog_neighbors cn
+                WHERE cn.candidate_id = c.candidate_id
+                  AND cn.is_known_variable = 1
+                  AND cn.sep_arcsec IS NOT NULL
+                  AND cn.sep_arcsec <= ?
+            )
+            """.strip()
+        )
+        params.append(catalog_neighbor_radius)
+    if _as_bool(filters.get("exclude_dipper_catalog_neighbors")):
+        where.append(
+            """
+            NOT EXISTS (
+                SELECT 1
+                FROM catalog_neighbors cn
+                WHERE cn.candidate_id = c.candidate_id
+                  AND cn.is_dipper_contaminant = 1
+                  AND cn.sep_arcsec IS NOT NULL
+                  AND cn.sep_arcsec <= ?
+            )
+            """.strip()
+        )
+        params.append(catalog_neighbor_radius)
 
     # --- optional source-path scoping (exact path, with portable run-token fallback) ---
     source_scope_terms: list[str] = []
@@ -2900,6 +3074,8 @@ VETTING_COLUMNS = [
     "chandra_extended_flag", "chandra_variable_flag", "chandra_sep_arcsec",
     "xray_det", "xray_flux", "xray_sep_arcsec", "xray_source_catalogs",
     "vsx_class", "vsx_sep_arcsec", "vsx_period",
+    "nearby_vsx_dipper_contaminant", "nearby_vsx_dipper_class",
+    "nearby_vsx_dipper_sep_arcsec", "nearby_vsx_dipper_period",
     "sfr_name", "sfr_sep_arcmin",
     "cluster_name", "cluster_dist_pc",
     "banyan_best_assoc", "banyan_field_prob",

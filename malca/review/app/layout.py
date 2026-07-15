@@ -407,8 +407,8 @@ def create_layout():
             html.Div('External Links', className='section-title'),
             html.Label('Search Radius [arcsec]:'),
             dcc.Input(id='link-radius-arcsec', placeholder='Radius [arcsec]', type='number',
-                     value=10.0, min=0.1, step=1.0, style=_inp_style,
-                     persistence=_review_persistence_token(), persistence_type='local'),
+                     value=30.0, min=0.1, step=1.0, style=_inp_style,
+                     persistence=f"{_review_persistence_token()}:link-radius-v2", persistence_type='local'),
                      
             html.Hr(),
 

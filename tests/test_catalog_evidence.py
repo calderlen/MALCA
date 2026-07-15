@@ -57,6 +57,36 @@ def test_vsx_neighbor_beyond_match_radius_does_not_promote() -> None:
     assert pd.isna(out.loc[0, "vsx_class"])
 
 
+def test_nearby_vsx_dipper_contaminant_is_recorded_without_identity_promotion() -> None:
+    out = normalize_catalog_evidence(
+        pd.DataFrame({"candidate_id": ["C1"]}),
+        neighbors_long=_neighbors("EA", 5.7, 0.8833),
+        vsx_max_sep_arcsec=3.0,
+    )
+
+    assert pd.isna(out.loc[0, "vsx_class"])
+    assert bool(out.loc[0, "nearby_vsx_dipper_contaminant"]) is True
+    assert out.loc[0, "nearby_vsx_dipper_class"] == "EA"
+    assert float(out.loc[0, "nearby_vsx_dipper_sep_arcsec"]) == 5.7
+    assert float(out.loc[0, "nearby_vsx_dipper_period"]) == 0.8833
+
+
+def test_nearby_vsx_context_ignores_non_dipper_or_out_of_radius_neighbors() -> None:
+    non_dipper = normalize_catalog_evidence(
+        pd.DataFrame({"candidate_id": ["C1"]}),
+        neighbors_long=_neighbors("DSCT", 5.7),
+        vsx_max_sep_arcsec=3.0,
+    )
+    far_dipper = normalize_catalog_evidence(
+        pd.DataFrame({"candidate_id": ["C1"]}),
+        neighbors_long=_neighbors("EA", 15.5),
+        vsx_max_sep_arcsec=3.0,
+    )
+
+    assert "nearby_vsx_dipper_contaminant" not in non_dipper.columns
+    assert "nearby_vsx_dipper_contaminant" not in far_dipper.columns
+
+
 def test_existing_vsx_class_is_not_overwritten_by_neighbor() -> None:
     out = normalize_catalog_evidence(
         pd.DataFrame({"candidate_id": ["C1"], "vsx_class": ["ROT"], "vsx_period": [2.0]}),
@@ -114,3 +144,30 @@ def test_review_import_marks_normalized_vsx_type_as_known(tmp_path) -> None:
 
     assert payload["vsx_class"] == "ROT"
     assert payload["vetting_likely_known"] is True
+
+
+def test_review_import_keeps_nearby_vsx_contaminant_as_context_not_identity(tmp_path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "asas_sn_id": "1",
+                        "nearby_vsx_dipper_contaminant": True,
+                        "nearby_vsx_dipper_class": "EA",
+                        "nearby_vsx_dipper_sep_arcsec": 5.7,
+                    }
+                ]
+            ),
+            source_path=str(tmp_path),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+        payload = get_candidate_payload(conn, "C1")
+
+    assert payload["nearby_vsx_dipper_contaminant"] is True
+    assert payload["nearby_vsx_dipper_class"] == "EA"
+    assert payload["vetting_likely_known"] is False

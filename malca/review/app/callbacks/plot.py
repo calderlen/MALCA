@@ -531,7 +531,7 @@ def update_display(render_request, applied_nonce, current_candidate_id, queue_si
     residual_height = float(state.get('residual_height', DEFAULT_RESIDUAL_FRACTION) or DEFAULT_RESIDUAL_FRACTION)
     baseline_opacity = float(state.get('baseline_opacity', 0.5) if state.get('baseline_opacity') is not None else 0.5)
     round_sigfigs = bool(state.get('round_sigfigs', True))
-    link_radius = float(state.get('link_radius', 10.0))
+    link_radius = float(state.get('link_radius', 30.0))
     yaxis_mode = str(state.get('yaxis_mode', 'mag') or 'mag')
     native_color_mode = 'band' if str(state.get('native_color_mode', 'camera') or 'camera') == 'band' else 'camera'
     phase_panel_mode = _coerce_choice(state.get('phase_panel_mode'), {'fold', 'time'}, 'fold')

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import logging
+import multiprocessing as mp
 from pathlib import Path
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -21,6 +25,145 @@ DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
     "allwise": "II/328/allwise",
     "vsx": "B/vsx/vsx",
 }
+
+
+class XMatchChunkTimeoutError(TimeoutError):
+    """Raised when a CDS XMatch chunk exceeds the parent-side timeout."""
+
+
+def _xmatch_process_context():
+    try:
+        return mp.get_context("fork")
+    except ValueError:  # pragma: no cover - Windows/non-POSIX fallback
+        return mp.get_context("spawn")
+
+
+def _xmatch_upload_table(source_frame: pd.DataFrame) -> Table:
+    upload = source_frame[["candidate_id", "ra_deg", "dec_deg"]].copy()
+    upload["candidate_id"] = upload["candidate_id"].astype(str)
+    upload = upload.rename(columns={"ra_deg": "ra", "dec_deg": "dec"})
+    return Table.from_pandas(upload)
+
+
+def _query_xmatch_frame_direct(
+    source_frame: pd.DataFrame,
+    *,
+    cat2: str,
+    radius_arcsec: float,
+    timeout_sec: float | None,
+) -> pd.DataFrame:
+    table = _xmatch_upload_table(source_frame)
+    previous_timeout = getattr(XMatch, "TIMEOUT", None)
+    try:
+        if timeout_sec is not None:
+            XMatch.TIMEOUT = float(timeout_sec)
+        result = XMatch.query(
+            cat1=table,
+            cat2=cat2,
+            max_distance=float(radius_arcsec) * u.arcsec,
+            colRA1="ra",
+            colDec1="dec",
+        )
+    finally:
+        if timeout_sec is not None and previous_timeout is not None:
+            XMatch.TIMEOUT = previous_timeout
+    if result is None or len(result) == 0:
+        return pd.DataFrame()
+    return result.to_pandas()
+
+
+def _xmatch_subprocess_worker(
+    source_frame: pd.DataFrame,
+    cat2: str,
+    radius_arcsec: float,
+    timeout_sec: float | None,
+    result_path: str,
+    status_path: str,
+) -> None:
+    try:
+        frame = _query_xmatch_frame_direct(
+            source_frame,
+            cat2=cat2,
+            radius_arcsec=radius_arcsec,
+            timeout_sec=timeout_sec,
+        )
+        frame.to_pickle(result_path)
+        status = {"status": "ok", "rows": int(len(frame))}
+    except Exception as exc:  # pragma: no cover - exercised through parent path
+        status = {
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
+    Path(status_path).write_text(json.dumps(status), encoding="utf-8")
+
+
+def query_xmatch_chunk(
+    source_frame: pd.DataFrame,
+    *,
+    cat2: str,
+    radius_arcsec: float,
+    timeout_sec: float | None,
+) -> pd.DataFrame:
+    """
+    Run one CDS XMatch upload, optionally in a subprocess with a hard timeout.
+
+    Astroquery's ``XMatch.TIMEOUT`` is still passed through to the child, but the
+    parent process enforces the real wall-clock boundary and kills a stuck chunk.
+    """
+    if timeout_sec is None:
+        return _query_xmatch_frame_direct(
+            source_frame,
+            cat2=cat2,
+            radius_arcsec=radius_arcsec,
+            timeout_sec=None,
+        )
+
+    timeout = max(0.001, float(timeout_sec))
+    context = _xmatch_process_context()
+    with tempfile.TemporaryDirectory(prefix="malca_xmatch_") as tmpdir:
+        result_path = str(Path(tmpdir) / "result.pkl")
+        status_path = str(Path(tmpdir) / "status.json")
+        process = context.Process(
+            target=_xmatch_subprocess_worker,
+            args=(source_frame, cat2, float(radius_arcsec), timeout, result_path, status_path),
+        )
+        process.start()
+        try:
+            process.join(timeout)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(5)
+                raise XMatchChunkTimeoutError(
+                    f"XMatch chunk timed out after {timeout:g}s for {cat2}"
+                )
+
+            status_file = Path(status_path)
+            result_file = Path(result_path)
+            if status_file.exists():
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                if status.get("status") == "ok":
+                    if result_file.exists():
+                        return pd.read_pickle(result_file)
+                    return pd.DataFrame()
+                error_type = status.get("error_type") or "RuntimeError"
+                error_message = status.get("error_message") or "unknown error"
+                raise RuntimeError(f"{error_type}: {error_message}")
+
+            if process.exitcode not in (0, None):
+                raise RuntimeError(
+                    f"XMatch subprocess exited with code {process.exitcode} for {cat2}"
+                )
+            raise RuntimeError(f"XMatch subprocess produced no status for {cat2}")
+        finally:
+            if not process.is_alive():
+                try:
+                    process.close()
+                except ValueError:
+                    pass
 
 
 def _coord_from_layers(df: pd.DataFrame, axis: str) -> pd.Series:
@@ -64,6 +207,7 @@ def _query_catalog_bulk(
     catalog: str,
     radius_arcsec: float,
     chunk_size: int,
+    xmatch_timeout_sec: float | None = None,
     show_progress: bool = False,
     progress_desc: str | None = None,
     status_rows: list[dict] | None = None,
@@ -84,6 +228,13 @@ def _query_catalog_bulk(
         chunk = coords_df.iloc[start : start + int(chunk_size)].copy()
         if chunk.empty:
             continue
+        chunk_index = int(start // step) + 1
+        if show_progress:
+            print(
+                f"  {progress_desc or f'xmatch:{catalog}'}: "
+                f"chunk {chunk_index}/{total_chunks} ({len(chunk)} rows)",
+                flush=True,
+            )
         attempted = int(len(chunk))
         status_base = {
             "catalog": catalog,
@@ -96,18 +247,37 @@ def _query_catalog_bulk(
         }
         if status_context:
             status_base.update(status_context)
-        table = Table.from_pandas(chunk[["candidate_id", "ra_deg", "dec_deg"]].rename(columns={"ra_deg": "ra", "dec_deg": "dec"}))
+        chunk_upload = chunk[["candidate_id", "ra_deg", "dec_deg"]]
         try:
-            res = XMatch.query(
-                cat1=table,
+            out = query_xmatch_chunk(
+                chunk_upload,
                 cat2=f"vizier:{catalog}",
-                max_distance=float(radius_arcsec) * u.arcsec,
-                colRA1="ra",
-                colDec1="dec",
+                radius_arcsec=radius_arcsec,
+                timeout_sec=xmatch_timeout_sec,
             )
+        except XMatchChunkTimeoutError as e:
+            logging.warning(f"XMatch query timed out for {catalog}: {e}")
+            if show_progress:
+                print(
+                    f"Warning: {progress_desc or f'xmatch:{catalog}'} "
+                    f"chunk {chunk_index}/{total_chunks} timed out: {e}",
+                    flush=True,
+                )
+            if status_rows is not None:
+                status_rows.append({
+                    **status_base,
+                    "status": "timeout",
+                    "error_message": str(e),
+                })
+            continue
         except Exception as e:
-            import logging
             logging.warning(f"XMatch query failed for {catalog}: {e}")
+            if show_progress:
+                print(
+                    f"Warning: {progress_desc or f'xmatch:{catalog}'} "
+                    f"chunk {chunk_index}/{total_chunks} failed: {e}",
+                    flush=True,
+                )
             if status_rows is not None:
                 status_rows.append({
                     **status_base,
@@ -115,11 +285,16 @@ def _query_catalog_bulk(
                     "error_message": str(e),
                 })
             continue
-        if len(res) == 0:
+        if out.empty:
             if status_rows is not None:
                 status_rows.append({**status_base, "status": "no_data"})
+            if show_progress:
+                print(
+                    f"  {progress_desc or f'xmatch:{catalog}'}: "
+                    f"chunk {chunk_index}/{total_chunks} matched 0 row(s)",
+                    flush=True,
+                )
             continue
-        out = res.to_pandas()
         sep_col = None
         for candidate in ["angDist", "_r", "separation", "Sep"]:
             if candidate in out.columns:
@@ -142,6 +317,12 @@ def _query_catalog_bulk(
                 "status": "ok",
                 "matched": int(len(out)),
             })
+        if show_progress:
+            print(
+                f"  {progress_desc or f'xmatch:{catalog}'}: "
+                f"chunk {chunk_index}/{total_chunks} matched {len(out)} row(s)",
+                flush=True,
+            )
         chunks.append(out)
 
     if not chunks:

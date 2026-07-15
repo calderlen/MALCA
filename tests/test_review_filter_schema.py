@@ -21,6 +21,7 @@ from malca.review.store import (
     query_queue,
     save_review,
     upsert_candidates_frame,
+    upsert_catalog_neighbor_rows,
 )
 
 
@@ -179,6 +180,34 @@ def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
     assert ids == ["C1", "C2"]
 
 
+def test_nearby_vsx_dipper_false_filter_keeps_unset_rows_and_excludes_hits(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "C1"},
+                    {"candidate_id": "C2", "nearby_vsx_dipper_contaminant": False},
+                    {
+                        "candidate_id": "C3",
+                        "nearby_vsx_dipper_contaminant": True,
+                        "nearby_vsx_dipper_class": "EA",
+                        "nearby_vsx_dipper_sep_arcsec": 5.7,
+                    },
+                ]
+            ),
+        )
+
+        ids = query_queue(
+            conn,
+            filters={"nearby_vsx_dipper_contaminant_mode": "False"},
+            ids_only=True,
+        )["candidate_id"].tolist()
+
+    assert ids == ["C1", "C2"]
+
+
 def test_vetting_likely_known_false_filter_keeps_unset_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "review.db"
     with db_connect(db_path) as conn:
@@ -200,6 +229,118 @@ def test_vetting_likely_known_false_filter_keeps_unset_rows(tmp_path: Path) -> N
         )["candidate_id"].tolist()
 
     assert ids == ["C1", "C2"]
+
+
+def test_catalog_neighbor_queue_filters_are_radius_aware_and_independent(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "C1"},
+                    {"candidate_id": "C2"},
+                    {"candidate_id": "C3"},
+                ]
+            ),
+        )
+        upsert_catalog_neighbor_rows(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "catalog": "ztf_periodic_variables",
+                        "object_id": "ZTF1",
+                        "object_name": "ZTF1",
+                        "class_value": "RSCVN",
+                        "sep_arcsec": 20.0,
+                        "is_known_variable": True,
+                        "is_dipper_contaminant": False,
+                        "query_radius_arcsec": 30.0,
+                    },
+                    {
+                        "candidate_id": "C3",
+                        "catalog": "asassn_variables",
+                        "object_id": "ASASSN-V J1",
+                        "object_name": "ASASSN-V J1",
+                        "class_value": "EA",
+                        "sep_arcsec": 8.0,
+                        "is_known_variable": True,
+                        "is_dipper_contaminant": True,
+                        "query_radius_arcsec": 30.0,
+                    },
+                ]
+            ),
+        )
+
+        known_30 = query_queue(
+            conn,
+            filters={
+                "exclude_known_catalog_neighbors": True,
+                "catalog_neighbor_radius_arcsec": 30.0,
+            },
+            ids_only=True,
+        )["candidate_id"].tolist()
+        known_10 = query_queue(
+            conn,
+            filters={
+                "exclude_known_catalog_neighbors": True,
+                "catalog_neighbor_radius_arcsec": 10.0,
+            },
+            ids_only=True,
+        )["candidate_id"].tolist()
+        dipper_30 = query_queue(
+            conn,
+            filters={
+                "exclude_dipper_catalog_neighbors": True,
+                "catalog_neighbor_radius_arcsec": 30.0,
+            },
+            ids_only=True,
+        )["candidate_id"].tolist()
+
+    assert known_30 == ["C2"]
+    assert known_10 == ["C1", "C2"]
+    assert dipper_30 == ["C1", "C2"]
+
+
+def test_catalog_neighbor_import_replaces_touched_candidate_catalog_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": "C1"}]))
+        upsert_catalog_neighbor_rows(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "catalog": "vsx",
+                        "object_id": "old",
+                        "class_value": "EA",
+                        "sep_arcsec": 12.0,
+                    }
+                ]
+            ),
+        )
+        upsert_catalog_neighbor_rows(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "C1",
+                        "catalog": "vsx",
+                        "object_id": "new",
+                        "class_value": "EA",
+                        "sep_arcsec": 5.0,
+                    }
+                ]
+            ),
+        )
+        rows = conn.execute(
+            "SELECT object_id, sep_arcsec FROM catalog_neighbors WHERE candidate_id='C1' AND catalog='vsx'"
+        ).fetchall()
+
+    assert rows == [("new", 5.0)]
 
 
 def test_vsx_known_type_detection_tokenizes_certain_composites() -> None:
@@ -294,6 +435,8 @@ def test_dipper_contaminant_policy_is_source_specific_and_uncertainty_safe() -> 
     assert is_dipper_contaminant_type_value("vsx_class", "ACEP|CEP") is False
     assert is_dipper_contaminant_type_value("vsx_class", "EA:") is False
     assert is_dipper_contaminant_type_value("vsx_class", "UXOR:") is False
+    assert is_dipper_contaminant_type_value("nearby_vsx_dipper_class", "EA") is True
+    assert is_dipper_contaminant_type_value("nearby_vsx_dipper_class", "DSCT") is False
 
     assert is_dipper_contaminant_type_value("asassn_var_type", "EA") is True
     assert is_dipper_contaminant_type_value("asassn_var_type", "YSO") is True

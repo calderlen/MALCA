@@ -183,8 +183,8 @@ def find_nearby_vsx(
         return []
     return list(
         _find_nearby_vsx_cached(
-            round(ra, 7),
-            round(dec, 7),
+            float(ra),
+            float(dec),
             int(limit),
             float(radius_arcsec),
             float(timeout_sec),

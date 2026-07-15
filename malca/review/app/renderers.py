@@ -1175,7 +1175,7 @@ def _render_metadata_health(grouped: list[tuple[str, list[tuple[str, object]]]] 
     ], className='metadata-health metadata-health-partial')
 
 
-def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) -> html.Div:
+def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 30.0) -> html.Div:
     """Render a vetting status panel with source cards above the metadata grid."""
     if not payload:
         return html.Div("Not vetted", className='vetting-banner-empty')
@@ -1289,7 +1289,7 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 10.0) ->
     ra_for_vsx = _payload_float('ra', 'ra_deg')
     dec_for_vsx = _payload_float('dec', 'dec_deg')
     if ra_for_vsx is not None and dec_for_vsx is not None:
-        neighbors = find_nearby_vsx(ra_for_vsx, dec_for_vsx, limit=3, radius_arcsec=60.0)
+        neighbors = find_nearby_vsx(ra_for_vsx, dec_for_vsx, limit=3, radius_arcsec=radius_arcsec)
         if neighbors:
             label = "Nearby VSX"
             if not _ok(vsx_cls):
