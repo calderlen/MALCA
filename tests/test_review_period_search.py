@@ -135,7 +135,7 @@ def test_harmonic_selection_keeps_cadence_alias_flag_out_of_ranking() -> None:
     assert selected["alias_matches"] == [1.0]
 
 
-def test_find_period_arbitration_only_evaluates_base_and_shorter_harmonics(
+def test_find_period_arbitration_evaluates_multiples_but_keeps_base_without_gain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evaluated_periods: list[float] = []
@@ -162,16 +162,16 @@ def test_find_period_arbitration_only_evaluates_base_and_shorter_harmonics(
 
     assert selected_period == pytest.approx(2.0)
     assert factor == pytest.approx(1.0)
-    assert evaluated_periods == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5])
-    assert all(period <= 2.0 for period in evaluated_periods)
+    assert evaluated_periods == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5, 4.0, 6.0, 8.0])
+    assert any(period > 2.0 for period in evaluated_periods)
 
 
-def test_find_period_arbitration_cannot_promote_to_longer_alias(
+def test_find_period_arbitration_rejects_small_upward_gain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_score(_band_resid, period, *, alias_penalty=0.2):
         if float(period) > 2.0:
-            score = 0.1
+            score = 0.95
         elif np.isclose(float(period), 2.0):
             score = 1.0
         else:
@@ -197,6 +197,39 @@ def test_find_period_arbitration_cannot_promote_to_longer_alias(
     assert selected_period == pytest.approx(2.0)
     assert factor == pytest.approx(1.0)
     assert diag["base_objective"] == pytest.approx(1.0)
+
+
+def test_find_period_arbitration_can_promote_to_clear_longer_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_score(_band_resid, period, *, alias_penalty=0.2):
+        if np.isclose(float(period), 4.0):
+            score = 0.1
+        elif np.isclose(float(period), 2.0):
+            score = 1.0
+        else:
+            score = 1.05
+        return {
+            "objective": score,
+            "raw_objective": score,
+            "scatter_ratio": score,
+            "lag_phase": 0.0,
+            "alias_flag": False,
+            "alias_matches": [],
+        }
+
+    monkeypatch.setattr(period_search, "_score_period_harmonic_candidate", fake_score)
+
+    selected_period, factor, diag = period_search.arbitrate_harmonic_period(
+        _band_dfs(),
+        2.0,
+        min_period=0.1,
+        max_period=10.0,
+    )
+
+    assert selected_period == pytest.approx(4.0)
+    assert factor == pytest.approx(2.0)
+    assert diag["upward_multiple_flag"] is True
 
 
 def test_review_stored_period_ignores_raw_periodogram_outputs() -> None:

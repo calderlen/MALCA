@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +26,11 @@ from malca.review.store import (
     load_candidates_file,
     replace_candidate_payload_fields,
 )
-from malca.core.stats import _period_feature_from_row, compute_stats
+from malca.core.stats import (
+    _period_feature_from_row,
+    compute_quasi_periodicity_summary,
+    compute_stats,
+)
 
 
 CORE_STATS_KEYS = {
@@ -34,6 +39,23 @@ CORE_STATS_KEYS = {
     "n_cameras",
     "n_points",
 }
+
+Q_ONLY_PAYLOAD_KEYS = (
+    "stats_variability_quasi_periodicity_q",
+    "stats_variability_quasi_periodicity_method",
+    "stats_variability_quasi_periodicity_n_points",
+    "stats_variability_quasi_periodicity_n_bins",
+    "stats_variability_quasi_periodicity_populated_bins",
+    "stats_variability_quasi_periodicity_bin_coverage",
+    "stats_variability_quasi_periodicity_smooth_window_bins",
+    "stats_variability_quasi_periodicity_template_amplitude",
+    "stats_variability_quasi_periodicity_raw_scatter",
+    "stats_variability_quasi_periodicity_resid_scatter",
+    "stats_variability_quasi_periodicity_scatter_ratio",
+    "stats_variability_quasi_periodicity_status",
+    "stats_variability_periodic_feature_period_days",
+    "stats_variability_periodic_feature_period_source",
+)
 
 
 def _load_scope_candidate_ids(candidate_source: Path) -> list[str]:
@@ -166,12 +188,114 @@ def _build_stats_updates(
     return updates
 
 
+def _payload_contains_update_key(payload: dict[str, object], key: str) -> bool:
+    if key in payload:
+        return True
+    return any(key in parse_layer_value(payload.get(layer)) for layer in FEATURE_LAYER_COLUMNS)
+
+
+def _build_q_only_updates(
+    lc_path: Path,
+    *,
+    period_payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    file_ext = lc_path.suffix[1:] if lc_path.suffix.startswith(".") else None
+    feature_period_days, feature_period_source = _period_feature_from_row(period_payload or {})
+    summary = compute_quasi_periodicity_summary(
+        lc_path.stem,
+        str(lc_path.parent),
+        file_ext=file_ext,
+        feature_period_days=feature_period_days,
+        feature_period_source=feature_period_source,
+    )
+    updates: dict[str, object] = {"lc_path": str(lc_path)}
+    merge_stats_summary_into_payload(updates, summary)
+    for key in Q_ONLY_PAYLOAD_KEYS:
+        if not _payload_contains_update_key(updates, key):
+            updates[key] = None
+    return updates
+
+
+def _refresh_candidate_worker(item: dict[str, object]) -> dict[str, object]:
+    candidate_id = str(item.get("candidate_id") or "")
+    idx = int(item.get("idx") or 0)
+    try:
+        lc_path = Path(str(item["lc_path"]))
+        payload = dict(item.get("payload") or {})
+        if bool(item.get("q_only", False)):
+            updates = _build_q_only_updates(lc_path, period_payload=payload)
+        else:
+            updates = _build_stats_updates(
+                lc_path,
+                compute_ls=bool(item.get("compute_ls", True)),
+                period_payload=payload,
+            )
+        return {
+            "idx": idx,
+            "candidate_id": candidate_id,
+            "updates": updates,
+            "error": "",
+        }
+    except Exception as exc:
+        return {
+            "idx": idx,
+            "candidate_id": candidate_id,
+            "updates": None,
+            "error": str(exc),
+        }
+
+
+def _resolved_worker_count(workers: int | None) -> int:
+    if workers is None:
+        return 1
+    try:
+        value = int(workers)
+    except (TypeError, ValueError):
+        value = 1
+    if value <= 0:
+        return max(int(cpu_count()), 1)
+    return max(value, 1)
+
+
+def _iter_refresh_worker_results(
+    work_items: list[dict[str, object]],
+    *,
+    workers: int,
+):
+    if not work_items:
+        return
+    worker_count = _resolved_worker_count(workers)
+    if worker_count <= 1:
+        for item in work_items:
+            yield _refresh_candidate_worker(item)
+        return
+
+    chunksize = max(1, min(16, len(work_items) // max(worker_count * 8, 1)))
+    with Pool(processes=worker_count) as pool:
+        yield from pool.imap_unordered(_refresh_candidate_worker, work_items, chunksize=chunksize)
+
+
+def _full_stats_clear_keys(payload: dict[str, object], clear_base: set[str]) -> set[str]:
+    clear_keys = set(clear_base)
+    for layer in FEATURE_LAYER_COLUMNS:
+        clear_keys.update(
+            key
+            for key in parse_layer_value(payload.get(layer))
+            if key.startswith("stats_") or key in CORE_STATS_KEYS
+        )
+    return clear_keys
+
+
 def refresh_review_stats_from_run(
     run_dir: Path,
     db_path: Path,
     *,
     candidate_source: Path | None = None,
     compute_ls: bool = True,
+    q_only: bool = False,
+    workers: int = 1,
+    commit_every: int = 500,
+    progress_every: int = 50,
     limit: int | None = None,
     verbose: bool = False,
 ) -> dict[str, object]:
@@ -202,6 +326,8 @@ def refresh_review_stats_from_run(
             "unresolved": [],
             "failed": [],
             "missing_from_db": [],
+            "q_only": bool(q_only),
+            "workers": _resolved_worker_count(workers),
         }
 
     with db_connect(db_path) as conn:
@@ -227,42 +353,83 @@ def refresh_review_stats_from_run(
         refreshed = 0
         unresolved: list[str] = []
         failed: list[dict[str, str]] = []
+        work_items: list[dict[str, object]] = []
+        clear_keys_by_id: dict[str, set[str]] = {}
 
         for idx, candidate_id in enumerate(matched_ids, start=1):
             payload = dict(payload_by_id[candidate_id])
-            clear_keys = set(clear_base)
-            for layer in FEATURE_LAYER_COLUMNS:
-                clear_keys.update(
-                    key
-                    for key in parse_layer_value(payload.get(layer))
-                    if key.startswith("stats_") or key in CORE_STATS_KEYS
-                )
+            clear_keys = set() if q_only else _full_stats_clear_keys(payload, clear_base)
 
             lc_path = _resolve_lightcurve_path(payload, run_dir)
             if lc_path is None:
                 unresolved.append(candidate_id)
                 if verbose:
-                    print(f"[{idx}/{len(matched_ids)}] unresolved light curve for {candidate_id}")
+                    print(f"[{idx}/{len(matched_ids)}] unresolved light curve for {candidate_id}", flush=True)
                 continue
 
-            try:
-                updates = _build_stats_updates(lc_path, compute_ls=compute_ls, period_payload=payload)
-                replace_candidate_payload_fields(
+            clear_keys_by_id[candidate_id] = clear_keys
+            work_items.append(
+                {
+                    "idx": idx,
+                    "candidate_id": candidate_id,
+                    "lc_path": str(lc_path),
+                    "payload": payload,
+                    "compute_ls": bool(compute_ls),
+                    "q_only": bool(q_only),
+                }
+            )
+
+        pending_writes = 0
+        commits = 0
+        progress_n = max(int(progress_every), 1)
+        commit_n = max(int(commit_every), 0)
+        worker_count = _resolved_worker_count(workers)
+
+        for processed, result in enumerate(
+            _iter_refresh_worker_results(work_items, workers=worker_count),
+            start=1,
+        ):
+            candidate_id = str(result.get("candidate_id") or "")
+            error = str(result.get("error") or "").strip()
+            updates = result.get("updates")
+            if error or not isinstance(updates, dict):
+                failed.append({"candidate_id": candidate_id, "error": error or "missing updates"})
+                if verbose:
+                    print(
+                        f"[{result.get('idx')}/{len(matched_ids)}] failed {candidate_id}: "
+                        f"{error or 'missing updates'}",
+                        flush=True,
+                    )
+            else:
+                replaced = replace_candidate_payload_fields(
                     conn,
                     candidate_id,
                     updates,
-                    clear_keys=clear_keys,
+                    clear_keys=clear_keys_by_id.get(candidate_id, set()),
                     commit=False,
                 )
+                if not replaced:
+                    failed.append({"candidate_id": candidate_id, "error": "candidate disappeared from DB"})
+                    if verbose:
+                        print(f"[{processed}/{len(work_items)}] failed {candidate_id}: candidate disappeared from DB", flush=True)
+                    continue
                 refreshed += 1
-                if verbose and ((idx % 50 == 0) or (idx == len(matched_ids))):
-                    print(f"[{idx}/{len(matched_ids)}] refreshed {refreshed} candidates")
-            except Exception as exc:
-                failed.append({"candidate_id": candidate_id, "error": str(exc)})
-                if verbose:
-                    print(f"[{idx}/{len(matched_ids)}] failed {candidate_id}: {exc}")
+                pending_writes += 1
+                if commit_n > 0 and pending_writes >= commit_n:
+                    conn.commit()
+                    commits += 1
+                    pending_writes = 0
+
+            if verbose and (processed % progress_n == 0 or processed == len(work_items)):
+                total_seen = processed + len(unresolved)
+                print(
+                    f"[{total_seen}/{len(matched_ids)}] refreshed {refreshed} candidates "
+                    f"({len(failed)} failed, {len(unresolved)} unresolved)",
+                    flush=True,
+                )
 
         conn.commit()
+        commits += 1
 
     return {
         "candidate_source": str(candidate_source),
@@ -272,6 +439,9 @@ def refresh_review_stats_from_run(
         "unresolved": unresolved,
         "failed": failed,
         "missing_from_db": missing_from_db,
+        "q_only": bool(q_only),
+        "workers": _resolved_worker_count(workers),
+        "commits": commits,
     }
 
 
@@ -400,6 +570,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip Lomb-Scargle recomputation while refreshing stats",
     )
+    parser.add_argument(
+        "--q-only",
+        action="store_true",
+        help="Refresh only phase-template Q and its period/Q diagnostics",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Worker processes for light-curve recomputation (default: 1; <=0 uses CPU count)",
+    )
+    parser.add_argument(
+        "--commit-every",
+        type=int,
+        default=500,
+        help="Commit DB updates every N refreshed candidates (default: 500; 0 commits only at end)",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=50,
+        help="Print verbose progress every N processed candidates (default: 50)",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Refresh only the first N scoped candidates")
     parser.add_argument(
         "--output-review-db",
@@ -443,29 +636,40 @@ def main() -> None:
     if args.candidate_source:
         candidate_source = Path(args.candidate_source).expanduser().resolve()
 
-    print(f"Refreshing review stats in {db_path}")
-    print(f"  run dir: {run_dir}")
+    print(f"Refreshing review stats in {db_path}", flush=True)
+    print(f"  run dir: {run_dir}", flush=True)
     if candidate_source is not None:
-        print(f"  scope file: {candidate_source}")
+        print(f"  scope file: {candidate_source}", flush=True)
+    mode = "Q-only phase-template refresh" if args.q_only else "full compute_stats refresh"
+    worker_count = _resolved_worker_count(args.workers)
+    print(f"  mode: {mode}", flush=True)
+    print(f"  workers: {worker_count}", flush=True)
+    print(f"  commit every: {max(int(args.commit_every), 0)}", flush=True)
 
     result = refresh_review_stats_from_run(
         run_dir,
         db_path,
         candidate_source=candidate_source,
         compute_ls=not bool(args.no_compute_ls),
+        q_only=bool(args.q_only),
+        workers=worker_count,
+        commit_every=max(int(args.commit_every), 0),
+        progress_every=max(int(args.progress_every), 1),
         limit=args.limit,
         verbose=bool(args.verbose),
     )
     print(
         "Refreshed {refreshed}/{matched_db_rows} scoped DB rows "
         "({scoped_candidates} candidate IDs in scope).".format(**result)
+        + f" Commits: {result.get('commits', 0)}.",
+        flush=True,
     )
     if result["missing_from_db"]:
-        print(f"  Missing from DB: {len(result['missing_from_db'])}")
+        print(f"  Missing from DB: {len(result['missing_from_db'])}", flush=True)
     if result["unresolved"]:
-        print(f"  Unresolved light curves: {len(result['unresolved'])}")
+        print(f"  Unresolved light curves: {len(result['unresolved'])}", flush=True)
     if result["failed"]:
-        print(f"  Failed recomputes: {len(result['failed'])}")
+        print(f"  Failed recomputes: {len(result['failed'])}", flush=True)
 
     if args.review_sync_enabled:
         auto_export_review_bundle(
@@ -474,7 +678,7 @@ def main() -> None:
             hash_assets=bool(args.review_sync_hash_assets),
         )
     else:
-        print("Review Git bundle auto-sync disabled by --no-review-sync")
+        print("Review Git bundle auto-sync disabled by --no-review-sync", flush=True)
 
     if args.output_review_db:
         rebuilt_path = Path(args.output_review_db).expanduser().resolve()
@@ -483,10 +687,11 @@ def main() -> None:
             rebuilt_path,
             overwrite=bool(args.overwrite_rebuild_db),
         )
-        print(f"Rebuilt DB written to {rebuilt_path}")
+        print(f"Rebuilt DB written to {rebuilt_path}", flush=True)
         print(
             "  copied {candidates} candidates, {reviews} reviews, "
-            "{review_history} history rows, {app_state} app-state rows".format(**rebuilt)
+            "{review_history} history rows, {app_state} app-state rows".format(**rebuilt),
+            flush=True,
         )
 
 

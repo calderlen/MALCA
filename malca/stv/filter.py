@@ -89,8 +89,9 @@ from malca.catalogs.periodic_catalogs import (
     match_period_catalog as _match_period_catalog,
 )
 from malca.core.period_arbitration import (
-    NATIVE_PERIOD_HARMONIC_FACTORS,
     NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+    NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
+    NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
     choose_native_harmonic_candidate,
     native_harmonic_period_candidates,
     period_alias_matches,
@@ -979,24 +980,40 @@ def _score_periodicity_harmonic_candidate(
         }
 
     jd0 = float(min(np.min(jd) for jd in all_jd))
+    bin_options = tuple(
+        dict.fromkeys(
+            int(option)
+            for option in (n_bins, max(12, n_bins // 2), max(8, n_bins // 4))
+            if int(option) > 0
+        )
+    )
     templates: dict[int, np.ndarray] = {}
     scatter_ratios: list[float] = []
-    for band, (jd, resid) in band_resid.items():
-        phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = phase_template(phase, resid, n_bins=n_bins)
-        templates[int(band)] = template
+    n_bins_used = np.nan
+    for n_bins_try in bin_options:
+        candidate_templates: dict[int, np.ndarray] = {}
+        candidate_scatter_ratios: list[float] = []
+        for band, (jd, resid) in band_resid.items():
+            phase = np.mod((jd - jd0) / float(period), 1.0)
+            template, _ = phase_template(phase, resid, n_bins=n_bins_try)
+            candidate_templates[int(band)] = template
 
-        bin_idx = np.floor(phase * n_bins).astype(int)
-        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
-        model = template[bin_idx]
-        valid = np.isfinite(model) & np.isfinite(resid)
-        if np.count_nonzero(valid) < 20:
-            continue
+            bin_idx = np.floor(phase * n_bins_try).astype(int)
+            bin_idx = np.clip(bin_idx, 0, n_bins_try - 1)
+            model = template[bin_idx]
+            valid = np.isfinite(model) & np.isfinite(resid)
+            if np.count_nonzero(valid) < 20:
+                continue
 
-        raw_sigma = _robust_sigma(resid[valid])
-        folded_sigma = _robust_sigma(resid[valid] - model[valid])
-        if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
-            scatter_ratios.append(float(folded_sigma / raw_sigma))
+            raw_sigma = _robust_sigma(resid[valid])
+            folded_sigma = _robust_sigma(resid[valid] - model[valid])
+            if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
+                candidate_scatter_ratios.append(float(folded_sigma / raw_sigma))
+        if candidate_scatter_ratios:
+            templates = candidate_templates
+            scatter_ratios = candidate_scatter_ratios
+            n_bins_used = float(n_bins_try)
+            break
 
     if not scatter_ratios:
         aliases = period_alias_matches(period)
@@ -1021,6 +1038,7 @@ def _score_periodicity_harmonic_candidate(
         "raw_objective": raw_objective,
         "scatter_ratio": scatter_ratio,
         "lag_phase": lag_phase,
+        "n_bins_used": n_bins_used,
         "alias_flag": bool(aliases),
         "alias_matches": aliases,
     }
@@ -1051,7 +1069,7 @@ def _correct_native_period(
         raw,
         min_period=min_period,
         max_period=max_period,
-        harmonic_factors=NATIVE_PERIOD_HARMONIC_FACTORS,
+        harmonic_factors=NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
     ):
         factor = float(candidate["factor"])
         period = float(candidate["period"])
@@ -1071,6 +1089,7 @@ def _correct_native_period(
                 "raw_objective": score.get("raw_objective", np.nan),
                 "scatter_ratio": score.get("scatter_ratio", np.nan),
                 "lag_phase": score.get("lag_phase", np.nan),
+                "n_bins_used": score.get("n_bins_used", np.nan),
                 "harmonic_penalty": harmonic_penalty,
                 "alias_flag": bool(score.get("alias_flag", candidate.get("alias_flag", False))),
                 "alias_matches": [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))],
@@ -1080,6 +1099,7 @@ def _correct_native_period(
     selected = choose_native_harmonic_candidate(
         candidates,
         min_rel_improvement=NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+        upward_min_rel_improvement=NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
     )
     if selected is None:
         aliases = period_alias_matches(raw)
@@ -1101,8 +1121,12 @@ def _correct_native_period(
         "objective": selected.get("objective", np.nan),
         "selection_objective": selected.get("selection_objective", np.nan),
         "scatter_ratio": selected.get("scatter_ratio", np.nan),
+        "n_bins_used": selected.get("n_bins_used", np.nan),
         "alias_flag": bool(selected.get("alias_flag", False)),
         "alias_matches": [float(v) for v in selected.get("alias_matches", [])],
+        "upward_multiple_flag": bool(selected.get("upward_multiple_flag", False)),
+        "rel_improvement_vs_base": selected.get("rel_improvement_vs_base", np.nan),
+        "required_rel_improvement": selected.get("required_rel_improvement", np.nan),
         "candidates": candidates,
     }
 

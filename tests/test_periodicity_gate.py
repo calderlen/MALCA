@@ -545,7 +545,7 @@ def test_apply_pre_periodicity_gate_allows_alias_periodic_branch(monkeypatch) ->
     assert out.loc[0, "pre_periodicity_reason"] == "ce,folded_scatter"
 
 
-def test_arbitrate_harmonic_period_does_not_evaluate_longer_aliases(monkeypatch) -> None:
+def test_arbitrate_harmonic_period_evaluates_period_multiples(monkeypatch) -> None:
     raw_scores = {
         1.0: 0.40,
         2.0: 0.35,
@@ -579,11 +579,14 @@ def test_arbitrate_harmonic_period_does_not_evaluate_longer_aliases(monkeypatch)
         0.5,
         1.0 / 3.0,
         0.25,
+        2.0,
+        3.0,
+        4.0,
     )
-    assert evaluated == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5])
-    assert all(period <= 2.0 for period in evaluated)
-    assert factor == 1.0
-    assert selected_period == 2.0
+    assert evaluated == pytest.approx([2.0, 1.0, 2.0 / 3.0, 0.5, 4.0, 6.0, 8.0])
+    assert any(period > 2.0 for period in evaluated)
+    assert factor == 2.0
+    assert selected_period == 4.0
 
 
 def test_arbitrate_harmonic_period_uses_shortlist_half_when_best(monkeypatch) -> None:

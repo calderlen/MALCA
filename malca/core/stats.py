@@ -21,6 +21,11 @@ import numpy as np
 import pandas as pd
 
 from malca.core.baseline import per_camera_gp_baseline
+from malca.core.period_arbitration import (
+    NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
+    choose_native_harmonic_candidate,
+    native_harmonic_period_candidates,
+)
 from malca.config import (
     MAD_SCALE,
     STETSON_PAIR_MAX_DT_DAYS,
@@ -58,11 +63,15 @@ _LC_COLUMNS = [
     "field",
 ]
 
-Q_TEMPLATE_METHOD = "phase_template_50bin"
-Q_TEMPLATE_N_PHASE_BINS = 50
-Q_TEMPLATE_MIN_BIN_POINTS = 3
-Q_TEMPLATE_SMOOTH_WINDOW_BINS = 3
-Q_TEMPLATE_MIN_BIN_COVERAGE = 0.25
+Q_TEMPLATE_METHOD = "phase_template_med500m2"
+Q_TEMPLATE_N_PHASE_BINS = 500
+Q_TEMPLATE_MIN_BIN_POINTS = 2
+Q_TEMPLATE_SMOOTH_WINDOW_BINS = 1
+Q_TEMPLATE_MIN_BIN_COVERAGE = 0.10
+Q_TEMPLATE_NOISE_SUBTRACT = False
+Q_PERIOD_ARBITRATION_FACTORS = NATIVE_PERIOD_WITH_MULTIPLES_FACTORS
+Q_PERIOD_ARBITRATION_MIN_REL_IMPROVEMENT = 0.0
+Q_PERIOD_ARBITRATION_UPWARD_MIN_REL_IMPROVEMENT = 0.0
 
 
 
@@ -1786,8 +1795,9 @@ def phase_template_quasi_periodicity(
     min_bin_points: int = Q_TEMPLATE_MIN_BIN_POINTS,
     smooth_window_bins: int = Q_TEMPLATE_SMOOTH_WINDOW_BINS,
     min_bin_coverage: float = Q_TEMPLATE_MIN_BIN_COVERAGE,
+    noise_subtract: bool = Q_TEMPLATE_NOISE_SUBTRACT,
 ) -> dict[str, object]:
-    """Cody-style Q using a smoothed empirical phase-folded template."""
+    """Cody-style Q using an empirical phase-folded template."""
     try:
         period_value = float(period)
     except (TypeError, ValueError):
@@ -1814,7 +1824,7 @@ def phase_template_quasi_periodicity(
     raw_var = float(np.var(mag, ddof=1))
     raw_scatter = float(np.sqrt(raw_var)) if np.isfinite(raw_var) and raw_var >= 0 else np.nan
     noise_var = float(np.mean(np.square(err)))
-    denom = raw_var - noise_var
+    denom = raw_var - noise_var if bool(noise_subtract) else raw_var
     if not np.isfinite(denom) or denom <= 0:
         return _empty_quasi_periodicity_result(
             "low_intrinsic_variance",
@@ -1886,7 +1896,7 @@ def phase_template_quasi_periodicity(
     resid = mag[valid_model] - model[valid_model]
     resid_var = float(np.var(resid, ddof=1))
     resid_noise_var = float(np.mean(np.square(err[valid_model])))
-    numer = resid_var - resid_noise_var
+    numer = resid_var - resid_noise_var if bool(noise_subtract) else resid_var
     q_value = float(numer / denom) if np.isfinite(numer) else np.nan
     resid_scatter = float(np.sqrt(resid_var)) if np.isfinite(resid_var) and resid_var >= 0 else np.nan
     scatter_ratio = float(resid_scatter / raw_scatter) if np.isfinite(resid_scatter) and np.isfinite(raw_scatter) and raw_scatter > 0 else np.nan
@@ -1909,7 +1919,7 @@ def phase_template_quasi_periodicity(
 
 
 def quasi_periodicity_metric(mag, time, err, period, max_harmonics=7) -> float:
-    """Cody-style quasi-periodicity Q from a smoothed phase-folded template.
+    """Cody-style quasi-periodicity Q from an empirical phase-folded template.
 
     ``max_harmonics`` is accepted for compatibility with older callers; Q no
     longer uses a Fourier model.
@@ -2320,7 +2330,13 @@ def compute_stats(
     else:
         periodic_feature_source = str(feature_period_source or "explicit_period")
     q_time, q_mag, q_err = _camera_band_normalized_q_arrays(q_df)
-    q_result = phase_template_quasi_periodicity(q_mag, q_time, q_err, best_period)
+    q_result, best_period, periodic_feature_source = _phase_template_quasi_periodicity_best_period(
+        q_mag,
+        q_time,
+        q_err,
+        best_period,
+        feature_period_source=periodic_feature_source,
+    )
     quasi_periodicity_q = q_result["q"]
     _harmonics = fit_fourier_decomposition(mag, jd_arr, best_period, err=merr)
     _psi_cs = psi_cs(mag, jd_arr, best_period)
@@ -2731,6 +2747,170 @@ def _period_feature_from_row(row: dict[str, object]) -> tuple[float | None, str 
         if np.isfinite(value) and value > 0:
             return float(value), key
     return None, None
+
+
+def _q_arbitrated_period_source(feature_period_source: str | None, factor: object) -> str:
+    source = str(feature_period_source or "explicit_period")
+    try:
+        factor_value = float(factor)
+    except (TypeError, ValueError):
+        return source
+    if not np.isfinite(factor_value) or np.isclose(factor_value, 1.0):
+        return source
+    return f"{source}:q_factor_{factor_value:g}"
+
+
+def _phase_template_quasi_periodicity_best_period(
+    mag: np.ndarray,
+    time: np.ndarray,
+    err: np.ndarray,
+    period: float | None,
+    *,
+    feature_period_source: str | None = None,
+) -> tuple[dict[str, object], float, str]:
+    try:
+        base_period = float(period)
+    except (TypeError, ValueError):
+        base_period = np.nan
+    if not np.isfinite(base_period) or base_period <= 0:
+        return (
+            phase_template_quasi_periodicity(mag, time, err, np.nan),
+            np.nan,
+            "",
+        )
+
+    factors_list: list[float] = []
+    for factor_raw in Q_PERIOD_ARBITRATION_FACTORS:
+        try:
+            factor = float(factor_raw)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(factor) and factor > 0:
+            factors_list.append(factor)
+    factors = tuple(factors_list)
+    if not factors:
+        return (
+            phase_template_quasi_periodicity(mag, time, err, base_period),
+            float(base_period),
+            str(feature_period_source or "explicit_period"),
+        )
+
+    candidates = native_harmonic_period_candidates(
+        base_period,
+        min_period=float(base_period) * min(factors),
+        max_period=float(base_period) * max(factors),
+        harmonic_factors=Q_PERIOD_ARBITRATION_FACTORS,
+    )
+    base_result: dict[str, object] | None = None
+    base_candidate: dict[str, object] | None = None
+
+    for candidate in candidates:
+        candidate_period = float(candidate["period"])
+        result = phase_template_quasi_periodicity(mag, time, err, candidate_period)
+        candidate["_q_result"] = result
+        candidate["q_status"] = result.get("status")
+        try:
+            q_value = float(result.get("q"))
+        except (TypeError, ValueError):
+            q_value = np.nan
+        if np.isfinite(q_value):
+            candidate["selection_objective"] = float(q_value)
+        if np.isclose(float(candidate.get("factor", np.nan)), 1.0):
+            base_result = result
+            base_candidate = candidate
+
+    selected = choose_native_harmonic_candidate(
+        candidates,
+        objective_key="selection_objective",
+        min_rel_improvement=Q_PERIOD_ARBITRATION_MIN_REL_IMPROVEMENT,
+        upward_min_rel_improvement=Q_PERIOD_ARBITRATION_UPWARD_MIN_REL_IMPROVEMENT,
+    )
+    if selected is not None and isinstance(selected.get("_q_result"), dict):
+        selected_factor = selected.get("factor", 1.0)
+        return (
+            selected["_q_result"],
+            float(selected["period"]),
+            _q_arbitrated_period_source(feature_period_source, selected_factor),
+        )
+
+    if base_result is None:
+        base_result = phase_template_quasi_periodicity(mag, time, err, base_period)
+        base_candidate = {"factor": 1.0}
+    return (
+        base_result,
+        float(base_period),
+        _q_arbitrated_period_source(feature_period_source, base_candidate.get("factor", 1.0)),
+    )
+
+
+def compute_quasi_periodicity_summary(
+    asassn_id,
+    path,
+    *,
+    use_only_good: bool = True,
+    drop_dupes: bool = True,
+    file_ext: str | None = None,
+    feature_period_days: float | None = None,
+    feature_period_source: str | None = None,
+) -> OrderedDict:
+    """Compute only the phase-template Q fields from a light curve.
+
+    This is the lightweight refresh path for review products that already have
+    current non-Q stats and only need the native-period Q semantics updated.
+    """
+    df_g_raw, df_v_raw = read_lc_csv(asassn_id, path)
+    if df_g_raw.empty and df_v_raw.empty:
+        df_g_raw, df_v_raw = read_skypatrol_lc_csv(asassn_id, path)
+    if df_g_raw.empty and df_v_raw.empty:
+        df_g_raw, df_v_raw = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+
+    df_g = _prepare_stats_lightcurve_frame(df_g_raw)
+    df_v = _prepare_stats_lightcurve_frame(df_v_raw)
+    q_frames = [frame for frame in (df_g, df_v) if not frame.empty]
+    q_df = pd.concat(q_frames, ignore_index=True) if q_frames else pd.DataFrame(columns=_LC_COLUMNS)
+    q_df = _filter_stats_lightcurve_frame(
+        q_df,
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        duplicate_subset=("JD", "v_g_band", "camera#", "camera_name", "field"),
+    )
+
+    try:
+        best_period = float(feature_period_days)
+    except (TypeError, ValueError):
+        best_period = np.nan
+    if not np.isfinite(best_period) or best_period <= 0:
+        best_period = np.nan
+        periodic_feature_source = ""
+    else:
+        periodic_feature_source = str(feature_period_source or "explicit_period")
+
+    q_time, q_mag, q_err = _camera_band_normalized_q_arrays(q_df)
+    q_result, best_period, periodic_feature_source = _phase_template_quasi_periodicity_best_period(
+        q_mag,
+        q_time,
+        q_err,
+        best_period,
+        feature_period_source=periodic_feature_source,
+    )
+    return OrderedDict(
+        [
+            ("variability_quasi_periodicity_q", q_result["q"]),
+            ("variability_quasi_periodicity_method", q_result["method"]),
+            ("variability_quasi_periodicity_n_points", q_result["n_points"]),
+            ("variability_quasi_periodicity_n_bins", q_result["n_bins"]),
+            ("variability_quasi_periodicity_populated_bins", q_result["populated_bins"]),
+            ("variability_quasi_periodicity_bin_coverage", q_result["bin_coverage"]),
+            ("variability_quasi_periodicity_smooth_window_bins", q_result["smooth_window_bins"]),
+            ("variability_quasi_periodicity_template_amplitude", q_result["template_amplitude"]),
+            ("variability_quasi_periodicity_raw_scatter", q_result["raw_scatter"]),
+            ("variability_quasi_periodicity_resid_scatter", q_result["resid_scatter"]),
+            ("variability_quasi_periodicity_scatter_ratio", q_result["scatter_ratio"]),
+            ("variability_quasi_periodicity_status", q_result["status"]),
+            ("variability_periodic_feature_period_days", best_period),
+            ("variability_periodic_feature_period_source", periodic_feature_source),
+        ]
+    )
 
 
 def _enrich_row_worker(args: tuple) -> dict:

@@ -1,4 +1,4 @@
-"""Shared helpers for conservative native period harmonic arbitration."""
+"""Shared helpers for native period harmonic arbitration."""
 
 from __future__ import annotations
 
@@ -9,13 +9,24 @@ import numpy as np
 from malca.config import LS_ALIAS_PERIODS, LS_ALIAS_TOLERANCE
 
 
-NATIVE_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = (
+NATIVE_PERIOD_DOWNWARD_HARMONIC_FACTORS: tuple[float, ...] = (
     1.0,
     0.5,
     1.0 / 3.0,
     0.25,
 )
+NATIVE_PERIOD_WITH_MULTIPLES_FACTORS: tuple[float, ...] = (
+    1.0,
+    0.5,
+    1.0 / 3.0,
+    0.25,
+    2.0,
+    3.0,
+    4.0,
+)
+NATIVE_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_DOWNWARD_HARMONIC_FACTORS
 NATIVE_PERIOD_MIN_REL_IMPROVEMENT = 0.02
+NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT = 0.08
 
 
 def finite_float(value: object) -> float | None:
@@ -78,6 +89,7 @@ def native_harmonic_period_candidates(
                 "factor": float(factor),
                 "divisor": float(1.0 / factor),
                 "period": float(period),
+                "upward_multiple_flag": bool(float(factor) > 1.0),
                 "alias_flag": bool(aliases),
                 "alias_matches": aliases,
             }
@@ -90,6 +102,7 @@ def choose_native_harmonic_candidate(
     *,
     objective_key: str = "selection_objective",
     min_rel_improvement: float = NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+    upward_min_rel_improvement: float = NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
     base_factor: float = 1.0,
     sort_key: Callable[[dict[str, object]], object] | None = None,
 ) -> dict[str, object] | None:
@@ -126,6 +139,22 @@ def choose_native_harmonic_candidate(
     if base_obj is None or selected_obj is None:
         return selected
     improvement = (float(base_obj) - float(selected_obj)) / max(abs(float(base_obj)), 1e-9)
-    if not np.isfinite(improvement) or improvement < float(min_rel_improvement):
+    selected_factor = finite_float(selected.get("factor"))
+    selected_is_upward = (
+        selected_factor is not None
+        and selected_factor > float(base_factor)
+        and abs(selected_factor - float(base_factor)) > 1e-12
+    )
+    required_improvement = (
+        float(upward_min_rel_improvement)
+        if selected_is_upward
+        else float(min_rel_improvement)
+    )
+    selected["rel_improvement_vs_base"] = float(improvement)
+    selected["required_rel_improvement"] = required_improvement
+    selected["upward_multiple_flag"] = bool(selected_is_upward)
+    if not np.isfinite(improvement) or improvement < required_improvement:
+        base["rel_improvement_vs_base"] = 0.0
+        base["required_rel_improvement"] = required_improvement
         return base
     return selected

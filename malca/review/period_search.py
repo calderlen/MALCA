@@ -11,7 +11,10 @@ from malca.config import (
     CLEAN_LC_MAX_ERROR_SIGMA,
 )
 from malca.core.period_arbitration import (
-    NATIVE_PERIOD_HARMONIC_FACTORS,
+    NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+    NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
+    NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
+    choose_native_harmonic_candidate,
     native_harmonic_period_candidates,
     period_alias_matches,
 )
@@ -24,7 +27,7 @@ from malca.review.interactive_plot import (
 )
 
 
-REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_HARMONIC_FACTORS
+REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_WITH_MULTIPLES_FACTORS
 REVIEW_HARMONIC_CHECK_DIVISORS: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
 REVIEW_HARMONIC_CHECK_SCORE_TOLERANCE = 0.03
 AUTO_PERIOD_METHODS: tuple[str, ...] = ("pdm", "ce")
@@ -135,24 +138,40 @@ def _score_period_harmonic_candidate(
         }
     jd0 = float(min(np.min(jd) for jd in all_jd))
 
+    bin_options = tuple(
+        dict.fromkeys(
+            int(option)
+            for option in (n_bins, max(12, n_bins // 2), max(8, n_bins // 4))
+            if int(option) > 0
+        )
+    )
     templates: dict[int, np.ndarray] = {}
     scatter_ratios: list[float] = []
-    for band, (jd, resid) in band_resid.items():
-        phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = phase_template(phase, resid, n_bins=n_bins)
-        templates[band] = template
+    n_bins_used = np.nan
+    for n_bins_try in bin_options:
+        candidate_templates: dict[int, np.ndarray] = {}
+        candidate_scatter_ratios: list[float] = []
+        for band, (jd, resid) in band_resid.items():
+            phase = np.mod((jd - jd0) / float(period), 1.0)
+            template, _ = phase_template(phase, resid, n_bins=n_bins_try)
+            candidate_templates[band] = template
 
-        bin_idx = np.floor(phase * n_bins).astype(int)
-        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
-        model = template[bin_idx]
-        valid = np.isfinite(model) & np.isfinite(resid)
-        if np.count_nonzero(valid) < 20:
-            continue
+            bin_idx = np.floor(phase * n_bins_try).astype(int)
+            bin_idx = np.clip(bin_idx, 0, n_bins_try - 1)
+            model = template[bin_idx]
+            valid = np.isfinite(model) & np.isfinite(resid)
+            if np.count_nonzero(valid) < 20:
+                continue
 
-        raw_sigma = _robust_sigma(resid[valid])
-        folded_sigma = _robust_sigma(resid[valid] - model[valid])
-        if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
-            scatter_ratios.append(float(folded_sigma / raw_sigma))
+            raw_sigma = _robust_sigma(resid[valid])
+            folded_sigma = _robust_sigma(resid[valid] - model[valid])
+            if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
+                candidate_scatter_ratios.append(float(folded_sigma / raw_sigma))
+        if candidate_scatter_ratios:
+            templates = candidate_templates
+            scatter_ratios = candidate_scatter_ratios
+            n_bins_used = float(n_bins_try)
+            break
 
     if not scatter_ratios:
         return {
@@ -177,6 +196,7 @@ def _score_period_harmonic_candidate(
         "raw_objective": raw_objective,
         "scatter_ratio": scatter_ratio,
         "lag_phase": lag_phase,
+        "n_bins_used": n_bins_used,
         "alias_flag": alias_flag,
         "alias_matches": alias_matches,
     }
@@ -308,7 +328,7 @@ def arbitrate_harmonic_period(
     if not band_resid:
         return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
 
-    candidates: list[tuple[float, float, dict[str, object]]] = []
+    candidates: list[dict[str, object]] = []
     for candidate in native_harmonic_period_candidates(
         base_period,
         min_period=min_period,
@@ -324,43 +344,72 @@ def arbitrate_harmonic_period(
         score["selection_objective"] = float(base_objective + harmonic_penalty) if np.isfinite(base_objective) else np.inf
         score["alias_flag"] = bool(score.get("alias_flag", candidate.get("alias_flag", False)))
         score["alias_matches"] = [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))]
-        candidates.append((float(factor), p, score))
+        candidates.append(
+            {
+                **candidate,
+                "period": p,
+                "objective": score.get("objective", np.nan),
+                "selection_objective": score.get("selection_objective", np.inf),
+                "raw_objective": score.get("raw_objective", np.nan),
+                "scatter_ratio": score.get("scatter_ratio", np.nan),
+                "lag_phase": score.get("lag_phase", np.nan),
+                "n_bins_used": score.get("n_bins_used", np.nan),
+                "harmonic_penalty": harmonic_penalty,
+                "alias_flag": bool(score.get("alias_flag", False)),
+                "alias_matches": [float(v) for v in score.get("alias_matches", [])],
+                "upward_multiple_flag": bool(candidate.get("upward_multiple_flag", factor > 1.0)),
+            }
+        )
 
     if not candidates:
         return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
 
-    finite_candidates = [c for c in candidates if np.isfinite(c[2].get("objective", np.nan))]
+    finite_candidates = [
+        candidate
+        for candidate in candidates
+        if np.isfinite(float(candidate.get("objective", np.nan)))
+        and np.isfinite(float(candidate.get("period", np.nan)))
+    ]
     if not finite_candidates:
         return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
 
-    best_factor, best_period, best_score = min(
+    selected = choose_native_harmonic_candidate(
         finite_candidates,
-        key=lambda x: float(x[2].get("selection_objective", x[2].get("objective", np.inf))),
+        min_rel_improvement=NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
+        upward_min_rel_improvement=NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
     )
-    base_entry = next((c for c in finite_candidates if abs(c[0] - 1.0) < 1e-12), None)
+    if selected is None:
+        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
+
+    base_entry = next(
+        (
+            candidate
+            for candidate in finite_candidates
+            if abs(float(candidate.get("factor", np.nan)) - 1.0) < 1e-12
+        ),
+        None,
+    )
     base_objective = (
-        float(base_entry[2].get("selection_objective", base_entry[2].get("objective", np.nan)))
+        float(base_entry.get("selection_objective", base_entry.get("objective", np.nan)))
         if base_entry is not None else np.nan
     )
 
-    if base_entry is not None and abs(best_factor - 1.0) > 1e-12:
-        best_selection_objective = float(best_score.get("selection_objective", best_score.get("objective", np.nan)))
-        improvement = (base_objective - best_selection_objective) / max(abs(base_objective), 1e-9)
-        if not np.isfinite(improvement) or improvement < 0.02:
-            best_factor, best_period, best_score = base_entry
-
     diag = {
-        "objective": float(best_score.get("objective", np.nan)),
-        "selection_objective": float(best_score.get("selection_objective", np.nan)),
-        "raw_objective": float(best_score.get("raw_objective", np.nan)),
-        "scatter_ratio": float(best_score.get("scatter_ratio", np.nan)),
-        "lag_phase": float(best_score.get("lag_phase", np.nan)),
+        "objective": float(selected.get("objective", np.nan)),
+        "selection_objective": float(selected.get("selection_objective", np.nan)),
+        "raw_objective": float(selected.get("raw_objective", np.nan)),
+        "scatter_ratio": float(selected.get("scatter_ratio", np.nan)),
+        "lag_phase": float(selected.get("lag_phase", np.nan)),
+        "n_bins_used": float(selected.get("n_bins_used", np.nan)),
         "base_objective": base_objective,
-        "harmonic_penalty": float(best_score.get("harmonic_penalty", np.nan)),
-        "alias_flag": bool(best_score.get("alias_flag", False)),
-        "alias_matches": [float(v) for v in best_score.get("alias_matches", [])],
+        "harmonic_penalty": float(selected.get("harmonic_penalty", np.nan)),
+        "alias_flag": bool(selected.get("alias_flag", False)),
+        "alias_matches": [float(v) for v in selected.get("alias_matches", [])],
+        "upward_multiple_flag": bool(selected.get("upward_multiple_flag", False)),
+        "rel_improvement_vs_base": selected.get("rel_improvement_vs_base", np.nan),
+        "required_rel_improvement": selected.get("required_rel_improvement", np.nan),
     }
-    return float(best_period), float(best_factor), diag
+    return float(selected.get("period", base_period)), float(selected.get("factor", 1.0)), diag
 
 
 def _normalize_method_names(method: str | None) -> list[str]:

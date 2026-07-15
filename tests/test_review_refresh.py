@@ -11,6 +11,16 @@ from malca.review.store import db_connect, get_candidate_payload, import_candida
 from malca.io.table_io import write_feature_table
 
 
+def test_resolved_worker_count_uses_all_cpus_for_zero_or_negative(monkeypatch) -> None:
+    monkeypatch.setattr(review_refresh, "cpu_count", lambda: 7)
+
+    assert review_refresh._resolved_worker_count(None) == 1
+    assert review_refresh._resolved_worker_count(1) == 1
+    assert review_refresh._resolved_worker_count(3) == 3
+    assert review_refresh._resolved_worker_count(0) == 7
+    assert review_refresh._resolved_worker_count(-1) == 7
+
+
 def test_refresh_review_stats_from_run_replaces_stats_only(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "run"
     results_dir = run_dir / "results"
@@ -220,6 +230,171 @@ def test_refresh_review_stats_from_ltv_scope_matches_db_by_asas_sn_id(tmp_path: 
         payload = get_candidate_payload(conn, "ltv_123")
 
     assert payload["lc_path"] == str(lc_path)
+
+
+def test_q_only_refresh_updates_q_without_clearing_other_stats(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    results_dir = run_dir / "results"
+    bundle_dir = run_dir / "bundle_assets" / "lightcurves"
+    results_dir.mkdir(parents=True)
+    bundle_dir.mkdir(parents=True)
+
+    candidate_source = results_dir / "lc_events_periodicity.parquet"
+    write_feature_table(
+        pd.DataFrame([{"candidate_id": "QONLY-1", "asas_sn_id": "QONLY-1"}]),
+        candidate_source,
+    )
+
+    lc_path = bundle_dir / "QONLY-1.dat2"
+    lc_path.write_text("dummy", encoding="ascii")
+
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "QONLY-1",
+                        "asas_sn_id": "QONLY-1",
+                        "lc_path": "/missing/original/QONLY-1.dat2",
+                        "periodicity_period": 3.25,
+                        "stats_photometry_mean_mag": 99.0,
+                        "stats_legacy_extra": 123.0,
+                        "stats_variability_quasi_periodicity_q": 0.99,
+                    }
+                ]
+            ),
+            source_path=str(candidate_source),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    def fake_compute_stats(*_args, **_kwargs):
+        raise AssertionError("q-only refresh should not call full compute_stats")
+
+    def fake_q_summary(
+        _candidate_id: str,
+        _parent: str,
+        *,
+        file_ext: str | None = None,
+        feature_period_days: float | None = None,
+        feature_period_source: str | None = None,
+        **_kwargs,
+    ):
+        assert file_ext == "dat2"
+        assert feature_period_days == 3.25
+        assert feature_period_source == "periodicity_period"
+        return {
+            "variability_quasi_periodicity_q": 0.21,
+            "variability_quasi_periodicity_method": "phase_template_med500m2",
+            "variability_quasi_periodicity_n_points": 42,
+            "variability_quasi_periodicity_n_bins": 500,
+            "variability_quasi_periodicity_populated_bins": 30,
+            "variability_quasi_periodicity_bin_coverage": 0.6,
+            "variability_quasi_periodicity_smooth_window_bins": 1,
+            "variability_quasi_periodicity_template_amplitude": 0.4,
+            "variability_quasi_periodicity_raw_scatter": 0.5,
+            "variability_quasi_periodicity_resid_scatter": 0.2,
+            "variability_quasi_periodicity_scatter_ratio": 0.4,
+            "variability_quasi_periodicity_status": "ok",
+            "variability_periodic_feature_period_days": feature_period_days,
+            "variability_periodic_feature_period_source": feature_period_source,
+        }
+
+    monkeypatch.setattr(review_refresh, "compute_stats", fake_compute_stats)
+    monkeypatch.setattr(review_refresh, "compute_quasi_periodicity_summary", fake_q_summary)
+
+    result = review_refresh.refresh_review_stats_from_run(
+        run_dir,
+        db_path,
+        candidate_source=candidate_source,
+        q_only=True,
+        commit_every=1,
+    )
+
+    assert result["q_only"] is True
+    assert result["refreshed"] == 1
+    assert result["failed"] == []
+
+    with db_connect(db_path) as conn:
+        payload = get_candidate_payload(conn, "QONLY-1")
+
+    assert payload["lc_path"] == str(lc_path)
+    assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_q") == 0.21
+    assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_method") == "phase_template_med500m2"
+    assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_n_points") == 42
+    assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_days") == 3.25
+    assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_source") == "periodicity_period"
+    assert feature_mapping_get(payload, "stats_photometry_mean_mag") == 99.0
+    assert feature_mapping_get(payload, "stats_legacy_extra") == 123.0
+
+
+def test_refresh_parent_writes_worker_results(tmp_path: Path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    results_dir = run_dir / "results"
+    bundle_dir = run_dir / "bundle_assets" / "lightcurves"
+    results_dir.mkdir(parents=True)
+    bundle_dir.mkdir(parents=True)
+
+    candidate_source = results_dir / "lc_events_filtered.parquet"
+    write_feature_table(pd.DataFrame([{"candidate_id": "PAR-1"}]), candidate_source)
+    lc_path = bundle_dir / "PAR-1.dat2"
+    lc_path.write_text("dummy", encoding="ascii")
+
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        import_candidates(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "PAR-1",
+                        "asas_sn_id": "PAR-1",
+                        "lc_path": "/missing/original/PAR-1.dat2",
+                        "stats_file_points_total": 999.0,
+                    }
+                ]
+            ),
+            source_path=str(candidate_source),
+            characterize_before_import=False,
+            vet_before_import=False,
+        )
+
+    def fake_iter(work_items, *, workers):
+        assert workers == 3
+        assert len(work_items) == 1
+        assert work_items[0]["candidate_id"] == "PAR-1"
+        assert work_items[0]["q_only"] is False
+        yield {
+            "idx": 1,
+            "candidate_id": "PAR-1",
+            "updates": {
+                "lc_path": str(lc_path),
+                "stats_file_points_total": 22.0,
+                "stats_photometry_mean_mag": 14.5,
+            },
+            "error": "",
+        }
+
+    monkeypatch.setattr(review_refresh, "_iter_refresh_worker_results", fake_iter)
+
+    result = review_refresh.refresh_review_stats_from_run(
+        run_dir,
+        db_path,
+        candidate_source=candidate_source,
+        workers=3,
+        commit_every=1,
+    )
+
+    assert result["workers"] == 3
+    assert result["refreshed"] == 1
+
+    with db_connect(db_path) as conn:
+        payload = get_candidate_payload(conn, "PAR-1")
+
+    assert feature_mapping_get(payload, "stats_file_points_total") == 22.0
+    assert feature_mapping_get(payload, "stats_photometry_mean_mag") == 14.5
 
 
 def test_get_candidate_payload_reads_canonical_ltv_pm_fields(tmp_path: Path) -> None:

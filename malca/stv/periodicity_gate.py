@@ -26,7 +26,8 @@ from malca.config import (
 from malca.config import WORKERS
 from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
 from malca.core.period_arbitration import (
-    NATIVE_PERIOD_HARMONIC_FACTORS,
+    NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT,
+    NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
     native_harmonic_period_candidates,
     period_alias_matches,
 )
@@ -35,8 +36,9 @@ from malca.core.stats import compute_ce_stats
 from malca.core.utils import clean_lc, compute_n_cameras
 
 
-PREGATE_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_HARMONIC_FACTORS
+PREGATE_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_WITH_MULTIPLES_FACTORS
 PREGATE_HARMONIC_MIN_REL_IMPROVEMENT = 0.02
+PREGATE_HARMONIC_UPWARD_MIN_REL_IMPROVEMENT = NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT
 PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v5"
 PREGATE_CHECKPOINT_VERSION = "v8_ce_folded_scatter_phase_shape_lag"
 PREGATE_RESULT_COLUMNS: list[str] = [
@@ -179,45 +181,63 @@ def _score_period_harmonic_candidate(
         }
     jd0 = float(min(np.min(jd) for jd in all_jd))
 
+    bin_options = tuple(
+        dict.fromkeys(
+            int(option)
+            for option in (n_bins, max(12, n_bins // 2), max(8, n_bins // 4))
+            if int(option) > 0
+        )
+    )
     templates: dict[int, np.ndarray] = {}
     scatter_ratios: list[float] = []
     phase_peak_candidates: list[tuple[float, float, float]] = []
-    for band, (jd, resid) in band_resid.items():
-        phase = np.mod((jd - jd0) / float(period), 1.0)
-        template, _ = phase_template(phase, resid, n_bins=n_bins)
-        templates[int(band)] = template
+    n_bins_used = np.nan
+    for n_bins_try in bin_options:
+        candidate_templates: dict[int, np.ndarray] = {}
+        candidate_scatter_ratios: list[float] = []
+        candidate_phase_peak: list[tuple[float, float, float]] = []
+        for band, (jd, resid) in band_resid.items():
+            phase = np.mod((jd - jd0) / float(period), 1.0)
+            template, _ = phase_template(phase, resid, n_bins=n_bins_try)
+            candidate_templates[int(band)] = template
 
-        bin_idx = np.floor(phase * n_bins).astype(int)
-        bin_idx = np.clip(bin_idx, 0, n_bins - 1)
-        model = template[bin_idx]
-        valid = np.isfinite(model) & np.isfinite(resid)
-        if np.count_nonzero(valid) < 20:
-            continue
+            bin_idx = np.floor(phase * n_bins_try).astype(int)
+            bin_idx = np.clip(bin_idx, 0, n_bins_try - 1)
+            model = template[bin_idx]
+            valid = np.isfinite(model) & np.isfinite(resid)
+            if np.count_nonzero(valid) < 20:
+                continue
 
-        raw_sigma = _robust_sigma(resid[valid])
-        folded_sigma = _robust_sigma(resid[valid] - model[valid])
-        if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
-            scatter_ratios.append(float(folded_sigma / raw_sigma))
+            raw_sigma = _robust_sigma(resid[valid])
+            folded_sigma = _robust_sigma(resid[valid] - model[valid])
+            if np.isfinite(raw_sigma) and raw_sigma > 0 and np.isfinite(folded_sigma):
+                candidate_scatter_ratios.append(float(folded_sigma / raw_sigma))
 
-        finite_template = template[np.isfinite(template)]
-        if finite_template.size < max(6, n_bins // 6):
-            continue
-        template_baseline = float(np.median(finite_template))
-        template_peak = float(np.max(finite_template))
-        peak_amp = float(template_peak - template_baseline)
-        if not np.isfinite(peak_amp) or peak_amp <= 0 or not np.isfinite(raw_sigma) or raw_sigma <= 0:
-            continue
+            finite_template = template[np.isfinite(template)]
+            if finite_template.size < max(6, n_bins_try // 6):
+                continue
+            template_baseline = float(np.median(finite_template))
+            template_peak = float(np.max(finite_template))
+            peak_amp = float(template_peak - template_baseline)
+            if not np.isfinite(peak_amp) or peak_amp <= 0 or not np.isfinite(raw_sigma) or raw_sigma <= 0:
+                continue
 
-        peak_snr = float(peak_amp / raw_sigma)
-        half_peak_level = float(template_baseline + 0.5 * peak_amp)
-        peak_mask = np.asarray(template >= half_peak_level, dtype=bool)
-        if peak_mask.any():
-            peak_regions = int(np.count_nonzero(peak_mask & ~np.roll(peak_mask, 1)))
-        else:
-            peak_regions = 0
-        peak_width = float(np.mean(finite_template >= half_peak_level))
-        if np.isfinite(peak_snr) and np.isfinite(peak_width):
-            phase_peak_candidates.append((peak_snr, peak_width, float(peak_regions)))
+            peak_snr = float(peak_amp / raw_sigma)
+            half_peak_level = float(template_baseline + 0.5 * peak_amp)
+            peak_mask = np.asarray(template >= half_peak_level, dtype=bool)
+            if peak_mask.any():
+                peak_regions = int(np.count_nonzero(peak_mask & ~np.roll(peak_mask, 1)))
+            else:
+                peak_regions = 0
+            peak_width = float(np.mean(finite_template >= half_peak_level))
+            if np.isfinite(peak_snr) and np.isfinite(peak_width):
+                candidate_phase_peak.append((peak_snr, peak_width, float(peak_regions)))
+        if candidate_scatter_ratios:
+            templates = candidate_templates
+            scatter_ratios = candidate_scatter_ratios
+            phase_peak_candidates = candidate_phase_peak
+            n_bins_used = float(n_bins_try)
+            break
 
     if not scatter_ratios:
         return {
@@ -257,6 +277,7 @@ def _score_period_harmonic_candidate(
         "phase_peak_regions": float(phase_peak_regions),
         "phase_lag_g_v_cycles": float(phase_lag),
         "phase_lag_g_v_abs_cycles": float(phase_lag_abs),
+        "n_bins_used": n_bins_used,
         "alias_flag": alias_flag,
         "alias_matches": alias_matches,
     }
@@ -321,6 +342,7 @@ def _arbitrate_harmonic_period(
         period = float(candidate["period"])
         score = dict(_score_period_harmonic_candidate(band_resid, period))
         score["selection_objective"] = float(score.get("objective", np.inf))
+        score["upward_multiple_flag"] = bool(candidate.get("upward_multiple_flag", factor > 1.0))
         score["alias_flag"] = bool(score.get("alias_flag", candidate.get("alias_flag", False)))
         score["alias_matches"] = [float(v) for v in score.get("alias_matches", candidate.get("alias_matches", []))]
         candidates.append((float(factor), period, score))
@@ -348,7 +370,14 @@ def _arbitrate_harmonic_period(
         )
         best_selection_objective = float(score.get("selection_objective", score.get("objective", np.nan)))
         improvement = (base_selection_objective - best_selection_objective) / max(abs(base_selection_objective), 1e-9)
-        if not np.isfinite(improvement) or improvement < float(PREGATE_HARMONIC_MIN_REL_IMPROVEMENT):
+        required_improvement = (
+            float(PREGATE_HARMONIC_UPWARD_MIN_REL_IMPROVEMENT)
+            if float(factor) > 1.0
+            else float(PREGATE_HARMONIC_MIN_REL_IMPROVEMENT)
+        )
+        score["rel_improvement_vs_base"] = float(improvement)
+        score["required_rel_improvement"] = required_improvement
+        if not np.isfinite(improvement) or improvement < required_improvement:
             factor, period, score = base_entry
     return float(period), float(factor), score
 
