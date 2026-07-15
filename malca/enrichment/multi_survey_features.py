@@ -118,9 +118,19 @@ _COUNT_COLUMNS = {
 }
 
 
+def _is_missing_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        return False
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
 def _safe_float(value: Any) -> float:
     try:
-        if value is None or pd.isna(value):
+        if _is_missing_scalar(value):
             return np.nan
         return float(value)
     except Exception:
@@ -135,13 +145,21 @@ def _is_finite(value: Any) -> bool:
 
 
 def _safe_bool(value: Any) -> bool:
+    if _is_missing_scalar(value):
+        return False
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
     if isinstance(value, (int, float, np.integer, np.floating)):
-        return bool(value) and not (isinstance(value, float) and np.isnan(value))
+        return bool(value) and not np.isnan(float(value))
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "t", "yes", "y"}
     return False
+
+
+def _safe_text(value: Any) -> str:
+    if _is_missing_scalar(value):
+        return ""
+    return str(value)
 
 
 def _median(values: pd.Series | np.ndarray) -> float:
@@ -244,12 +262,18 @@ def _candidate_lookup_keys(row: pd.Series | dict[str, Any]) -> list[str]:
     keys: list[str] = []
     for key in ("candidate_id", "asas_sn_id", "source_id"):
         value = row.get(key)
-        if value is not None and not (isinstance(value, float) and np.isnan(value)):
-            keys.append(str(value).strip())
+        if _is_missing_scalar(value):
+            continue
+        text = str(value).strip()
+        if text:
+            keys.append(text)
     for key in ("path", "lc_path", "local_lightcurve_path"):
         value = row.get(key)
-        if value:
-            keys.append(Path(str(value)).stem)
+        if _is_missing_scalar(value):
+            continue
+        text = str(value).strip()
+        if text:
+            keys.append(Path(text).stem)
     seen: set[str] = set()
     return [key for key in keys if key and not (key in seen or seen.add(key))]
 
@@ -292,9 +316,12 @@ def _first_column(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:
 def _load_asassn_lc(row: pd.Series | dict[str, Any]) -> pd.DataFrame:
     for key in ("lc_path", "path", "local_lightcurve_path"):
         value = row.get(key)
-        if not value:
+        if _is_missing_scalar(value):
             continue
-        path = Path(str(value)).expanduser()
+        text = str(value).strip()
+        if not text:
+            continue
+        path = Path(text).expanduser()
         if not path.exists():
             continue
         raw = load_lightcurve_df(path)
@@ -580,10 +607,10 @@ def _candidate_period_days(row: pd.Series | dict[str, Any]) -> float:
 
 def _add_gaia_payload_features(features: dict[str, object], row: pd.Series | dict[str, Any]) -> None:
     features["ms_gaia_var_flag"] = _safe_bool(row.get("gaia_var_flag"))
-    features["ms_gaia_var_class"] = str(row.get("gaia_var_class") or "")
+    features["ms_gaia_var_class"] = _safe_text(row.get("gaia_var_class"))
     features["ms_gaia_var_score"] = _safe_float(row.get("gaia_var_score"))
     features["ms_gaia_eb_period"] = _safe_float(row.get("gaia_eb_period"))
-    features["ms_gaia_eb_morph"] = str(row.get("gaia_eb_morph") or "")
+    features["ms_gaia_eb_morph"] = _safe_text(row.get("gaia_eb_morph"))
     features["ms_gaia_eb_global_ranking"] = _safe_float(row.get("gaia_eb_global_ranking"))
     features["ms_radial_velocity"] = _safe_float(row.get("radial_velocity"))
     features["ms_rv_amplitude_robust"] = _safe_float(row.get("rv_amplitude_robust"))

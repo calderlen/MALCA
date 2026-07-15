@@ -171,6 +171,26 @@ def test_missing_files_are_graceful(tmp_path: Path) -> None:
     assert pd.isna(out["ms_tess_flux_frac_delta"])
 
 
+def test_nullable_gaia_payload_values_are_graceful(tmp_path: Path) -> None:
+    row = _base_event_row()
+    row.update(
+        {
+            "source_id": pd.NA,
+            "lc_path": pd.NA,
+            "path": pd.NA,
+            "local_lightcurve_path": pd.NA,
+            "gaia_var_class": pd.NA,
+            "gaia_eb_morph": pd.NA,
+        }
+    )
+
+    out = compute_multi_survey_features(pd.DataFrame([row]), external_lc_dir=tmp_path).iloc[0]
+
+    assert out["ms_feature_status"] == "ok"
+    assert out["ms_gaia_var_class"] == ""
+    assert out["ms_gaia_eb_morph"] == ""
+
+
 def test_no_event_stage_status_is_complete_after_check() -> None:
     payload = {"candidate_id": "C1", "ms_feature_status": "no_event", "ms_event_type": "none"}
 
