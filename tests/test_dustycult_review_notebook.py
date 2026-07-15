@@ -13,7 +13,13 @@ def test_dustycult_review_notebook_uses_shared_display_helpers() -> None:
     )
 
     assert "from malca.review.dustycult_display import (" in source
+    assert "build_dustycult_corner_figure" in source
+    assert "load_dustycult_samples" in source
     assert "def display_dustycult_review_panel" in source
-    assert "display_dustycult_review_panel(candidate_id, FULL_PLOT_MODE)" in source
+    assert "def plot_dustycult_corner" in source
+    assert "display_dustycult_review_panel(candidate_id, selected_mode)" in source
+    assert "has_corner_samples" in source
+    assert "EXPECTED_REVIEWED_DIPPERS = None" in source
+    assert "Expected {EXPECTED_REVIEWED_DIPPERS} reviewed dippers" not in source
     assert "def plot_deterministic_and_full" not in source
     assert "def _select_fit_row" not in source

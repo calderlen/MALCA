@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.dustycult import parse_json_cell
@@ -15,6 +17,30 @@ from malca.review.dustycult_visualization import (
     occulter_parameters_from_fit,
     star_parameters_from_fit,
 )
+
+DUSTYCULT_CORNER_PARAMETERS = (
+    "t0",
+    "v",
+    "b",
+    "tau0",
+    "lambda0",
+    "alpha",
+    "sigma_y",
+    "sigma_x_plus",
+    "sigma_x_minus",
+)
+
+_DUSTYCULT_CORNER_LABELS = {
+    "t0": "t0",
+    "v": "v",
+    "b": "b",
+    "tau0": "tau0",
+    "lambda0": "lambda0",
+    "alpha": "alpha",
+    "sigma_y": "sigma_y",
+    "sigma_x_plus": "sigma_x+",
+    "sigma_x_minus": "sigma_x-",
+}
 
 
 def format_dustycult_float(value: object, digits: int = 4) -> str:
@@ -289,6 +315,251 @@ def build_dustycult_fit_figure(curves: pd.DataFrame, fit_row: pd.Series | Mappin
     )
     fig.update_xaxes(title=dict(text=r"$t\ [\mathrm{JD}]$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
     fig.update_yaxes(title=dict(text=r"$F/F_{\mathrm{GP}}$", standoff=8), gridcolor=spec["grid"], zeroline=False, ticks="outside")
+    return fig
+
+
+def _sample_file_names(sample_kind: str) -> tuple[str, ...]:
+    kind = str(sample_kind or "samples").strip().lower()
+    if kind not in {"samples", "sampled_samples"}:
+        raise ValueError("sample_kind must be 'samples' or 'sampled_samples'.")
+    return (f"{kind}.parquet", f"{kind}.csv")
+
+
+def _candidate_sample_paths(
+    fit_row: pd.Series | Mapping[str, Any],
+    *,
+    sample_kind: str,
+    search_roots: list[str | Path] | tuple[str | Path, ...] | None,
+) -> list[Path]:
+    names = _sample_file_names(sample_kind)
+    paths: list[Path] = []
+    artifact = str(_series_get(fit_row, "artifact_dir", "") or "").strip()
+    if artifact:
+        artifact_dir = Path(artifact).expanduser()
+        paths.extend(artifact_dir / name for name in names)
+
+    candidate_id = str(_series_get(fit_row, "candidate_id", "") or "").strip()
+    mode = str(_series_get(fit_row, "mode", "quick") or "quick").strip().lower()
+    for root in search_roots or ():
+        root_path = Path(root).expanduser()
+        paths.extend(root_path / name for name in names)
+        if candidate_id and mode:
+            paths.extend(root_path / candidate_id / mode / name for name in names)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        token = str(path)
+        if token not in seen:
+            seen.add(token)
+            unique.append(path)
+    return unique
+
+
+def dustycult_samples_path(
+    fit_row: pd.Series | Mapping[str, Any],
+    *,
+    sample_kind: str = "samples",
+    search_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
+) -> Path | None:
+    """Return the first existing DustyCult posterior-sample artifact for a fit."""
+    for path in _candidate_sample_paths(fit_row, sample_kind=sample_kind, search_roots=search_roots):
+        if path.exists():
+            return path
+    return None
+
+
+def load_dustycult_samples(
+    fit_row: pd.Series | Mapping[str, Any],
+    *,
+    sample_kind: str = "samples",
+    search_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
+) -> pd.DataFrame:
+    """Load physical-scale DustyCult posterior samples for a selected fit."""
+    path = dustycult_samples_path(fit_row, sample_kind=sample_kind, search_roots=search_roots)
+    if path is None:
+        return pd.DataFrame()
+    if path.suffix.lower() == ".csv":
+        return pd.read_csv(path)
+    return pd.read_parquet(path)
+
+
+def _empty_dustycult_figure(message: str, theme: str | None, *, height: int = 280) -> go.Figure:
+    spec = dustycult_theme(theme)
+    fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        showarrow=False,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        font=dict(color=spec["muted"], size=12, family=PUBLICATION_PLOTLY_FONT),
+    )
+    fig.update_layout(
+        template=None,
+        paper_bgcolor=spec["paper_bg"],
+        plot_bgcolor=spec["plot_bg"],
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=11),
+        margin=dict(l=28, r=28, t=44, b=28),
+        height=height,
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    return fig
+
+
+def _corner_axis_range(values: pd.Series) -> tuple[float, float] | None:
+    numeric = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if numeric.empty:
+        return None
+    lo = float(numeric.min())
+    hi = float(numeric.max())
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        return None
+    if lo == hi:
+        pad = max(abs(lo) * 0.05, 1e-6)
+    else:
+        pad = (hi - lo) * 0.04
+    return lo - pad, hi + pad
+
+
+def build_dustycult_corner_figure(
+    fit_row: pd.Series | Mapping[str, Any],
+    samples: pd.DataFrame | None = None,
+    *,
+    parameters: list[str] | tuple[str, ...] | None = None,
+    sample_kind: str = "samples",
+    search_roots: list[str | Path] | tuple[str | Path, ...] | None = None,
+    max_draws: int | None = 2000,
+    theme: str | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Build a lower-triangle DustyCult posterior corner plot from sample artifacts."""
+    if samples is None:
+        samples = load_dustycult_samples(fit_row, sample_kind=sample_kind, search_roots=search_roots)
+    if samples is None or samples.empty:
+        return _empty_dustycult_figure("No DustyCult posterior sample artifact found for this fit.", theme)
+
+    requested = list(parameters or DUSTYCULT_CORNER_PARAMETERS)
+    available = [name for name in requested if name in samples.columns]
+    if not available:
+        return _empty_dustycult_figure("No requested DustyCult posterior parameters are present in the sample table.", theme)
+
+    frame = samples[available].copy()
+    for name in available:
+        frame[name] = pd.to_numeric(frame[name], errors="coerce")
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(how="all")
+    if frame.empty:
+        return _empty_dustycult_figure("DustyCult posterior samples contain no finite parameter values.", theme)
+    if max_draws is not None and len(frame) > int(max_draws):
+        frame = frame.sample(n=int(max_draws), random_state=0).sort_index()
+
+    n_params = len(available)
+    spec = dustycult_theme(theme)
+    subplot_titles = [
+        _DUSTYCULT_CORNER_LABELS.get(name, name) if row == col else ""
+        for row in range(n_params)
+        for col in range(n_params)
+    ]
+    fig = make_subplots(
+        rows=n_params,
+        cols=n_params,
+        shared_xaxes=False,
+        shared_yaxes=False,
+        horizontal_spacing=0.018,
+        vertical_spacing=0.018,
+        subplot_titles=subplot_titles,
+    )
+    ranges = {name: _corner_axis_range(frame[name]) for name in available}
+    point_color = "#5479d6" if str(theme or "").strip().lower() == "white" else "#9ab7ff"
+    hist_color = "#5577aa" if str(theme or "").strip().lower() == "white" else "#8fb5ff"
+
+    for row_idx, y_name in enumerate(available, start=1):
+        for col_idx, x_name in enumerate(available, start=1):
+            if row_idx < col_idx:
+                fig.update_xaxes(visible=False, row=row_idx, col=col_idx)
+                fig.update_yaxes(visible=False, row=row_idx, col=col_idx)
+                continue
+            if row_idx == col_idx:
+                values = frame[x_name].dropna()
+                fig.add_trace(
+                    go.Histogram(
+                        x=values,
+                        nbinsx=32,
+                        marker=dict(color=hist_color, line=dict(color=spec["paper_bg"], width=0.3)),
+                        opacity=0.82,
+                        showlegend=False,
+                        hovertemplate=f"{_DUSTYCULT_CORNER_LABELS.get(x_name, x_name)}: %{{x:.5g}}<br>count: %{{y}}<extra></extra>",
+                    ),
+                    row=row_idx,
+                    col=col_idx,
+                )
+            else:
+                pair = frame[[x_name, y_name]].dropna()
+                fig.add_trace(
+                    go.Scatter(
+                        x=pair[x_name],
+                        y=pair[y_name],
+                        mode="markers",
+                        marker=dict(color=point_color, size=3.2, opacity=0.34, line=dict(width=0)),
+                        showlegend=False,
+                        hovertemplate=(
+                            f"{_DUSTYCULT_CORNER_LABELS.get(x_name, x_name)}: %{{x:.5g}}<br>"
+                            f"{_DUSTYCULT_CORNER_LABELS.get(y_name, y_name)}: %{{y:.5g}}<extra></extra>"
+                        ),
+                    ),
+                    row=row_idx,
+                    col=col_idx,
+                )
+
+            if ranges.get(x_name) is not None:
+                fig.update_xaxes(range=list(ranges[x_name]), row=row_idx, col=col_idx)
+            if row_idx != col_idx and ranges.get(y_name) is not None:
+                fig.update_yaxes(range=list(ranges[y_name]), row=row_idx, col=col_idx)
+            fig.update_xaxes(
+                gridcolor=spec["grid"],
+                zeroline=False,
+                ticks="outside",
+                showticklabels=(row_idx == n_params),
+                title_text=_DUSTYCULT_CORNER_LABELS.get(x_name, x_name) if row_idx == n_params else "",
+                row=row_idx,
+                col=col_idx,
+            )
+            fig.update_yaxes(
+                gridcolor=spec["grid"],
+                zeroline=False,
+                ticks="outside",
+                showticklabels=(col_idx == 1 and row_idx != col_idx),
+                title_text=_DUSTYCULT_CORNER_LABELS.get(y_name, y_name) if col_idx == 1 and row_idx != col_idx else "",
+                row=row_idx,
+                col=col_idx,
+            )
+
+    mode = str(_series_get(fit_row, "mode", "quick") or "quick")
+    candidate_id = str(_series_get(fit_row, "candidate_id", "") or "").strip()
+    title_text = title or f"DustyCult {mode.capitalize()} Posterior Corner"
+    if candidate_id:
+        title_text = f"{candidate_id} - {title_text}"
+    fig.update_layout(
+        template=None,
+        title=dict(
+            text=title_text,
+            x=0.02,
+            xanchor="left",
+            y=0.988,
+            yanchor="top",
+            font=dict(size=14, family=PUBLICATION_PLOTLY_FONT),
+        ),
+        paper_bgcolor=spec["paper_bg"],
+        plot_bgcolor=spec["plot_bg"],
+        font=dict(color=spec["font"], family=PUBLICATION_PLOTLY_FONT, size=10),
+        bargap=0.04,
+        margin=dict(l=68, r=24, t=88, b=58),
+        height=max(420, 118 * n_params + 110),
+    )
+    for annotation in fig.layout.annotations:
+        annotation.font = dict(size=10, color=spec["font"], family=PUBLICATION_PLOTLY_FONT)
     return fig
 
 

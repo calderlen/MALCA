@@ -23,10 +23,13 @@ from malca.review.dustycult import (
     upsert_dustycult_fit,
 )
 from malca.review.dustycult_display import (
+    build_dustycult_corner_figure,
     build_dustycult_fit_figure,
+    dustycult_samples_path,
     dustycult_fit_metadata_rows,
     dustycult_geometry_rows,
     dustycult_posterior_rows,
+    load_dustycult_samples,
     select_dustycult_display_row,
 )
 from malca.review.dustycult_visualization import (
@@ -224,6 +227,36 @@ def test_dustycult_display_fit_figure_uses_stored_predictive_curves() -> None:
     assert "DustyCult Quick Fit" in fig.layout.title.text
     assert "$F/F" in fig.layout.yaxis.title.text
     assert any(trace.name == "g median" for trace in fig.data)
+
+
+def test_dustycult_corner_figure_loads_samples_from_search_root(tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "review" / "dustycult" / "cand-1" / "quick"
+    artifact_dir.mkdir(parents=True)
+    _sample_artifacts(n_samples=24).to_parquet(artifact_dir / "samples.parquet", index=False)
+    row = pd.Series(_fit_row_with_posterior(artifact_dir=str(tmp_path / "stale"), candidate_id="cand-1", mode="quick"))
+
+    assert dustycult_samples_path(row, search_roots=[tmp_path / "review" / "dustycult"]) == artifact_dir / "samples.parquet"
+    samples = load_dustycult_samples(row, search_roots=[tmp_path / "review" / "dustycult"])
+    fig = build_dustycult_corner_figure(
+        row,
+        parameters=("t0", "v", "b"),
+        search_roots=[tmp_path / "review" / "dustycult"],
+        theme="white",
+    )
+
+    assert samples.shape == (24, 9)
+    assert "cand-1 - DustyCult Quick Posterior Corner" in fig.layout.title.text
+    assert sum(trace.type == "histogram" for trace in fig.data) == 3
+    assert sum(trace.type == "scatter" for trace in fig.data) == 3
+
+
+def test_dustycult_corner_figure_handles_missing_samples() -> None:
+    row = pd.Series(_fit_row_with_posterior(artifact_dir="/definitely/missing/dustycult"))
+
+    fig = build_dustycult_corner_figure(row, parameters=("t0", "v"), theme="white")
+
+    assert len(fig.data) == 0
+    assert "No DustyCult posterior sample artifact" in fig.layout.annotations[0].text
 
 
 def test_control_defaults_use_stored_dip_columns_for_window(tmp_path: Path) -> None:
