@@ -220,6 +220,52 @@ def test_dash_runtime_endpoints_are_not_cached_by_browsers() -> None:
         assert response.headers.get("Pragma") == "no-cache"
 
 
+def test_open_existing_search_button_is_wired_to_navigation_callback() -> None:
+    matching_callbacks = []
+    for meta in app.callback_map.values():
+        input_ids = {item.get("id") for item in meta.get("inputs", [])}
+        if {"candidate-search-btn", "candidate-search-query"}.issubset(input_ids):
+            matching_callbacks.append(meta)
+
+    assert len(matching_callbacks) == 1
+    callback = matching_callbacks[0]["callback"]
+    wrapped = getattr(callback, "__wrapped__", callback)
+    assert wrapped.__name__ == "open_existing_candidate"
+
+
+def test_registered_dash_callbacks_have_compatible_signatures() -> None:
+    problems = []
+    for output, meta in app.callback_map.items():
+        callback = meta.get("callback")
+        if callback is None:
+            continue
+        wrapped = getattr(callback, "__wrapped__", callback)
+        signature = inspect.signature(wrapped)
+        params = list(signature.parameters.values())
+        positional = [
+            param
+            for param in params
+            if param.kind in (param.POSITIONAL_ONLY, param.POSITIONAL_OR_KEYWORD)
+        ]
+        required = [param for param in positional if param.default is param.empty]
+        has_varargs = any(param.kind is param.VAR_POSITIONAL for param in params)
+
+        expected_args = len(meta.get("inputs", []) or []) + len(meta.get("state", []) or [])
+        background = meta.get("background") or {}
+        if background.get("progress"):
+            expected_args += 1
+
+        min_args = len(required)
+        max_args = None if has_varargs else len(positional)
+        if expected_args < min_args or (max_args is not None and expected_args > max_args):
+            problems.append(
+                f"{getattr(wrapped, '__name__', '<unknown>')} for {output}: "
+                f"expects {signature}, callback supplies {expected_args} args"
+            )
+
+    assert problems == []
+
+
 def test_layout_graphs_enable_dash_mathjax_without_dash_responsive_prop() -> None:
     graphs = _components_by_type(app.layout, "Graph")
 
@@ -1891,6 +1937,10 @@ def test_vetting_filter_group_has_known_variable_and_dipper_contaminant_presets(
 
     assert "vetting-known-variables-btn" in ids
     assert "vetting-dipper-contaminants-btn" in ids
+    assert "vetting-radius-arcsec" in ids
+    assert "vetting-known-variables-policy" in ids
+    assert "vetting-dipper-contaminants-policy" in ids
+    assert "Vetting radius (arcsec):" in texts
     assert "Exclude Known Variables" in texts
     assert "Exclude Dipper Contaminants" in texts
 

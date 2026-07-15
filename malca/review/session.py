@@ -17,6 +17,10 @@ _QUEUE_SORT_KEYS = {
     "sort_cols",
     "sort_desc",
 }
+_CATALOG_NEIGHBOR_POLICY_LABELS = {
+    "exclude_known_catalog_neighbors": "Exclude catalog-neighbor known variables",
+    "exclude_dipper_catalog_neighbors": "Exclude catalog-neighbor dipper contaminants",
+}
 
 
 def _format_filter_value(value: object) -> str:
@@ -56,6 +60,31 @@ def _active_filter_specs(filter_params: dict[str, object]) -> list[dict[str, obj
         if key in _QUEUE_SCOPE_KEYS or key in _QUEUE_SORT_KEYS:
             continue
         if key == "select_filter_mode":
+            continue
+
+        if key == "catalog_neighbor_radius_arcsec":
+            if (
+                filter_params.get("exclude_known_catalog_neighbors")
+                or filter_params.get("exclude_dipper_catalog_neighbors")
+            ):
+                continue
+
+        if key in _CATALOG_NEIGHBOR_POLICY_LABELS:
+            if value:
+                radius = filter_params.get("catalog_neighbor_radius_arcsec")
+                params = {key: True}
+                if radius is not None:
+                    params["catalog_neighbor_radius_arcsec"] = radius
+                suffix = (
+                    f" within {_format_filter_value(radius)} arcsec"
+                    if radius is not None
+                    else ""
+                )
+                specs.append({
+                    "key": key,
+                    "label": f"{_CATALOG_NEIGHBOR_POLICY_LABELS[key]}{suffix}",
+                    "params": params,
+                })
             continue
 
         if key in SPECIAL_FILTERS:

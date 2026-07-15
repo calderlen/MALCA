@@ -247,60 +247,12 @@ def _arbitrate_harmonic_period(
     min_period: float,
     max_period: float,
 ) -> tuple[float, float, dict[str, float]]:
-    if not np.isfinite(base_period) or base_period <= 0:
-        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
-
-    band_resid: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-    for band in (0, 1):
-        bdf = band_dfs.get(band)
-        if bdf is None or bdf.empty or "resid" not in bdf.columns:
-            continue
-        jd = bdf["JD"].to_numpy(dtype=float)
-        resid = bdf["resid"].to_numpy(dtype=float)
-        mask = np.isfinite(jd) & np.isfinite(resid)
-        if np.count_nonzero(mask) < 30:
-            continue
-        band_resid[band] = (jd[mask], resid[mask])
-
-    if not band_resid:
-        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
-
-    candidates: list[tuple[float, float, dict[str, float]]] = []
-    for factor in (1.0, 2.0, 0.5):
-        p = float(base_period) * float(factor)
-        if not np.isfinite(p) or p <= 0:
-            continue
-        if p < float(min_period) or p > float(max_period):
-            continue
-        if any(abs(p - p_prev) <= 1e-10 * max(1.0, abs(p), abs(p_prev)) for _, p_prev, _ in candidates):
-            continue
-        score = _score_period_harmonic_candidate(band_resid, p)
-        candidates.append((float(factor), p, score))
-
-    if not candidates:
-        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
-
-    finite_candidates = [c for c in candidates if np.isfinite(c[2].get("objective", np.nan))]
-    if not finite_candidates:
-        return float(base_period), 1.0, {"objective": np.nan, "base_objective": np.nan}
-
-    best_factor, best_period, best_score = min(finite_candidates, key=lambda x: float(x[2]["objective"]))
-    base_entry = next((c for c in finite_candidates if abs(c[0] - 1.0) < 1e-12), None)
-    base_objective = float(base_entry[2]["objective"]) if base_entry is not None else np.nan
-
-    # Avoid jittery harmonic flips unless improvement is meaningful.
-    if base_entry is not None and abs(best_factor - 1.0) > 1e-12:
-        improvement = (base_objective - float(best_score["objective"])) / max(abs(base_objective), 1e-9)
-        if not np.isfinite(improvement) or improvement < 0.02:
-            best_factor, best_period, best_score = base_entry
-
-    diag = {
-        "objective": float(best_score.get("objective", np.nan)),
-        "scatter_ratio": float(best_score.get("scatter_ratio", np.nan)),
-        "lag_phase": float(best_score.get("lag_phase", np.nan)),
-        "base_objective": base_objective,
-    }
-    return float(best_period), float(best_factor), diag
+    return shared_arbitrate_harmonic_period(
+        band_dfs,
+        base_period,
+        min_period=min_period,
+        max_period=max_period,
+    )
 
 
 def _run_period_search_for_payload(
@@ -362,16 +314,6 @@ def _run_harmonic_check_for_payload(
 
 
 
-@app.callback(
-    [Output('queue-data', 'data', allow_duplicate=True),
-     Output('current-index', 'data', allow_duplicate=True),
-     Output('notification', 'children', allow_duplicate=True)],
-    [Input('candidate-search-btn', 'n_clicks'),
-     Input('candidate-search-query', 'n_submit')],
-    [State('candidate-search-query', 'value'),
-     State('queue-data', 'data')],
-    prevent_initial_call=True,
-)
 def _lookup_candidate_id_for_query(conn: sqlite3.Connection, query_text: str) -> tuple[str | None, str | None]:
     """Resolve a search query to a candidate_id and match label."""
     normalized = _format_large_integer_like_display(query_text).strip()
@@ -432,6 +374,16 @@ def _lookup_candidate_id_for_query(conn: sqlite3.Connection, query_text: str) ->
     return None, None
 
 
+@app.callback(
+    [Output('queue-data', 'data', allow_duplicate=True),
+     Output('current-index', 'data', allow_duplicate=True),
+     Output('notification', 'children', allow_duplicate=True)],
+    [Input('candidate-search-btn', 'n_clicks'),
+     Input('candidate-search-query', 'n_submit')],
+    [State('candidate-search-query', 'value'),
+     State('queue-data', 'data')],
+    prevent_initial_call=True,
+)
 def open_existing_candidate(n_clicks, n_submit, query, queue_data):
     """Jump to an existing candidate in the DB by common identifiers or LC stem."""
     _ = n_clicks, n_submit
