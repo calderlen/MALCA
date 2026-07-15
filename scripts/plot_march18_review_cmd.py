@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Plot a Gaia CMD for selected March 18 review buckets."""
+"""Plot a Gaia CMD for selected review candidates."""
 from __future__ import annotations
 
 import argparse
@@ -34,7 +34,7 @@ from malca.plotting.lightcurve_publication import (
 
 apply_publication_rcparams(plt)
 
-from malca.config import DEFAULT_OUTPUT_DIR, MIST_GRID_PATH
+from malca.config import CMD_A_G_PER_AV, CMD_E_BP_RP_PER_AV, DEFAULT_OUTPUT_DIR, MIST_GRID_PATH
 from malca.ltv.cmd import (
     cmd_uncertainty_from_fields,
     dustmaps_cmd_from_fields,
@@ -46,9 +46,13 @@ from malca.ltv.cmd import (
 
 
 MARCH18_RUN = DEFAULT_OUTPUT_DIR / "runs" / "runs_march18_bundle_all"
-DEFAULT_REVIEW_DB = MARCH18_RUN / "review" / "review.taxonomy_filled.db"
-DEFAULT_CANDIDATES = MARCH18_RUN / "results" / "lc_events_classified.parquet"
-DEFAULT_OUTPUT = MARCH18_RUN / "results" / "march18_review_cmd_selected.png"
+JULY1_RUN = DEFAULT_OUTPUT_DIR / "runs" / "dat3-full-extended_2026-07-01-v4"
+MARCH18_REVIEW_DB = MARCH18_RUN / "review" / "review.taxonomy_filled.db"
+MARCH18_CANDIDATES = MARCH18_RUN / "results" / "lc_events_classified.parquet"
+MARCH18_OUTPUT = MARCH18_RUN / "results" / "march18_review_cmd_selected.png"
+JULY1_REVIEW_DB = JULY1_RUN / "review" / "review.db"
+JULY1_CANDIDATES = JULY1_RUN / "results" / "lc_events_vetted.parquet"
+JULY1_OUTPUT = JULY1_RUN / "results" / "july1_review_cmd_dippers.png"
 CMD_FIGSIZE = FIG_SINGLE_COL_SQUARE
 CMD_XLIM = (-1.0, 3.0)
 CMD_YLIM = (-4.0, 10.0)
@@ -71,6 +75,21 @@ HOLLOW_CMD_SOURCES = frozenset({"observed_fallback"})
 PLOTTABLE_CMD_SOURCES = SOLID_CMD_SOURCES | HOLLOW_CMD_SOURCES
 
 BUCKET_ORDER = ["Dipper", "Interesting", "LTV", "Microlensing", "Eclipsing binary", "Unknown"]
+PRESETS = {
+    "july1-dippers": {
+        "review_db": JULY1_REVIEW_DB,
+        "candidates": JULY1_CANDIDATES,
+        "output": JULY1_OUTPUT,
+        "buckets": ["Dipper"],
+    },
+    "march18": {
+        "review_db": MARCH18_REVIEW_DB,
+        "candidates": MARCH18_CANDIDATES,
+        "output": MARCH18_OUTPUT,
+        "buckets": BUCKET_ORDER,
+    },
+}
+DEFAULT_PRESET = "july1-dippers"
 
 
 def _json_frame(series: pd.Series) -> pd.DataFrame:
@@ -378,8 +397,21 @@ CMD_DENSITY_UPSAMPLE_FACTOR = 2
 CMD_DENSITY_CONTOUR_LEVELS = 20
 CMD_DENSITY_CUTOFF_PERCENTILE = 30.0
 CMD_DENSITY_CUTOFF_FRAC_MAX = 0.04
-CMD_MARKER_SIZE_SCALE = 1.05
+CMD_MARKER_SIZE_SCALE = 0.72
+CMD_REVIEW_BUCKET_STYLE = {bucket: dict(style) for bucket, style in CMD_BUCKET_STYLE.items()}
+CMD_REVIEW_BUCKET_STYLE["LTV"].update({"marker": "o", "size": 16})
+CMD_REVIEW_BUCKET_STYLE["Microlensing"].update({"marker": "^", "size": 16})
 DEFAULT_BACKGROUND_STYLE = "density"
+BACKGROUND_SAMPLE_CHOICES = ("gaia", "gaia+candidates", "candidates")
+DEFAULT_BACKGROUND_SAMPLE = "gaia+candidates"
+GAIA_BG_SOURCE_CHOICES = ("file", "tap")
+GAIA_BG_CMD_MODE_CHOICES = ("match", "observed", "dereddened")
+DEFAULT_GAIA_BG_SOURCE = "file"
+DEFAULT_GAIA_BG_CMD_MODE = "match"
+DEFAULT_GAIA_TAP_TABLE = "gaiadr3.gaia_source"
+DEFAULT_GAIA_TAP_LIMIT = 200_000
+DEFAULT_GAIA_TAP_RUWE_MAX = 1.4
+DEFAULT_GAIA_DUST_CHUNK_SIZE = 50_000
 GAIA_BG_PATH = Path("input/gaia/gaia_dr3_crossmatched.parquet")
 
 # "density" background style: full-field pcolormesh, viridis, lighter smoothing.
@@ -638,21 +670,357 @@ def _plot_cmd_background_corner(ax, bg_x: np.ndarray, bg_y: np.ndarray) -> None:
     )
 
 
-def _load_gaia_background(bg_path: Path | str = GAIA_BG_PATH) -> tuple[np.ndarray, np.ndarray]:
-    """Load the full Gaia DR3 crossmatched sample for CMD density background."""
-    import pandas as pd
+def _gaia_background_arrays_from_frame(
+    df: pd.DataFrame,
+    *,
+    g_min: float | None = None,
+    g_max: float | None = None,
+    cmd_mode: str = "observed",
+    dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    if cmd_mode not in {"observed", "dereddened"}:
+        raise ValueError(f"Gaia background cmd mode must be observed or dereddened, got {cmd_mode!r}")
+
+    work = pd.DataFrame(index=df.index)
+    work["bp_rp"] = pd.to_numeric(df["bp_rp"], errors="coerce")
+    work["phot_g_mean_mag"] = pd.to_numeric(df["phot_g_mean_mag"], errors="coerce")
+    work["parallax"] = pd.to_numeric(df["parallax"], errors="coerce")
+    if "distance_gspphot" in df.columns:
+        work["distance_gspphot"] = pd.to_numeric(df["distance_gspphot"], errors="coerce")
+    if "ra" in df.columns:
+        work["ra"] = pd.to_numeric(df["ra"], errors="coerce")
+    if "dec" in df.columns:
+        work["dec"] = pd.to_numeric(df["dec"], errors="coerce")
+
+    ok = (work["parallax"] > 0) & work["phot_g_mean_mag"].notna() & work["bp_rp"].notna()
+    if g_min is not None:
+        ok &= work["phot_g_mean_mag"] >= float(g_min)
+    if g_max is not None:
+        ok &= work["phot_g_mean_mag"] <= float(g_max)
+    work = work.loc[ok].copy()
+    if work.empty:
+        return np.empty(0), np.empty(0), {"gaia_background_cmd_mode": cmd_mode}
+
+    dist_pc = pd.Series(np.nan, index=work.index, dtype=float)
+    if "distance_gspphot" in work.columns:
+        gsp = work["distance_gspphot"]
+        dist_pc = dist_pc.where(~((gsp > 0) & np.isfinite(gsp)), gsp)
+    plx_dist_pc = 1000.0 / work["parallax"]
+    dist_pc = dist_pc.where(np.isfinite(dist_pc) & (dist_pc > 0), plx_dist_pc)
+
+    finite_dist = np.isfinite(dist_pc) & (dist_pc > 0)
+    work = work.loc[finite_dist].copy()
+    dist_pc = dist_pc.loc[finite_dist]
+    if work.empty:
+        return np.empty(0), np.empty(0), {"gaia_background_cmd_mode": cmd_mode}
+
+    bp_rp = work["bp_rp"].to_numpy(dtype=float)
+    g = work["phot_g_mean_mag"].to_numpy(dtype=float)
+    dist = dist_pc.to_numpy(dtype=float)
+    mg = g - 5.0 * np.log10(dist) + 5.0
+    if cmd_mode == "observed":
+        return bp_rp, mg, {"gaia_background_cmd_mode": "observed"}
+
+    if "ra" not in work.columns or "dec" not in work.columns:
+        raise ValueError("Dereddened Gaia background requires ra/dec columns; use --gaia-bg-source tap or a Gaia file with ra/dec")
+
+    av = _query_gaia_background_dust_av(
+        work["ra"].to_numpy(dtype=float),
+        work["dec"].to_numpy(dtype=float),
+        dist,
+        chunk_size=dust_chunk_size,
+    )
+    av = np.where(np.isfinite(av) & (av >= 0), av, 0.0)
+    bp_rp0 = bp_rp - CMD_E_BP_RP_PER_AV * av
+    mg0 = mg - CMD_A_G_PER_AV * av
+    finite_av = av[np.isfinite(av)]
+    return bp_rp0, mg0, {
+        "gaia_background_cmd_mode": "dereddened",
+        "gaia_background_dust_points": int(len(av)),
+        "gaia_background_mean_av": None if finite_av.size == 0 else float(np.mean(finite_av)),
+        "gaia_background_median_av": None if finite_av.size == 0 else float(np.median(finite_av)),
+    }
+
+
+def _query_gaia_background_dust_av(
+    ra_deg: np.ndarray,
+    dec_deg: np.ndarray,
+    dist_pc: np.ndarray,
+    *,
+    chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+) -> np.ndarray:
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    from dustmaps3d import dustmaps3d
+
+    if chunk_size <= 0:
+        raise ValueError("--gaia-bg-dust-chunk-size must be positive")
+
+    ra = np.asarray(ra_deg, dtype=float)
+    dec = np.asarray(dec_deg, dtype=float)
+    dist = np.asarray(dist_pc, dtype=float)
+    av = np.full(len(ra), np.nan, dtype=float)
+    valid = np.isfinite(ra) & np.isfinite(dec) & np.isfinite(dist) & (dist > 0)
+    if not valid.any():
+        return av
+
+    valid_idx = np.flatnonzero(valid)
+    print(f"Dereddening Gaia background with dustmaps3d for {len(valid_idx):,} sources...")
+    for start in range(0, len(valid_idx), int(chunk_size)):
+        idx = valid_idx[start : start + int(chunk_size)]
+        coords = SkyCoord(ra=ra[idx] * u.deg, dec=dec[idx] * u.deg, frame="icrs")
+        galactic = coords.galactic
+        ebv, _dust_density, _sigma, _max_dist = dustmaps3d(
+            galactic.l.deg,
+            galactic.b.deg,
+            dist[idx] / 1000.0,
+        )
+        av[idx] = 3.1 * np.asarray(ebv, dtype=float)
+        print(f"  dustmaps3d: {min(start + int(chunk_size), len(valid_idx)):,}/{len(valid_idx):,}")
+    finite_av = av[np.isfinite(av)]
+    if finite_av.size:
+        print(f"Gaia background dust complete. Mean A_V={finite_av.mean():.3f}, median A_V={np.median(finite_av):.3f}")
+    else:
+        print("Gaia background dust complete. No finite A_V values returned.")
+    return av
+
+
+def _load_gaia_background_file(
+    bg_path: Path | str = GAIA_BG_PATH,
+    *,
+    g_min: float | None = None,
+    g_max: float | None = None,
+    cmd_mode: str = "observed",
+    dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Load a local Gaia parquet sample for CMD density background."""
+    import pyarrow.parquet as pq
+
     path = Path(bg_path)
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[1] / path
     if not path.is_file():
-        return np.empty(0), np.empty(0)
-    df = pd.read_parquet(path, columns=["bp_rp", "phot_g_mean_mag", "parallax"])
-    bp_rp = pd.to_numeric(df["bp_rp"], errors="coerce").to_numpy(dtype=float)
-    g = pd.to_numeric(df["phot_g_mean_mag"], errors="coerce").to_numpy(dtype=float)
-    plx = pd.to_numeric(df["parallax"], errors="coerce").to_numpy(dtype=float)
-    ok = (plx > 0) & np.isfinite(g) & np.isfinite(bp_rp)
-    mg = g[ok] + 5 * np.log10(plx[ok] / 1000.0) + 5.0
-    return bp_rp[ok], mg
+        return np.empty(0), np.empty(0), {"gaia_background_cmd_mode": cmd_mode}
+    wanted = ["bp_rp", "phot_g_mean_mag", "parallax"]
+    if cmd_mode == "dereddened":
+        wanted.extend(["ra", "dec", "distance_gspphot"])
+    available = set(pq.ParquetFile(path).schema_arrow.names)
+    columns = [col for col in wanted if col in available]
+    missing = sorted(set(wanted[:3]) - available)
+    if missing:
+        raise ValueError(f"Gaia background file is missing required columns: {missing}")
+    df = pd.read_parquet(path, columns=columns)
+    return _gaia_background_arrays_from_frame(
+        df,
+        g_min=g_min,
+        g_max=g_max,
+        cmd_mode=cmd_mode,
+        dust_chunk_size=dust_chunk_size,
+    )
+
+
+def _adql_float(value: float) -> str:
+    return f"{float(value):.12g}"
+
+
+def _query_gaia_background_tap(
+    *,
+    g_min: float,
+    g_max: float,
+    row_limit: int = DEFAULT_GAIA_TAP_LIMIT,
+    ruwe_max: float | None = DEFAULT_GAIA_TAP_RUWE_MAX,
+    table: str = DEFAULT_GAIA_TAP_TABLE,
+    cmd_mode: str = "observed",
+    dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Query Gaia DR3 live via TAP and return apparent-G-filtered CMD background arrays."""
+    from astroquery.gaia import Gaia
+    from astroquery.utils.tap.core import TapPlus
+
+    if row_limit <= 0:
+        raise ValueError("--gaia-tap-limit must be positive")
+
+    conditions = [
+        f"phot_g_mean_mag >= {_adql_float(g_min)}",
+        f"phot_g_mean_mag <= {_adql_float(g_max)}",
+        "phot_g_mean_mag IS NOT NULL",
+        "bp_rp IS NOT NULL",
+        "parallax IS NOT NULL",
+        "parallax > 0",
+    ]
+    if ruwe_max is not None:
+        conditions.extend(["ruwe IS NOT NULL", f"ruwe <= {_adql_float(ruwe_max)}"])
+
+    query = f"""
+SELECT TOP {int(row_limit)}
+    source_id, ra, dec, phot_g_mean_mag, bp_rp, parallax, ruwe, distance_gspphot
+FROM {table}
+WHERE
+    {" AND ".join(conditions)}
+ORDER BY random_index
+"""
+    print("Querying Gaia TAP for background sample:")
+    print(query.strip())
+    Gaia.ROW_LIMIT = -1
+    job = TapPlus.launch_job_async(
+        Gaia,
+        query=query,
+        output_format="votable_gzip",
+        dump_to_file=False,
+        maxrec=int(row_limit),
+    )
+    df = job.get_results().to_pandas()
+    if len(df) < row_limit:
+        print(
+            f"Gaia TAP returned {len(df):,} rows for requested limit {row_limit:,}; "
+            "the archive may have fewer matching rows or may still be applying a service cap."
+        )
+    return _gaia_background_arrays_from_frame(
+        df,
+        g_min=g_min,
+        g_max=g_max,
+        cmd_mode=cmd_mode,
+        dust_chunk_size=dust_chunk_size,
+    )
+
+
+def _load_gaia_background(
+    bg_path: Path | str = GAIA_BG_PATH,
+    *,
+    source: str = DEFAULT_GAIA_BG_SOURCE,
+    g_min: float | None = None,
+    g_max: float | None = None,
+    tap_limit: int = DEFAULT_GAIA_TAP_LIMIT,
+    tap_ruwe_max: float | None = DEFAULT_GAIA_TAP_RUWE_MAX,
+    tap_table: str = DEFAULT_GAIA_TAP_TABLE,
+    cmd_mode: str = "observed",
+    dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    if source == "file":
+        return _load_gaia_background_file(
+            bg_path,
+            g_min=g_min,
+            g_max=g_max,
+            cmd_mode=cmd_mode,
+            dust_chunk_size=dust_chunk_size,
+        )
+    if source == "tap":
+        if g_min is None or g_max is None:
+            raise ValueError("--gaia-bg-source tap requires both --gaia-bg-g-min and --gaia-bg-g-max")
+        return _query_gaia_background_tap(
+            g_min=float(g_min),
+            g_max=float(g_max),
+            row_limit=int(tap_limit),
+            ruwe_max=tap_ruwe_max,
+            table=tap_table,
+            cmd_mode=cmd_mode,
+            dust_chunk_size=dust_chunk_size,
+        )
+    raise ValueError(f"gaia background source must be one of {GAIA_BG_SOURCE_CHOICES}, got {source!r}")
+
+
+def _candidate_background_rows(
+    plottable: pd.DataFrame,
+    *,
+    g_min: float | None = None,
+    g_max: float | None = None,
+) -> pd.DataFrame:
+    """Candidate CMD rows for the background, optionally filtered by apparent Gaia G."""
+    mask = pd.Series(True, index=plottable.index)
+    if g_min is not None or g_max is not None:
+        g = pd.to_numeric(plottable["phot_g_mean_mag"], errors="coerce")
+        if g_min is not None:
+            mask &= g >= float(g_min)
+        if g_max is not None:
+            mask &= g <= float(g_max)
+    return plottable[mask].copy()
+
+
+def _build_cmd_background_arrays(
+    plottable: pd.DataFrame,
+    *,
+    background_sample: str = DEFAULT_BACKGROUND_SAMPLE,
+    bg_path: Path | str = GAIA_BG_PATH,
+    gaia_bg_source: str = DEFAULT_GAIA_BG_SOURCE,
+    gaia_bg_cmd_mode: str = DEFAULT_GAIA_BG_CMD_MODE,
+    gaia_bg_g_min: float | None = None,
+    gaia_bg_g_max: float | None = None,
+    gaia_tap_limit: int = DEFAULT_GAIA_TAP_LIMIT,
+    gaia_tap_ruwe_max: float | None = DEFAULT_GAIA_TAP_RUWE_MAX,
+    gaia_tap_table: str = DEFAULT_GAIA_TAP_TABLE,
+    gaia_dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+    candidate_bg_g_min: float | None = None,
+    candidate_bg_g_max: float | None = None,
+    plot_cmd_mode: str = DEFAULT_CMD_MODE,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    if background_sample not in BACKGROUND_SAMPLE_CHOICES:
+        raise ValueError(f"background_sample must be one of {BACKGROUND_SAMPLE_CHOICES}, got {background_sample!r}")
+    if gaia_bg_cmd_mode not in GAIA_BG_CMD_MODE_CHOICES:
+        raise ValueError(f"gaia_bg_cmd_mode must be one of {GAIA_BG_CMD_MODE_CHOICES}, got {gaia_bg_cmd_mode!r}")
+
+    uses_gaia = background_sample in {"gaia", "gaia+candidates"}
+    uses_candidates = background_sample in {"candidates", "gaia+candidates"}
+    resolved_gaia_cmd_mode = plot_cmd_mode if gaia_bg_cmd_mode == "match" else gaia_bg_cmd_mode
+    if uses_gaia:
+        gaia_x, gaia_y, gaia_meta = _load_gaia_background(
+            bg_path,
+            source=gaia_bg_source,
+            g_min=gaia_bg_g_min,
+            g_max=gaia_bg_g_max,
+            tap_limit=gaia_tap_limit,
+            tap_ruwe_max=gaia_tap_ruwe_max,
+            tap_table=gaia_tap_table,
+            cmd_mode=resolved_gaia_cmd_mode,
+            dust_chunk_size=gaia_dust_chunk_size,
+        )
+    else:
+        gaia_x = np.empty(0)
+        gaia_y = np.empty(0)
+        gaia_meta = {"gaia_background_cmd_mode": resolved_gaia_cmd_mode}
+    candidate_bg = _candidate_background_rows(
+        plottable,
+        g_min=candidate_bg_g_min,
+        g_max=candidate_bg_g_max,
+    )
+    cand_x = candidate_bg["cmd_plot_color"].to_numpy(dtype=float)
+    cand_y = candidate_bg["cmd_plot_mag"].to_numpy(dtype=float)
+
+    if background_sample == "gaia":
+        bg_x = gaia_x
+        bg_y = gaia_y
+    elif background_sample == "candidates":
+        bg_x = cand_x
+        bg_y = cand_y
+    else:
+        bg_x = np.concatenate([gaia_x, cand_x])
+        bg_y = np.concatenate([gaia_y, cand_y])
+
+    finite_mask = np.isfinite(bg_x) & np.isfinite(bg_y)
+    bg_x = bg_x[finite_mask]
+    bg_y = bg_y[finite_mask]
+    counts = {
+        "background_sample": background_sample,
+        "gaia_background_source": gaia_bg_source,
+        "gaia_background_cmd_mode_requested": gaia_bg_cmd_mode,
+        "gaia_background_cmd_mode": resolved_gaia_cmd_mode,
+        "gaia_bg_g_min": None if gaia_bg_g_min is None else float(gaia_bg_g_min),
+        "gaia_bg_g_max": None if gaia_bg_g_max is None else float(gaia_bg_g_max),
+        "gaia_tap_limit": int(gaia_tap_limit) if gaia_bg_source == "tap" else None,
+        "gaia_tap_ruwe_max": (
+            None
+            if gaia_bg_source != "tap" or gaia_tap_ruwe_max is None
+            else float(gaia_tap_ruwe_max)
+        ),
+        "candidate_bg_g_min": None if candidate_bg_g_min is None else float(candidate_bg_g_min),
+        "candidate_bg_g_max": None if candidate_bg_g_max is None else float(candidate_bg_g_max),
+        "gaia_background_pool_points": int(len(gaia_x)) if uses_gaia else None,
+        "candidate_background_pool_points": int(len(candidate_bg)) if uses_candidates else None,
+        "gaia_background_points": int(len(gaia_x)) if uses_gaia else 0,
+        "candidate_background_points": int(len(candidate_bg)) if uses_candidates else 0,
+        "background_points": int(len(bg_x)),
+    }
+    counts.update(gaia_meta)
+    return bg_x, bg_y, counts
 
 
 def _resolve_plot_ages(grid: pd.DataFrame, ages_myr: tuple[float, ...] | list[float]) -> list[float]:
@@ -764,14 +1132,25 @@ def _plot_cmd(
     *,
     bucket_order: list[str] | None = None,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
+    background_sample: str = DEFAULT_BACKGROUND_SAMPLE,
     bg_path: Path | str = GAIA_BG_PATH,
+    gaia_bg_source: str = DEFAULT_GAIA_BG_SOURCE,
+    gaia_bg_cmd_mode: str = DEFAULT_GAIA_BG_CMD_MODE,
+    gaia_bg_g_min: float | None = None,
+    gaia_bg_g_max: float | None = None,
+    gaia_tap_limit: int = DEFAULT_GAIA_TAP_LIMIT,
+    gaia_tap_ruwe_max: float | None = DEFAULT_GAIA_TAP_RUWE_MAX,
+    gaia_tap_table: str = DEFAULT_GAIA_TAP_TABLE,
+    gaia_dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+    candidate_bg_g_min: float | None = None,
+    candidate_bg_g_max: float | None = None,
     cmd_mode: str = DEFAULT_CMD_MODE,
     mist_grid: pd.DataFrame | None = None,
     with_isochrones: bool = False,
     isochrone_ages_myr: tuple[float, ...] | list[float] = DEFAULT_ISOCHRONE_AGES_MYR,
     mass_labels: tuple[float, ...] | list[float] = DEFAULT_MASS_LABELS,
     show_errorbars: bool = False,
-) -> None:
+) -> dict[str, object]:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bucket_order = bucket_order or BUCKET_ORDER
     plottable = plot_df[_plottable_mask(plot_df)].copy()
@@ -779,15 +1158,22 @@ def _plot_cmd(
 
     fig, ax = plt.subplots(figsize=CMD_FIGSIZE)
 
-    # Combine Gaia DR3 background + all pipeline candidates
-    gaia_x, gaia_y = _load_gaia_background(bg_path)
-    cand_x = plottable["cmd_plot_color"].to_numpy(dtype=float)
-    cand_y = plottable["cmd_plot_mag"].to_numpy(dtype=float)
-    bg_x = np.concatenate([gaia_x, cand_x])
-    bg_y = np.concatenate([gaia_y, cand_y])
-    mask = np.isfinite(bg_x) & np.isfinite(bg_y)
-    bg_x = bg_x[mask]
-    bg_y = bg_y[mask]
+    bg_x, bg_y, background_counts = _build_cmd_background_arrays(
+        plottable,
+        background_sample=background_sample,
+        bg_path=bg_path,
+        gaia_bg_source=gaia_bg_source,
+        gaia_bg_cmd_mode=gaia_bg_cmd_mode,
+        gaia_bg_g_min=gaia_bg_g_min,
+        gaia_bg_g_max=gaia_bg_g_max,
+        gaia_tap_limit=gaia_tap_limit,
+        gaia_tap_ruwe_max=gaia_tap_ruwe_max,
+        gaia_tap_table=gaia_tap_table,
+        gaia_dust_chunk_size=gaia_dust_chunk_size,
+        candidate_bg_g_min=candidate_bg_g_min,
+        candidate_bg_g_max=candidate_bg_g_max,
+        plot_cmd_mode=cmd_mode,
+    )
 
     if background_style == "density":
         _plot_cmd_background_density(ax, bg_x, bg_y)
@@ -808,7 +1194,7 @@ def _plot_cmd(
         sub = selected[selected["review_cmd_bucket"] == bucket]
         if sub.empty:
             continue
-        style = CMD_BUCKET_STYLE[bucket]
+        style = CMD_REVIEW_BUCKET_STYLE[bucket]
         sub_solid = sub[sub["cmd_coordinate_source"].isin(SOLID_CMD_SOURCES)]
         sub_hollow = sub[sub["cmd_coordinate_source"].isin(HOLLOW_CMD_SOURCES)]
         marker_size = float(style["size"]) * CMD_MARKER_SIZE_SCALE
@@ -865,6 +1251,7 @@ def _plot_cmd(
     save_publication_figure(fig, out_path, dpi=220, close=False, facecolor="white")
     fig.savefig(out_path.with_suffix(".pdf"), bbox_inches=None, facecolor="white")
     plt.close(fig)
+    return background_counts
 
 
 def build_plot(
@@ -876,14 +1263,25 @@ def build_plot(
     title: str | None = None,
     only_reviewed: bool = True,
     background_style: str = DEFAULT_BACKGROUND_STYLE,
+    background_sample: str = DEFAULT_BACKGROUND_SAMPLE,
     bg_path: Path | str = GAIA_BG_PATH,
+    gaia_bg_source: str = DEFAULT_GAIA_BG_SOURCE,
+    gaia_bg_cmd_mode: str = DEFAULT_GAIA_BG_CMD_MODE,
+    gaia_bg_g_min: float | None = None,
+    gaia_bg_g_max: float | None = None,
+    gaia_tap_limit: int = DEFAULT_GAIA_TAP_LIMIT,
+    gaia_tap_ruwe_max: float | None = DEFAULT_GAIA_TAP_RUWE_MAX,
+    gaia_tap_table: str = DEFAULT_GAIA_TAP_TABLE,
+    gaia_dust_chunk_size: int = DEFAULT_GAIA_DUST_CHUNK_SIZE,
+    candidate_bg_g_min: float | None = None,
+    candidate_bg_g_max: float | None = None,
     cmd_mode: str = DEFAULT_CMD_MODE,
     with_isochrones: bool = False,
     isochrone_grid: Path | str = MIST_GRID_PATH,
     isochrone_ages_myr: tuple[float, ...] | list[float] = DEFAULT_ISOCHRONE_AGES_MYR,
     mass_labels: tuple[float, ...] | list[float] = DEFAULT_MASS_LABELS,
     show_errorbars: bool | None = None,
-) -> tuple[pd.DataFrame, dict[str, int]]:
+) -> tuple[pd.DataFrame, dict[str, object]]:
     bucket_order = buckets or BUCKET_ORDER
     reviews = _read_reviews(review_db, only_reviewed=only_reviewed)
     candidates = pd.read_parquet(candidates_path)
@@ -934,12 +1332,23 @@ def build_plot(
         mass_mask = selected_mask & plottable_mask & plot_df["cmd_mass_best"].notna()
         counts["selected_mass_estimates"] = int(mass_mask.sum())
 
-    _plot_cmd(
+    background_counts = _plot_cmd(
         plot_df,
         output_path,
         bucket_order=bucket_order,
         background_style=background_style,
+        background_sample=background_sample,
         bg_path=bg_path,
+        gaia_bg_source=gaia_bg_source,
+        gaia_bg_cmd_mode=gaia_bg_cmd_mode,
+        gaia_bg_g_min=gaia_bg_g_min,
+        gaia_bg_g_max=gaia_bg_g_max,
+        gaia_tap_limit=gaia_tap_limit,
+        gaia_tap_ruwe_max=gaia_tap_ruwe_max,
+        gaia_tap_table=gaia_tap_table,
+        gaia_dust_chunk_size=gaia_dust_chunk_size,
+        candidate_bg_g_min=candidate_bg_g_min,
+        candidate_bg_g_max=candidate_bg_g_max,
         cmd_mode=cmd_mode,
         mist_grid=mist_grid,
         with_isochrones=with_isochrones,
@@ -947,6 +1356,7 @@ def build_plot(
         mass_labels=mass_labels,
         show_errorbars=bool(show_errorbars),
     )
+    counts.update(background_counts)
     csv_path = output_path.with_suffix(".csv")
     plot_df.loc[selected_mask].sort_values(["review_cmd_bucket", "candidate_id"]).to_csv(csv_path, index=False)
     return plot_df, counts
@@ -954,15 +1364,24 @@ def build_plot(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--review-db", type=Path, default=DEFAULT_REVIEW_DB)
-    parser.add_argument("--candidates", type=Path, default=DEFAULT_CANDIDATES)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--preset",
+        choices=tuple(PRESETS),
+        default=DEFAULT_PRESET,
+        help=(
+            "Path/bucket preset to use when --review-db/--candidates/--output/--buckets "
+            "are omitted. Default: july1-dippers."
+        ),
+    )
+    parser.add_argument("--review-db", type=Path, default=None)
+    parser.add_argument("--candidates", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
         "--buckets",
         nargs="+",
         choices=BUCKET_ORDER,
         default=None,
-        help="Restrict plot/CSV to these review buckets (default: all buckets).",
+        help="Restrict plot/CSV to these review buckets (default: preset buckets).",
     )
     parser.add_argument("--title", default=None, help="Optional plot title override.")
     parser.add_argument(
@@ -975,6 +1394,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--background-sample",
+        choices=BACKGROUND_SAMPLE_CHOICES,
+        default=DEFAULT_BACKGROUND_SAMPLE,
+        help=(
+            "CMD background source: Gaia field sample, MALCA candidate CMD points, "
+            "or both combined. Default preserves the previous Gaia+candidate background."
+        ),
+    )
+    parser.add_argument(
+        "--candidate-bg-g-min",
+        type=float,
+        default=None,
+        help="Minimum apparent Gaia G magnitude for candidate background points only.",
+    )
+    parser.add_argument(
+        "--candidate-bg-g-max",
+        type=float,
+        default=None,
+        help="Maximum apparent Gaia G magnitude for candidate background points only.",
+    )
+    parser.add_argument(
         "--include-unreviewed",
         action="store_true",
         help="Include non-reviewed rows from the reviews table.",
@@ -983,7 +1423,62 @@ def parse_args() -> argparse.Namespace:
         "--gaia-bg",
         type=Path,
         default=GAIA_BG_PATH,
-        help="Path to the Gaia parquet file to use for the background.",
+        help="Path to the Gaia parquet file to use for the background when --gaia-bg-source=file.",
+    )
+    parser.add_argument(
+        "--gaia-bg-source",
+        choices=GAIA_BG_SOURCE_CHOICES,
+        default=DEFAULT_GAIA_BG_SOURCE,
+        help="Use a local Gaia parquet file or query Gaia DR3 live via TAP for the background.",
+    )
+    parser.add_argument(
+        "--gaia-bg-cmd-mode",
+        choices=GAIA_BG_CMD_MODE_CHOICES,
+        default=DEFAULT_GAIA_BG_CMD_MODE,
+        help=(
+            "CMD coordinates for Gaia background. 'match' uses --cmd-mode, so "
+            "a dereddened candidate overlay gets a dereddened Gaia background too."
+        ),
+    )
+    parser.add_argument(
+        "--gaia-bg-g-min",
+        type=float,
+        default=None,
+        help="Minimum apparent Gaia G magnitude for Gaia field background points only.",
+    )
+    parser.add_argument(
+        "--gaia-bg-g-max",
+        type=float,
+        default=None,
+        help="Maximum apparent Gaia G magnitude for Gaia field background points only.",
+    )
+    parser.add_argument(
+        "--gaia-tap-limit",
+        type=int,
+        default=DEFAULT_GAIA_TAP_LIMIT,
+        help="Maximum rows to request from Gaia TAP when --gaia-bg-source=tap.",
+    )
+    parser.add_argument(
+        "--gaia-tap-ruwe-max",
+        type=float,
+        default=DEFAULT_GAIA_TAP_RUWE_MAX,
+        help="Maximum RUWE for Gaia TAP background rows. Default follows the all-sky helper script.",
+    )
+    parser.add_argument(
+        "--gaia-tap-no-ruwe-cut",
+        action="store_true",
+        help="Do not apply a RUWE cut to Gaia TAP background rows.",
+    )
+    parser.add_argument(
+        "--gaia-bg-dust-chunk-size",
+        type=int,
+        default=DEFAULT_GAIA_DUST_CHUNK_SIZE,
+        help="Number of Gaia background rows per dustmaps3d dereddening chunk.",
+    )
+    parser.add_argument(
+        "--gaia-tap-table",
+        default=DEFAULT_GAIA_TAP_TABLE,
+        help="Gaia TAP table to query for live background rows.",
     )
     parser.add_argument(
         "--cmd-mode",
@@ -1046,18 +1541,78 @@ def _apply_output_suffix(output: Path, background_style: str) -> Path:
     return output
 
 
+def _format_cli_float(value: float | None) -> str:
+    return "None" if value is None else f"{float(value):g}"
+
+
 def main() -> None:
     args = parse_args()
-    output = _apply_output_suffix(args.output, args.background_style)
+    if (
+        args.candidate_bg_g_min is not None
+        and args.candidate_bg_g_max is not None
+        and args.candidate_bg_g_min > args.candidate_bg_g_max
+    ):
+        raise SystemExit("--candidate-bg-g-min must be <= --candidate-bg-g-max")
+    if (
+        args.gaia_bg_g_min is not None
+        and args.gaia_bg_g_max is not None
+        and args.gaia_bg_g_min > args.gaia_bg_g_max
+    ):
+        raise SystemExit("--gaia-bg-g-min must be <= --gaia-bg-g-max")
+    if args.gaia_bg_dust_chunk_size <= 0:
+        raise SystemExit("--gaia-bg-dust-chunk-size must be positive")
+    uses_gaia_background = args.background_sample in {"gaia", "gaia+candidates"}
+    if args.gaia_bg_source == "tap" and uses_gaia_background:
+        if args.gaia_bg_g_min is None or args.gaia_bg_g_max is None:
+            raise SystemExit("--gaia-bg-source tap requires both --gaia-bg-g-min and --gaia-bg-g-max")
+        if args.gaia_tap_limit <= 0:
+            raise SystemExit("--gaia-tap-limit must be positive")
+    gaia_tap_ruwe_max = None if args.gaia_tap_no_ruwe_cut else args.gaia_tap_ruwe_max
+    preset = PRESETS[args.preset]
+    review_db = args.review_db or preset["review_db"]
+    candidates = args.candidates or preset["candidates"]
+    buckets = args.buckets if args.buckets is not None else list(preset["buckets"])
+    output = _apply_output_suffix(args.output or preset["output"], args.background_style)
+    print(f"Preset: {args.preset}")
+    print(f"Review DB: {review_db}")
+    print(f"Candidates: {candidates}")
+    print(f"Buckets: {', '.join(buckets)}")
+    print(f"Background sample: {args.background_sample}")
+    print(f"Gaia background source: {args.gaia_bg_source}")
+    print(f"Gaia background CMD mode: {args.gaia_bg_cmd_mode}")
+    if args.gaia_bg_g_min is not None or args.gaia_bg_g_max is not None:
+        print(
+            "Gaia background G range: "
+            f"{_format_cli_float(args.gaia_bg_g_min)}-{_format_cli_float(args.gaia_bg_g_max)}"
+        )
+    if args.gaia_bg_source == "tap":
+        print(f"Gaia TAP row limit: {args.gaia_tap_limit}")
+        print(f"Gaia TAP RUWE max: {_format_cli_float(gaia_tap_ruwe_max)}")
+    if args.candidate_bg_g_min is not None or args.candidate_bg_g_max is not None:
+        print(
+            "candidate background G range: "
+            f"{_format_cli_float(args.candidate_bg_g_min)}-{_format_cli_float(args.candidate_bg_g_max)}"
+        )
     _plot_df, counts = build_plot(
-        args.review_db,
-        args.candidates,
+        review_db,
+        candidates,
         output,
-        buckets=args.buckets,
+        buckets=buckets,
         title=args.title,
         only_reviewed=not args.include_unreviewed,
         background_style=args.background_style,
+        background_sample=args.background_sample,
         bg_path=args.gaia_bg,
+        gaia_bg_source=args.gaia_bg_source,
+        gaia_bg_cmd_mode=args.gaia_bg_cmd_mode,
+        gaia_bg_g_min=args.gaia_bg_g_min,
+        gaia_bg_g_max=args.gaia_bg_g_max,
+        gaia_tap_limit=args.gaia_tap_limit,
+        gaia_tap_ruwe_max=gaia_tap_ruwe_max,
+        gaia_tap_table=args.gaia_tap_table,
+        gaia_dust_chunk_size=args.gaia_bg_dust_chunk_size,
+        candidate_bg_g_min=args.candidate_bg_g_min,
+        candidate_bg_g_max=args.candidate_bg_g_max,
         cmd_mode=args.cmd_mode,
         with_isochrones=args.with_isochrones,
         isochrone_grid=args.isochrone_grid,
