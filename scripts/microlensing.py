@@ -83,7 +83,7 @@ from astropy.time import Time
 from astropy.coordinates.solar_system import get_body_barycentric_posvel
 from scipy.optimize import least_squares, lsq_linear
 
-from malca.config import DEFAULT_OUTPUT_DIR
+from malca.config import DEFAULT_OUTPUT_DIR, JD_OFFSET as DISPLAY_JD_OFFSET, SKYPATROL_JD_OFFSET
 from malca.io.lightcurve_io import load_lightcurve_df
 from malca.review.eda_data import infer_plot_dir_from_source
 from malca.review.interactive_plot import resolve_lightcurve_path
@@ -206,6 +206,31 @@ def _finite_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if np.isfinite(number) else None
+
+
+def _as_full_jd_array(values: object) -> np.ndarray:
+    out = np.asarray(values, dtype=float).copy()
+    finite = np.isfinite(out)
+    high = finite & (out > 3_000_000.0)
+    while np.any(high):
+        out[high] = out[high] - SKYPATROL_JD_OFFSET
+        finite = np.isfinite(out)
+        high = finite & (out > 3_000_000.0)
+    reduced = finite & (out < 50_000.0)
+    out[reduced] = out[reduced] + SKYPATROL_JD_OFFSET
+    return out
+
+
+def _as_full_jd(value: object) -> float:
+    number = _finite_float(value)
+    if number is None:
+        return np.nan
+    return float(_as_full_jd_array([number])[0])
+
+
+def _as_jd_minus_2450000(value: object) -> float:
+    jd = _as_full_jd(value)
+    return float(jd - SKYPATROL_JD_OFFSET) if np.isfinite(jd) else np.nan
 
 
 def _vizier_cone_search_url_deg(ra_deg: object, dec_deg: object) -> str:
@@ -2185,13 +2210,13 @@ def _fit_parallax_diagnostics(
         return _empty_parallax_result('not_attempted:fit_span_too_short')
 
     A0_guess = float(pac['params'][0])
-    t0_guess_jd = float(pac['params'][1] + 2450000.0)
+    t0_guess_jd = _as_full_jd(pac['params'][1])
     tE_guess_days = float(abs(pac['params'][2]))
     if not np.isfinite(tE_guess_days) or tE_guess_days < PARALLAX_MIN_TE_DAYS:
         return _empty_parallax_result('not_attempted:tE_below_threshold')
     u0_abs_guess = float(np.clip(_solve_u0_from_A0(A0_guess), 1e-3, 3.0))
     ref_mag = float(np.nanmedian(mag_fit))
-    jd_fit_full = jd_fit + 2450000.0
+    jd_fit_full = _as_full_jd_array(jd_fit)
 
     pspl_fit = _fit_flux_microlensing_branch(
         jd_fit=jd_fit_full,
@@ -2315,7 +2340,7 @@ def _fit_parallax_diagnostics(
 def _evaluate_parallax_branch_mag(branch_fit: dict[str, object], jd_minus_2450000: np.ndarray, ra_deg: float, dec_deg: float) -> np.ndarray | None:
     if not branch_fit.get('success'):
         return None
-    jd_full = np.asarray(jd_minus_2450000, dtype=float) + 2450000.0
+    jd_full = _as_full_jd_array(jd_minus_2450000)
     ephemeris = _project_earth_orbit_geocentric(jd_full, float(ra_deg), float(dec_deg), float(branch_fit['t0_ref_jd']))
     opt_params = np.asarray(branch_fit['opt_params'], dtype=float)
     profile = _profile_flux_microlensing_model(
@@ -2402,7 +2427,7 @@ def _flatten_parallax_summary(parallax_result: dict[str, object]) -> dict[str, o
         branch = branches.get(branch_name, {}) or {}
         if not branch.get('success'):
             continue
-        out[f'{prefix}_t0_jd_minus_2450000'] = float(branch.get('t0_jd', np.nan) - 2450000.0)
+        out[f'{prefix}_t0_jd_minus_2450000'] = _as_jd_minus_2450000(branch.get('t0_jd', np.nan))
         out[f'{prefix}_tE_days'] = float(branch.get('tE_days', np.nan))
         out[f'{prefix}_u0'] = float(branch.get('u0', np.nan))
         out[f'{prefix}_piE_N'] = float(branch.get('piE_N', np.nan))
@@ -2417,7 +2442,7 @@ def _flatten_parallax_summary(parallax_result: dict[str, object]) -> dict[str, o
     best_name = out['parallax_best_branch']
     best = branches.get(best_name, {}) if best_name else {}
     if best and best.get('success'):
-        out['parallax_best_t0_jd_minus_2450000'] = float(best.get('t0_jd', np.nan) - 2450000.0)
+        out['parallax_best_t0_jd_minus_2450000'] = _as_jd_minus_2450000(best.get('t0_jd', np.nan))
         out['parallax_best_tE_days'] = float(best.get('tE_days', np.nan))
         out['parallax_best_u0'] = float(best.get('u0', np.nan))
         out['parallax_best_piE_N'] = float(best.get('piE_N', np.nan))
@@ -3989,9 +4014,11 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
     pac = best_seed_result['fits'].get('paczynski', {})
     raw_pacz_tE = float(abs(pac['params'][2])) if pac.get('success') else np.nan
     raw_pacz_t0 = float(pac['params'][1]) if pac.get('success') else np.nan
+    fit_t0_jd = _as_full_jd(raw_pacz_t0)
+    fit_t0_jd_minus_2450000 = _as_jd_minus_2450000(raw_pacz_t0)
     pac_is_displayable = bool(pac.get('success')) and selected_model_name == 'paczynski'
     display_raw_tE = raw_pacz_tE if pac_is_displayable else np.nan
-    display_raw_t0 = raw_pacz_t0 if pac_is_displayable else np.nan
+    display_raw_t0 = fit_t0_jd_minus_2450000 if pac_is_displayable else np.nan
     reported_tE = display_raw_tE if quality.get('fit_ok') else np.nan
 
     payload = context['payload']
@@ -4014,12 +4041,10 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
     asassn_var_type = _text_value(payload.get('asassn_var_type'))
     simbad_sep_arcsec = _finite_float(payload.get('simbad_sep_arcsec'))
 
-    fit_t0_jd_minus_2450000 = raw_pacz_t0 if np.isfinite(raw_pacz_t0) else np.nan
-    fit_t0_jd = raw_pacz_t0 + 2450000.0 if np.isfinite(raw_pacz_t0) else np.nan
-    peak_window_start_jd_minus_2450000 = raw_pacz_t0 - 2.0 * raw_pacz_tE if np.isfinite(raw_pacz_t0) and np.isfinite(raw_pacz_tE) else np.nan
-    peak_window_end_jd_minus_2450000 = raw_pacz_t0 + 2.0 * raw_pacz_tE if np.isfinite(raw_pacz_t0) and np.isfinite(raw_pacz_tE) else np.nan
-    peak_window_start_jd = peak_window_start_jd_minus_2450000 + 2450000.0 if np.isfinite(peak_window_start_jd_minus_2450000) else np.nan
-    peak_window_end_jd = peak_window_end_jd_minus_2450000 + 2450000.0 if np.isfinite(peak_window_end_jd_minus_2450000) else np.nan
+    peak_window_start_jd_minus_2450000 = fit_t0_jd_minus_2450000 - 2.0 * raw_pacz_tE if np.isfinite(fit_t0_jd_minus_2450000) and np.isfinite(raw_pacz_tE) else np.nan
+    peak_window_end_jd_minus_2450000 = fit_t0_jd_minus_2450000 + 2.0 * raw_pacz_tE if np.isfinite(fit_t0_jd_minus_2450000) and np.isfinite(raw_pacz_tE) else np.nan
+    peak_window_start_jd = fit_t0_jd - 2.0 * raw_pacz_tE if np.isfinite(fit_t0_jd) and np.isfinite(raw_pacz_tE) else np.nan
+    peak_window_end_jd = fit_t0_jd + 2.0 * raw_pacz_tE if np.isfinite(fit_t0_jd) and np.isfinite(raw_pacz_tE) else np.nan
 
     if selected_model_name == 'paczynski':
         if pac.get('success') and np.isfinite(raw_pacz_tE) and float(raw_pacz_tE) >= PARALLAX_MIN_TE_DAYS:
@@ -4075,11 +4100,11 @@ def fit_candidate_context(context: dict[str, object]) -> dict[str, object]:
         'lc_path': str(context['lc_path']),
         'band_used': context['band_label'],
         'n_points_total': int(len(df)),
-        'min_mag_t0_guess': float(df.loc[int(df['mag'].idxmin()), 'JD']),
-        'brightest10_median_t0_guess': float(brightest['JD'].median()) if not brightest.empty else np.nan,
+        'min_mag_t0_guess': _as_jd_minus_2450000(df.loc[int(df['mag'].idxmin()), 'JD']),
+        'brightest10_median_t0_guess': _as_jd_minus_2450000(brightest['JD'].median()) if not brightest.empty else np.nan,
         'pipeline_jump_t0': _finite_float(row.get('jump_best_t0')),
         'seed_method': best_seed_result['seed_method'],
-        'seed_t0_guess': best_seed_result['seed_t0_guess'],
+        'seed_t0_guess': _as_jd_minus_2450000(best_seed_result['seed_t0_guess']),
         'best_model': selected_model_name,
         'best_model_by_bic': best_seed_result.get('best_model'),
         'best_alt_model': best_seed_result.get('best_alt_model'),
@@ -4571,16 +4596,24 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
     flux_fit = result.get('flux_fit', {}) or {}
     flux_fit_success = bool(flux_fit.get('success'))
 
-    plot_jd_offset = 8000.0
-    jd_axis_label = 'JD - 2458000 [d]'
+    plot_jd_offset = DISPLAY_JD_OFFSET
+    jd_axis_label = f'JD - {int(DISPLAY_JD_OFFSET)} [d]'
     mag_label = r'$g$ [mag]'
     flux_label = r'Relative Flux'
 
+    native_is_full_jd = bool(np.nanmedian(df['JD'].to_numpy(dtype=float)) > 2_000_000.0)
+
+    def _native_time(value: object) -> float:
+        jd = _as_full_jd(value)
+        if not np.isfinite(jd):
+            return np.nan
+        return float(jd if native_is_full_jd else jd - SKYPATROL_JD_OFFSET)
+
     def _plot_jd(values):
-        return np.asarray(values, dtype=float) - plot_jd_offset
+        return _as_full_jd_array(values) - plot_jd_offset
 
     def _plot_jd_scalar(value: float) -> float:
-        return float(value) - plot_jd_offset
+        return float(_as_full_jd(value) - plot_jd_offset)
 
     fig = plt.figure(figsize=figsize, dpi=MICROLENSING_FIT_PDF_DPI)
     # 3 panels: full LC (mag), zoomed LC (mag), residuals
@@ -4643,18 +4676,18 @@ def plot_candidate_fit(result: dict[str, object], *, figsize: tuple[float, float
 
     def _zoom_center_and_scale() -> tuple[float, float]:
         if show_parallax:
-            return float(summary['parallax_best_t0_jd_minus_2450000']), max(float(summary['parallax_best_tE_days']), 5.0)
+            return _native_time(summary['parallax_best_t0_jd_minus_2450000']), max(float(summary['parallax_best_tE_days']), 5.0)
         if best_model_fit.get('success') and best_model_name in {'paczynski', 'gaussian', 'fred'}:
             params = np.asarray(best_model_fit['params'], dtype=float)
-            center = float(params[1])
+            center = _native_time(params[1])
             if best_model_name in {'paczynski', 'gaussian'}:
                 scale = float(abs(params[2]))
             else:
                 scale = float(max(abs(params[2]), abs(params[3])))
             return center, max(scale, 5.0)
         if pac_success:
-            return float(pac['params'][1]), max(float(abs(pac['params'][2])), 5.0)
-        return float(summary['seed_t0_guess']), max(float(0.12 * best_seed['half_window']), 10.0)
+            return _native_time(pac['params'][1]), max(float(abs(pac['params'][2])), 5.0)
+        return _native_time(summary['seed_t0_guess']), max(float(0.12 * best_seed['half_window']), 10.0)
 
     zoom_center, zoom_scale = _zoom_center_and_scale()
     zoom_half_window = float(np.clip(max(35.0, 3.5 * zoom_scale), 35.0, max(80.0, float(best_seed['half_window']))))
