@@ -32,6 +32,7 @@ def test_export_bundle_includes_candidate_dat2_and_raw2(tmp_path: Path) -> None:
                 "candidate_id": ["stv_ASASSN-TEST-001"],
                 "timescale": ["stv"],
                 "lc_path": [str(dat2_path)],
+                "failed_any": [False],
             }
         ),
         results_dir / "lc_events_filtered.parquet",
