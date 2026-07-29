@@ -38,6 +38,7 @@ from malca.config import (
     LTV_WORKERS,
 )
 from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
+from malca.catalogs.neowise_epochs import combine_neowise_epochs
 
 
 # NEOWISE epoch grouping: combine points within this many days
@@ -148,57 +149,8 @@ def combine_epochs(
     *,
     epoch_days: float = EPOCH_COMBINE_DAYS,
 ) -> pd.DataFrame:
-    """
-    Combine closely spaced NEOWISE measurements into epochs.
-    
-    Following Hwang & Zakamska (2020): group points within epoch_days and
-    compute weighted mean magnitudes.
-    """
-    if lc.empty or "mjd" not in lc.columns:
-        return pd.DataFrame()
-    
-    mjd = lc["mjd"].values
-    w1 = lc["w1mpro"].values
-    w1sig = lc["w1sigmpro"].values
-    w2 = lc["w2mpro"].values
-    w2sig = lc["w2sigmpro"].values
-    
-    # Assign epoch groups
-    epoch_ids = np.zeros(len(mjd), dtype=int)
-    current_epoch = 0
-    epoch_ids[0] = 0
-    
-    for i in range(1, len(mjd)):
-        if mjd[i] - mjd[epoch_ids == current_epoch].mean() > epoch_days:
-            current_epoch += 1
-        epoch_ids[i] = current_epoch
-    
-    # Compute weighted means per epoch
-    epochs = []
-    for e in np.unique(epoch_ids):
-        mask = epoch_ids == e
-        
-        # Weighted mean for W1
-        w1_weights = 1.0 / (w1sig[mask] ** 2 + 1e-10)
-        w1_mean = np.sum(w1[mask] * w1_weights) / np.sum(w1_weights)
-        w1_err = 1.0 / np.sqrt(np.sum(w1_weights))
-        
-        # Weighted mean for W2
-        w2_weights = 1.0 / (w2sig[mask] ** 2 + 1e-10)
-        w2_mean = np.sum(w2[mask] * w2_weights) / np.sum(w2_weights)
-        w2_err = 1.0 / np.sqrt(np.sum(w2_weights))
-        
-        epochs.append({
-            "mjd": np.mean(mjd[mask]),
-            "w1mpro": w1_mean,
-            "w1err": w1_err,
-            "w2mpro": w2_mean,
-            "w2err": w2_err,
-            "w1_w2": w1_mean - w2_mean,
-            "n_points": mask.sum(),
-        })
-    
-    return pd.DataFrame(epochs)
+    """Compatibility wrapper around the shared robust epoch aggregator."""
+    return combine_neowise_epochs(lc, epoch_days=epoch_days)
 
 
 # =============================================================================

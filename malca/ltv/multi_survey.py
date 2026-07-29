@@ -9,10 +9,11 @@ import numpy as np
 import pandas as pd
 
 from malca.config import GAIA_TCB_EPOCH_JD, KEPLER_BKJD_OFFSET, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
+from malca.enrichment.atlas_forced_photometry import atlas_science_view
 from malca.io.table_io import read_parquet_table, write_feature_table
 
 
-LTV_MS_FEATURE_VERSION = "1"
+LTV_MS_FEATURE_VERSION = "2"
 
 LTV_MS_FEATURE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ltv_ms_feature_status", "TEXT", "text"),
@@ -334,6 +335,8 @@ def compute_ltv_multi_survey_features(
             lc = _read_external_lc(root, survey, candidate_id)
             if lc.empty:
                 continue
+            if survey == "atlas":
+                lc = atlas_science_view(lc)
             summary = _summarize_mag_survey(lc, survey)
             features.update(summary)
             any_data = any_data or int(summary.get(f"ltv_ms_{survey}_n_points") or 0) > 0

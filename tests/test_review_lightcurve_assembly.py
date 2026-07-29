@@ -141,6 +141,8 @@ def test_assembler_split_layout_adds_external_panel(tmp_path: Path) -> None:
     assert "external:neowise" in panel_ids
     neowise_traces = [trace for trace in spec.traces if trace.panel_id == "external:neowise"]
     assert neowise_traces
+    assert all(len(trace.x) == 1 for trace in neowise_traces)
+    assert all(trace.yerr is not None for trace in neowise_traces)
 
 
 def test_assembler_populates_coordinate_headers(tmp_path: Path) -> None:

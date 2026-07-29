@@ -71,7 +71,9 @@ def test_external_lcs_cli_runs_tess_by_default(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(
         external_lcs,
         "read_feature_table",
-        lambda _path: pd.DataFrame([{"asas_sn_id": "C1", "ra": 1.0, "dec": 2.0}]),
+        lambda _path: pd.DataFrame(
+            [{"asas_sn_id": "C1", "ra": 1.0, "dec": 2.0, "failed_any": False}]
+        ),
     )
     written: dict[str, object] = {}
     monkeypatch.setattr(
@@ -277,7 +279,9 @@ def test_external_lcs_cli_can_skip_tess(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         external_lcs,
         "read_feature_table",
-        lambda _path: pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}]),
+        lambda _path: pd.DataFrame(
+            [{"candidate_id": "C1", "ra": 1.0, "dec": 2.0, "failed_any": False}]
+        ),
     )
     monkeypatch.setattr(external_lcs, "write_feature_table", lambda _df, _path: None)
 
@@ -301,7 +305,9 @@ def test_external_lcs_cli_can_skip_neowise(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         external_lcs,
         "read_feature_table",
-        lambda _path: pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}]),
+        lambda _path: pd.DataFrame(
+            [{"candidate_id": "C1", "ra": 1.0, "dec": 2.0, "failed_any": False}]
+        ),
     )
     monkeypatch.setattr(external_lcs, "write_feature_table", lambda _df, _path: None)
 
@@ -335,7 +341,9 @@ def test_external_lcs_cli_new_default_sources_can_be_skipped(monkeypatch, tmp_pa
         monkeypatch.setattr(
             external_lcs,
             "read_feature_table",
-            lambda _path: pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}]),
+            lambda _path: pd.DataFrame(
+                [{"candidate_id": "C1", "ra": 1.0, "dec": 2.0, "failed_any": False}]
+            ),
         )
         monkeypatch.setattr(external_lcs, "write_feature_table", lambda _df, _path: None)
 
@@ -416,7 +424,9 @@ def test_external_lcs_cache_only_rebuilds_summary_from_lc_file(monkeypatch, tmp_
     monkeypatch.setattr(
         external_lcs,
         "read_feature_table",
-        lambda _path: pd.DataFrame([{"candidate_id": "C1", "ra": 1.0, "dec": 2.0}]),
+        lambda _path: pd.DataFrame(
+            [{"candidate_id": "C1", "ra": 1.0, "dec": 2.0, "failed_any": False}]
+        ),
     )
 
     output_path = tmp_path / "external.parquet"
