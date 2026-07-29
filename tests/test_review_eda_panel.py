@@ -27,7 +27,7 @@ def _write_review_db(path: Path) -> None:
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE candidates (candidate_id TEXT, source_path TEXT, payload_json TEXT)")
         conn.execute(
-            "CREATE TABLE reviews (candidate_id TEXT, interest_score REAL, event_class TEXT, review_pass INTEGER, notes TEXT, status TEXT, reviewer TEXT, updated_at TEXT)"
+            "CREATE TABLE reviews (candidate_id TEXT, classification_confidence INTEGER, event_class TEXT, review_pass INTEGER, notes TEXT, status TEXT, reviewer TEXT, updated_at TEXT)"
         )
         for candidate_id, score, period_sources, dip_runs in (
             ("A", 3.0, 2, 1),
@@ -40,6 +40,7 @@ def _write_review_db(path: Path) -> None:
                 "dipper_score": score * 2,
                 "period_n_sources": period_sources,
                 "dip_run_count": dip_runs,
+                "not_used_by_eda": "large unrelated value",
             }
             conn.execute(
                 "INSERT INTO candidates VALUES (?, ?, ?)",
@@ -62,6 +63,9 @@ def test_load_review_eda_frame_adds_review_and_proxy_columns(tmp_path: Path) -> 
     assert "periodic_evidence_bucket" in frame.columns
     assert "is_reviewed" in frame.columns
     assert frame.loc[frame["candidate_id"] == "B", "event_class"].iloc[0] == "dipper"
+    assert "payload_json" not in frame.columns
+    assert "not_used_by_eda" not in frame.columns
+    assert frame.loc[frame["candidate_id"] == "A", "period_n_sources"].iloc[0] == 2
 
 
 def test_queue_eda_frame_preserves_queue_order(tmp_path: Path) -> None:

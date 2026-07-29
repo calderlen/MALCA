@@ -10,6 +10,7 @@ def test_catalog_neighbor_policy_provenance_uses_boolean_filter() -> None:
             "exclude_known_catalog_neighbors": True,
             "exclude_dipper_catalog_neighbors": False,
             "select_filter_mode": "exclude",
+            "select_filter_logic": "or",
         }
     )
 

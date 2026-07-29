@@ -483,6 +483,52 @@ app.index_string = '''
             border-color: #7da8c4;
             background-color: #1a2b38;
         }
+        .compact-btn.select-filter-mode-btn {
+            min-height: 28px;
+            font-weight: 600;
+        }
+        .compact-btn.select-filter-mode-btn.is-include {
+            background-color: #123326;
+            border-color: #2cb67d;
+            color: #d7ffea;
+        }
+        .compact-btn.select-filter-mode-btn.is-include:hover {
+            background-color: #174631;
+            border-color: #44d39a;
+        }
+        .compact-btn.select-filter-mode-btn.is-exclude {
+            background-color: #332417;
+            border-color: #c68a43;
+            color: #ffe7c5;
+        }
+        .compact-btn.select-filter-mode-btn.is-exclude:hover {
+            background-color: #45301d;
+            border-color: #dda45f;
+        }
+        .select-filter-logic-row {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-bottom: 8px;
+        }
+        .select-filter-logic-label {
+            flex: 1 1 auto;
+            color: #9eb2c4;
+            font-size: 10px;
+        }
+        .compact-btn.select-filter-logic-btn {
+            min-width: 42px;
+            font-weight: 700;
+        }
+        .compact-btn.select-filter-logic-btn.is-active {
+            background-color: #163a56;
+            border-color: #47a9e8;
+            color: #e4f5ff;
+        }
+        .compact-btn.select-filter-logic-btn.is-active:hover {
+            background-color: #1c4b70;
+            border-color: #67bdf2;
+        }
         .compact-btn.vetting-filter-toggle-btn.is-active {
             background-color: #123326;
             border-color: #2cb67d;
@@ -1626,12 +1672,44 @@ app.index_string = '''
             height: auto;
             max-height: none;
         }
+        .dipper-prob-card {
+            border: 1px solid rgba(0, 170, 255, 0.55);
+            border-left: 4px solid #0af;
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, rgba(0, 170, 255, 0.18), rgba(8, 16, 23, 0.85));
+        }
+        .dipper-prob-card-label {
+            color: #8fcdf4;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            line-height: 1.1;
+            text-transform: uppercase;
+        }
+        .dipper-prob-card-value {
+            color: #e8f7ff;
+            font-size: 28px;
+            font-weight: 700;
+            line-height: 1.05;
+            margin-top: 3px;
+        }
+        .dipper-prob-card-detail {
+            color: #8ba4b8;
+            font-size: 10px;
+            line-height: 1.25;
+            margin-top: 3px;
+        }
         @media (min-width: 1600px) {
             .candidate-metadata {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
                 gap: 12px;
                 align-items: start;
+            }
+            .candidate-metadata > .dipper-prob-card {
+                grid-column: 1 / -1;
             }
             .candidate-metadata > .stats-details {
                 grid-column: 1 / -1;
@@ -1897,6 +1975,24 @@ app.index_string = '''
             background: #e6f7ee !important;
             border-color: #2f7a57 !important;
             color: #245d43 !important;
+        }
+        body[data-theme="white"] .compact-btn.select-filter-mode-btn.is-include {
+            background: #e6f7ee !important;
+            border-color: #2f7a57 !important;
+            color: #245d43 !important;
+        }
+        body[data-theme="white"] .compact-btn.select-filter-mode-btn.is-exclude {
+            background: #fff2df !important;
+            border-color: #a96820 !important;
+            color: #70420e !important;
+        }
+        body[data-theme="white"] .select-filter-logic-label {
+            color: #506579 !important;
+        }
+        body[data-theme="white"] .compact-btn.select-filter-logic-btn.is-active {
+            background: #e1f1fb !important;
+            border-color: #2879ad !important;
+            color: #174d70 !important;
         }
         body[data-theme="white"] .compact-btn.vetting-filter-toggle-btn.is-active:hover {
             background: #d8f0e4 !important;

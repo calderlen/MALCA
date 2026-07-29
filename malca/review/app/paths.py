@@ -7,7 +7,6 @@ def _resolve_run_dir_from_plot_dir(plot_dir: str | None) -> Path | None:
     return Path(cached) if cached else None
 
 
-@lru_cache(maxsize=64)
 def _resolve_run_dir_from_plot_dir_cached(plot_dir_text: str) -> str | None:
     """Cached implementation for run-dir inference from plot-dir text."""
     if not plot_dir_text:
@@ -43,7 +42,6 @@ def _resolve_run_dir_from_db_path(db_path: str | Path | None) -> Path | None:
     return Path(cached) if cached else None
 
 
-@lru_cache(maxsize=16)
 def _resolve_run_dir_from_db_path_cached(db_path_text: str) -> str | None:
     """Cached implementation for run-dir inference from a review DB path."""
     if not db_path_text:
@@ -129,7 +127,6 @@ def _configured_plot_dir() -> Path | None:
     return Path(cached) if cached else None
 
 
-@lru_cache(maxsize=8)
 def _configured_plot_dir_cached(plot_dir_text: str) -> str | None:
     if not plot_dir_text:
         return None
@@ -142,7 +139,6 @@ def _configured_plot_dir_cached(plot_dir_text: str) -> str | None:
     return str(p)
 
 
-@lru_cache(maxsize=512)
 def _existing_run_dir_from_path_text(path_text: str) -> str | None:
     """Infer a run dir from an existing local path without resolving stale roots."""
     text = str(path_text or "").strip()
@@ -212,11 +208,8 @@ def _effective_local_lc_path(
         if not text or text in explicit_local_paths:
             continue
         explicit_local_paths.append(text)
-        try:
-            if Path(text).expanduser().exists():
-                return text
-        except Exception:
-            continue
+        # Existing paths may point at an older run.  Resolve against the
+        # active run first, then use these only as a final fallback.
 
     if explicit_local_paths and not payload_dict.get("lc_path"):
         payload_dict["lc_path"] = explicit_local_paths[0]
@@ -234,8 +227,12 @@ def _effective_local_lc_path(
         if resolved_text and resolved_text != cluster_lc_path:
             return resolved_text
 
-    if explicit_local_paths and cluster_lc_path:
-        return explicit_local_paths[0]
+    for text in explicit_local_paths:
+        try:
+            if Path(text).expanduser().exists():
+                return text
+        except Exception:
+            continue
 
     return None
 
@@ -887,6 +884,9 @@ def _build_neowise_figure_with_theme(df_neowise: pd.DataFrame, theme: str) -> go
             height=220,
         )
 
+    df_neowise = combine_neowise_epochs(
+        normalize_external_lc_dataframe("neowise", df_neowise)
+    )
     time_col = "mjd" if "mjd" in df_neowise.columns else ("MJD" if "MJD" in df_neowise.columns else None)
     if time_col is None:
         return _apply_external_figure_layout(

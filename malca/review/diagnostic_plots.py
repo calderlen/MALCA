@@ -15,6 +15,12 @@ import tempfile
 import numpy as np
 import plotly.graph_objects as go
 
+from malca.plotting.color_color_labels import (
+    LABEL_H_KS,
+    LABEL_W1_W2,
+    TITLE_H_K,
+    TITLE_W1_W2,
+)
 from malca.plotting.lightcurve_publication import (
     FIG_SINGLE_COL_SQUARE,
     PUBLICATION_PLOTLY_FONT,
@@ -509,8 +515,8 @@ def build_ir_colorcolor_figure(
     ))
 
     _apply_layout(fig, title="IR Color-Color", spec=spec)
-    fig.update_xaxes(title="W1 - W2", range=[x_lo, x_hi])
-    fig.update_yaxes(title="H - K", range=[y_lo, y_hi])
+    fig.update_xaxes(title=TITLE_W1_W2, range=[x_lo, x_hi])
+    fig.update_yaxes(title=TITLE_H_K, range=[y_lo, y_hi])
 
     return fig
 
@@ -918,7 +924,7 @@ def _ir_colorcolor_publication_pdf(payload: dict, background: dict | None) -> by
         linewidths=0.95,
         zorder=6,
     )
-    _publication_axes(ax, xlabel=r"$W1-W2$", ylabel=r"$H-K_s$")
+    _publication_axes(ax, xlabel=LABEL_W1_W2, ylabel=LABEL_H_KS)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     return _save_publication_pdf(fig)

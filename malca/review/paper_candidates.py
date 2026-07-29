@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import hashlib
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -27,6 +28,10 @@ CLASSIFIED_PARQUET = MARCH18_RUN / "results" / "lc_events_classified.parquet"
 EXPORT_DIR = DEFAULT_OUTPUT_DIR / "notebooks" / "march18_paper"
 
 DEFAULT_PAPER_BUCKETS = ("Dipper", "LTV", "Microlensing")
+PUBLICATION_COHORT_VERSION = "malca-publication-cohort-v1"
+PUBLICATION_WORKFLOW_STATUS = frozenset({"reviewed"})
+PUBLICATION_DISPOSITIONS = frozenset({"keep"})
+PUBLICATION_CONFIDENCE = frozenset({3, 4})
 BUCKET_ORDER = (
     "Dipper",
     "Interesting",
@@ -117,15 +122,13 @@ def assign_review_bucket(row: Mapping[str, object]) -> str | None:
 
     if event_class == "dipper":
         return "Dipper"
-    if event_class == "unknown_interesting":
-        return "Interesting"
     if event_class == "ltv":
         return "LTV"
     if event_class == "microlensing":
         return "Microlensing"
-    if event_class == "periodic" or morph_secondary in {"detached_binary_like", "eclipsing_like"}:
+    if morph_secondary in {"detached_binary_like", "eclipsing_like"}:
         return "Eclipsing binary"
-    if physical_primary == "unknown" or event_class in {"unknown", "unclear"}:
+    if physical_primary == "unknown" or event_class == "unknown":
         return "Unknown"
     return None
 
@@ -171,8 +174,16 @@ def load_reviewed_cohort(
     *,
     buckets: Sequence[str] | None = None,
     only_reviewed: bool = True,
+    publication_only: bool = False,
+    require_confident_classification: bool = False,
 ) -> pd.DataFrame:
-    """Load reviewed candidates joined with taxonomy fields."""
+    """Load review rows and attach an explicit, versioned cohort decision.
+
+    ``only_reviewed`` retains the historical notebook behavior.  Publication
+    exports should additionally pass ``publication_only=True``; that applies
+    the disposition, duplicate, bucket, and optional confidence rules in
+    :func:`build_publication_cohort` and keeps an auditable exclusion reason.
+    """
     db_path = Path(review_db or REVIEW_DB)
     where = ""
     if only_reviewed:
@@ -182,7 +193,6 @@ def load_reviewed_cohort(
             c.*,
             r.status AS review_status,
             r.workflow_status,
-            r.interest_score,
             r.event_class,
             r.review_pass,
             r.notes,
@@ -196,32 +206,109 @@ def load_reviewed_cohort(
             r.physical_primary,
             r.physical_secondary,
             r.classification_confidence,
-            r.disposition
+            r.disposition,
+            r.duplicate_of,
+            r.taxonomy_version
         FROM candidates c
         JOIN reviews r ON r.candidate_id = c.candidate_id
         {where}
     """
     with sqlite3.connect(db_path) as conn:
         df = pd.read_sql_query(query, conn)
-    df = df.astype({"candidate_id": "string"})
-    df = df.copy()
-    df["review_bucket"] = df.apply(assign_review_bucket, axis=1)
-    if buckets:
+    cohort_buckets = DEFAULT_PAPER_BUCKETS if publication_only and buckets is None else buckets
+    df = build_publication_cohort(
+        df,
+        buckets=cohort_buckets,
+        require_confident_classification=require_confident_classification,
+    )
+    if publication_only:
+        df = df.loc[df["publication_selected"]].copy()
+    elif buckets:
         bucket_set = {str(b) for b in buckets}
         df = df.loc[df["review_bucket"].isin(bucket_set)].copy()
     return df.reset_index(drop=True)
 
 
+def _normalized_text(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip().str.lower()
+
+
+def build_publication_cohort(
+    frame: pd.DataFrame,
+    *,
+    buckets: Sequence[str] | None = DEFAULT_PAPER_BUCKETS,
+    require_confident_classification: bool = False,
+) -> pd.DataFrame:
+    """Apply the paper-cohort rules without silently dropping any row.
+
+    The returned table always contains ``publication_selected`` and
+    ``publication_exclusion_reason``.  This makes changes in review state or
+    taxonomy visible in a diff instead of changing a paper sample invisibly.
+    Duplicate or blank candidate identifiers are never publication eligible.
+    """
+    if "candidate_id" not in frame.columns:
+        raise ValueError("Publication cohort requires candidate_id")
+
+    out = frame.reset_index(drop=True).copy()
+    out["candidate_id"] = out["candidate_id"].astype("string").str.strip()
+    out["review_bucket"] = out.apply(assign_review_bucket, axis=1)
+    out["publication_cohort_version"] = PUBLICATION_COHORT_VERSION
+
+    workflow = _normalized_text(
+        out.get("workflow_status", pd.Series(pd.NA, index=out.index, dtype="string"))
+    )
+    if "status" in out.columns:
+        fallback = _normalized_text(out["status"])
+        workflow = workflow.where(workflow.notna() & workflow.ne(""), fallback)
+    disposition = _normalized_text(
+        out.get("disposition", pd.Series(pd.NA, index=out.index, dtype="string"))
+    )
+    confidence = pd.to_numeric(
+        out.get("classification_confidence", pd.Series(pd.NA, index=out.index)),
+        errors="coerce",
+    ).astype("Int64")
+    duplicate_of = _normalized_text(
+        out.get("duplicate_of", pd.Series(pd.NA, index=out.index, dtype="string"))
+    )
+    bucket_set = {str(bucket) for bucket in (buckets or ())}
+
+    reasons: list[str] = []
+    duplicated = out["candidate_id"].duplicated(keep=False)
+    for idx, candidate_id in out["candidate_id"].items():
+        row_reasons: list[str] = []
+        if pd.isna(candidate_id) or not str(candidate_id).strip():
+            row_reasons.append("missing_candidate_id")
+        elif bool(duplicated.loc[idx]):
+            row_reasons.append("duplicate_candidate_id")
+        if workflow.loc[idx] not in PUBLICATION_WORKFLOW_STATUS:
+            row_reasons.append("workflow_not_reviewed")
+        if disposition.loc[idx] not in PUBLICATION_DISPOSITIONS:
+            row_reasons.append("disposition_not_keep")
+        if pd.notna(duplicate_of.loc[idx]) and str(duplicate_of.loc[idx]).strip():
+            row_reasons.append("marked_duplicate")
+        bucket = out.at[idx, "review_bucket"]
+        if bucket is None or (bucket_set and bucket not in bucket_set):
+            row_reasons.append("class_outside_publication_cohort")
+        if require_confident_classification and confidence.loc[idx] not in PUBLICATION_CONFIDENCE:
+            row_reasons.append("classification_confidence_below_3")
+        reasons.append(";".join(row_reasons))
+
+    out["publication_exclusion_reason"] = pd.Series(reasons, index=out.index, dtype="string")
+    out["publication_selected"] = out["publication_exclusion_reason"].eq("")
+    return out
+
+
 def audit_flattened_vs_layers(df: pd.DataFrame) -> pd.DataFrame:
     """Report JSON-layer keys missing from flattened SQL columns."""
+    work = df.reset_index(drop=True)
     rows: list[dict[str, object]] = []
     for layer in FEATURE_LAYER_COLUMNS:
-        for idx, raw in df[layer].items() if layer in df.columns else []:
+        for idx, raw in work[layer].items() if layer in work.columns else []:
             layer_obj = _parse_layer_object(raw)
             if not layer_obj:
                 continue
-            candidate_id = str(df.at[idx, "candidate_id"]) if "candidate_id" in df.columns else str(idx)
-            flat_row = df.loc[idx]
+            candidate_id = str(work.at[idx, "candidate_id"]) if "candidate_id" in work.columns else str(idx)
+            flat_row = work.loc[idx]
             for key, json_value in layer_obj.items():
                 if _is_missing(json_value):
                     continue
@@ -248,7 +335,30 @@ def audit_flattened_vs_layers(df: pd.DataFrame) -> pd.DataFrame:
                             "flat_value": flat_value,
                         }
                     )
+                elif not _values_equivalent(flat_value, json_value):
+                    rows.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "layer": layer,
+                            "key": key,
+                            "issue": "value_mismatch",
+                            "json_value": json_value,
+                            "flat_value": flat_value,
+                        }
+                    )
     return pd.DataFrame(rows)
+
+
+def _values_equivalent(left: object, right: object) -> bool:
+    """Compare audit values with tolerance for equivalent numeric encodings."""
+    try:
+        left_numeric = float(left)
+        right_numeric = float(right)
+        if math.isfinite(left_numeric) and math.isfinite(right_numeric):
+            return bool(np.isclose(left_numeric, right_numeric, rtol=1e-9, atol=1e-12))
+    except (TypeError, ValueError):
+        pass
+    return str(left).strip() == str(right).strip()
 
 
 def feature_missingness_by_bucket(
@@ -267,9 +377,10 @@ def feature_missingness_by_bucket(
         for bucket, sub in df.groupby(bucket_col, dropna=False):
             n = len(sub)
             for col in present_cols:
-                non_null = int(sub[col].notna().sum())
-                if sub[col].dtype == object:
-                    non_null = int(sub[col].astype(str).str.strip().ne("").sum())
+                present = sub[col].notna()
+                if pd.api.types.is_object_dtype(sub[col]) or pd.api.types.is_string_dtype(sub[col]):
+                    present &= sub[col].astype("string").str.strip().ne("").fillna(False)
+                non_null = int(present.sum())
                 rows.append(
                     {
                         "feature_group": group_name,
@@ -356,20 +467,48 @@ def mwu_separability_table(
             if len(other_x) < 2:
                 continue
             try:
-                pvalue = float(stats.mannwhitneyu(ref_x, other_x, alternative="two-sided").pvalue)
+                result = stats.mannwhitneyu(ref_x, other_x, alternative="two-sided")
+                pvalue = float(result.pvalue)
+                rank_biserial = 2.0 * float(result.statistic) / (len(ref_x) * len(other_x)) - 1.0
             except Exception:
                 pvalue = np.nan
+                rank_biserial = np.nan
             rows.append(
                 {
                     "feature": feature,
                     "reference_group": reference_group,
                     "compare_group": label,
+                    "reference_n": int(len(ref_x)),
+                    "compare_n": int(len(other_x)),
                     "reference_median": float(ref_x.median()),
                     "compare_median": float(other_x.median()),
+                    "median_difference": float(ref_x.median() - other_x.median()),
+                    "rank_biserial": rank_biserial,
                     "mwu_pvalue": pvalue,
                 }
             )
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["mwu_fdr_qvalue"] = _benjamini_hochberg(result["mwu_pvalue"])
+    result["inference_scope"] = "exploratory_unpaired_feature_screen"
+    return result
+
+
+def _benjamini_hochberg(pvalues: pd.Series) -> pd.Series:
+    """Return Benjamini-Hochberg adjusted p-values, preserving missing rows."""
+    numeric = pd.to_numeric(pvalues, errors="coerce")
+    valid = numeric.notna() & np.isfinite(numeric) & numeric.between(0.0, 1.0)
+    adjusted = pd.Series(np.nan, index=pvalues.index, dtype="float64")
+    if not bool(valid.any()):
+        return adjusted
+    ordered = numeric.loc[valid].sort_values()
+    n_tests = len(ordered)
+    ranks = np.arange(1, n_tests + 1, dtype=float)
+    raw = ordered.to_numpy(dtype=float) * n_tests / ranks
+    monotonic = np.minimum.accumulate(raw[::-1])[::-1]
+    adjusted.loc[ordered.index] = np.clip(monotonic, 0.0, 1.0)
+    return adjusted
 
 
 def zscore_median_profile(
@@ -455,7 +594,7 @@ def plot_candidate_lightcurve(
         ylabel="mag",
         title=(
             f"{candidate_id} | bucket={row.get('review_bucket')} | class={row.get('event_class')} | "
-            f"score={row.get('interest_score')}"
+            f"confidence={row.get('classification_confidence')}"
         ),
     )
     if show:
@@ -469,7 +608,7 @@ def plot_class_examples(
     label: str,
     n: int = 4,
     *,
-    sort_by: str = "interest_score",
+    sort_by: str = "classification_confidence",
     run_dir: Path | str | None = None,
 ) -> list[pd.DataFrame]:
     """Plot example light curves for a review bucket or event_class label."""
@@ -478,7 +617,7 @@ def plot_class_examples(
     if data.empty:
         print(f"No rows for bucket={bucket}")
         return []
-    ascending = sort_by not in {"interest_score", "updated_at", "ltv_dispersion", "ltv_max_diff"}
+    ascending = sort_by not in {"classification_confidence", "updated_at", "ltv_dispersion", "ltv_max_diff"}
     data = data.sort_values([sort_by, "candidate_id"], ascending=[not ascending, True]).head(n)
     outputs: list[pd.DataFrame] = []
     for cid in data["candidate_id"].astype(str):
@@ -503,16 +642,47 @@ def export_paper_tables(
     candidate_path = out_dir / "candidate_table.parquet"
     missingness_path = out_dir / "feature_missingness.csv"
     inventory_path = out_dir / "feature_group_inventory.csv"
-    df.to_parquet(candidate_path, index=False)
+    cohort = (
+        df
+        if "publication_selected" in df.columns
+        else build_publication_cohort(df, buckets=None)
+    )
+    selected = cohort.loc[cohort["publication_selected"]].copy()
+    selected.to_parquet(candidate_path, index=False)
     missingness.to_csv(missingness_path, index=False)
     inventory = pd.DataFrame(
         [{"feature_group": name, "n_columns": len(cols)} for name, cols in PAPER_FEATURE_GROUPS.items()]
     )
     inventory.to_csv(inventory_path, index=False)
+    cohort_path = out_dir / "publication_cohort_decisions.csv"
+    exclusion_path = out_dir / "publication_cohort_exclusions.csv"
+    manifest_path = out_dir / "publication_cohort_manifest.json"
+    cohort.to_csv(cohort_path, index=False)
+    cohort.loc[~cohort["publication_selected"]].to_csv(exclusion_path, index=False)
+    selected_ids = sorted(selected["candidate_id"].astype(str).tolist())
+    manifest = {
+        "publication_cohort_version": PUBLICATION_COHORT_VERSION,
+        "n_input_rows": int(len(cohort)),
+        "n_selected_rows": int(len(selected)),
+        "n_excluded_rows": int((~cohort["publication_selected"]).sum()),
+        "selected_candidate_ids_sha256": hashlib.sha256(
+            "\n".join(selected_ids).encode("utf-8")
+        ).hexdigest(),
+        "selection_rules": {
+            "workflow_status": sorted(PUBLICATION_WORKFLOW_STATUS),
+            "disposition": sorted(PUBLICATION_DISPOSITIONS),
+            "duplicate_rows_excluded": True,
+            "marked_duplicates_excluded": True,
+        },
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return {
         "candidate_table": candidate_path,
         "feature_missingness": missingness_path,
         "feature_group_inventory": inventory_path,
+        "publication_cohort_decisions": cohort_path,
+        "publication_cohort_exclusions": exclusion_path,
+        "publication_cohort_manifest": manifest_path,
     }
 
 

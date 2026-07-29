@@ -59,7 +59,7 @@ def _active_filter_specs(filter_params: dict[str, object]) -> list[dict[str, obj
     for key, value in filter_params.items():
         if key in _QUEUE_SCOPE_KEYS or key in _QUEUE_SORT_KEYS:
             continue
-        if key == "select_filter_mode":
+        if key in {"select_filter_mode", "select_filter_logic"}:
             continue
 
         if key == "catalog_neighbor_radius_arcsec":

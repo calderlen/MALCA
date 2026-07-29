@@ -60,7 +60,9 @@ def test_queue_filter_state_restores_catalog_neighbor_radius_and_presets() -> No
     params = review_app._queue_filter_params_from_ui_state(normalized, None, None)
 
     assert normalized["catalog_neighbor_radius_arcsec"] == 30.0
-    assert values[3:6] == (30.0, ["yes"], [])
+    assert normalized["select_filter_logic"] == "and"
+    assert values[3:7] == ("and", 30.0, ["yes"], [])
+    assert params["select_filter_logic"] == "and"
     assert params["catalog_neighbor_radius_arcsec"] == 30.0
     assert params["exclude_known_catalog_neighbors"] is True
     assert params["exclude_dipper_catalog_neighbors"] is False
@@ -896,6 +898,10 @@ def test_dustycult_warning_renders_but_failed_does_not_render_model_graph(tmp_pa
         }
     )
     with review_app.db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{"candidate_id": "cand-1", "source_path": "test"}]),
+        )
         upsert_dustycult_fit(
             conn,
             {
@@ -1017,6 +1023,10 @@ def test_dustycult_publication_figures_use_best_fit(tmp_path, monkeypatch) -> No
         "sigma_x_minus": {"median": 0.25},
     }
     with review_app.db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{"candidate_id": "cand-1", "source_path": "test"}]),
+        )
         upsert_dustycult_fit(
             conn,
             {
