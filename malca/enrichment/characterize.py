@@ -14,6 +14,7 @@ Usage:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import argparse
+import json
 import os
 import time
 import warnings
@@ -27,7 +28,6 @@ from astroquery.xmatch import XMatch
 from dustmaps3d import dustmaps3d
 from tqdm import tqdm
 import astropy.units as u
-import banyan_sigma as banyan_sigma_pkg
 import numpy as np
 import pandas as pd
 import pyvo
@@ -59,10 +59,12 @@ from malca.config import (
 )
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.products.feature_layers import to_layer_first_frame
+from malca.catalogs.gaia_fetch import GAIA_BANYAN_REQUIRED_COLUMNS, gaia_banyan_input_mask
 from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, normalize_gaia_source_ids, parse_gaia_source_id
 from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
+from malca.enrichment.banyan import BANYAN_OUTPUT_COLUMNS, compute_banyan_membership
 
 
 
@@ -78,6 +80,9 @@ LEGACY_STARHORSE_TAP_CACHE_FILE = LEGACY_CATALOG_CACHE_DIR / "starhorse_tap_cach
 OPEN_CLUSTER_META_CACHE_FILE = CATALOG_CACHE_DIR / "open_clusters" / "cantat_gaudin2020_table1.parquet"
 LEGACY_OPEN_CLUSTER_META_CACHE_FILE = LEGACY_CATALOG_CACHE_DIR / "cantat_gaudin2020_table1.parquet"
 CHARACTERIZE_CACHE_DIR = CATALOG_CACHE_DIR / "characterize"
+CHARACTERIZE_CACHE_VERSION = "catalog-match-v2"
+CHARACTERIZE_STATUS_VERSION = "2"
+CHARACTERIZE_NEGATIVE_CACHE_MAX_AGE_DAYS = 7.0
 UNWISE_CHECKPOINT_BASENAME = "unwise_variability_CHECKPOINT.parquet"
 
 WISE_LEGACY_COLUMN_RENAMES = {
@@ -95,9 +100,29 @@ WISE_COLOR_PAIRS = (
     ("w3", "w4"),
 )
 WISE_COLOR_COLUMNS = [f"{left}_{right}" for left, right in WISE_COLOR_PAIRS]
+ALLWISE_QUALITY_COLUMNS = [
+    "allwise_id",
+    "allwise_sep_arcsec",
+    "allwise_ph_qual",
+    "allwise_cc_flags",
+    "allwise_ext_flg",
+    "allwise_nb",
+    "allwise_na",
+    "allwise_var_flg",
+    *[f"allwise_w{band}_{suffix}" for band in range(1, 5) for suffix in ("snr", "rchi2", "sat", "ndet", "nframe")],
+]
+ALLWISE_TEXT_QUALITY_COLUMNS = {
+    "allwise_id", "allwise_ph_qual", "allwise_cc_flags", "allwise_var_flg",
+}
 
-CHARACTERIZE_CACHE_META_COLUMNS = {"_cache_key", "_cache_status", "_cache_updated_at"}
-ALLWISE_CACHE_COLUMNS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err", *WISE_COLOR_COLUMNS]
+CHARACTERIZE_CACHE_META_COLUMNS = {
+    "_cache_key", "_cache_status", "_cache_updated_at", "_cache_version"
+}
+ALLWISE_CACHE_COLUMNS = [
+    "w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err",
+    *WISE_COLOR_COLUMNS,
+    *ALLWISE_QUALITY_COLUMNS,
+]
 TMASS_CACHE_COLUMNS = ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
 APASS_CACHE_COLUMNS = [
     "apass_v", "apass_v_err", "apass_b", "apass_b_err",
@@ -123,7 +148,10 @@ VPHAS_CACHE_COLUMNS = [
     "vphas_ha_excess",
 ]
 OPEN_CLUSTER_CACHE_COLUMNS = ["cluster_name", "cluster_age_myr", "cluster_dist_pc"]
-DUST_BASE_CACHE_COLUMNS = ["A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc"]
+DUST_BASE_CACHE_COLUMNS = [
+    "A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc",
+    "dust_status", "dust_distance_source", "dust_distance_pc",
+]
 DUST_DERED_SOURCE_COLUMNS = [
     "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag",
     "tmass_j", "tmass_h", "tmass_k", "w1", "w2",
@@ -139,6 +167,7 @@ MODULE_COMPLETION_COLUMNS = {
     "iphas": IPHAS_CACHE_COLUMNS,
     "vphas": VPHAS_CACHE_COLUMNS,
     "clusters": OPEN_CLUSTER_CACHE_COLUMNS,
+    "banyan": list(BANYAN_OUTPUT_COLUMNS),
 }
 
 
@@ -248,8 +277,8 @@ def _characterize_cache_key(row: pd.Series, module: str) -> str | None:
             sid = parse_gaia_source_id(row.get(id_col))
             if sid:
                 if module == "dust":
-                    return f"gaia:{sid}:dist_pc:{_row_distance_token(row)}"
-                return f"gaia:{sid}"
+                    return f"{CHARACTERIZE_CACHE_VERSION}:gaia:{sid}:dist_pc:{_row_distance_token(row)}"
+                return f"{CHARACTERIZE_CACHE_VERSION}:gaia:{sid}"
 
     ra_col = "ra" if "ra" in row.index else ("ra_deg" if "ra_deg" in row.index else None)
     dec_col = "dec" if "dec" in row.index else ("dec_deg" if "dec_deg" in row.index else None)
@@ -263,8 +292,8 @@ def _characterize_cache_key(row: pd.Series, module: str) -> str | None:
     if not (np.isfinite(ra) and np.isfinite(dec)):
         return None
     if module == "dust":
-        return f"coord:{ra:.7f}:{dec:.7f}:dist_pc:{_row_distance_token(row)}"
-    return f"coord:{ra:.7f}:{dec:.7f}"
+        return f"{CHARACTERIZE_CACHE_VERSION}:coord:{ra:.7f}:{dec:.7f}:dist_pc:{_row_distance_token(row)}"
+    return f"{CHARACTERIZE_CACHE_VERSION}:coord:{ra:.7f}:{dec:.7f}"
 
 
 def _characterize_cache_keys(df: pd.DataFrame, module: str) -> pd.Series:
@@ -286,6 +315,16 @@ def _read_characterize_cache(module: str) -> pd.DataFrame:
         return pd.DataFrame()
     cache = cache.copy()
     cache["_cache_key"] = cache["_cache_key"].astype(str)
+    if "_cache_version" in cache.columns:
+        cache = cache[cache["_cache_version"].fillna("").astype(str) == CHARACTERIZE_CACHE_VERSION]
+    if "_cache_status" in cache.columns and "_cache_updated_at" in cache.columns:
+        status = cache["_cache_status"].fillna("").astype(str).str.lower()
+        updated = pd.to_datetime(cache["_cache_updated_at"], errors="coerce", utc=True)
+        age_days = (pd.Timestamp.now(tz="UTC") - updated).dt.total_seconds() / 86400.0
+        stale_negative = status.isin({"miss", "no_data"}) & (
+            updated.isna() | (age_days > CHARACTERIZE_NEGATIVE_CACHE_MAX_AGE_DAYS)
+        )
+        cache = cache.loc[~stale_negative]
     return cache.drop_duplicates(subset=["_cache_key"], keep="last")
 
 
@@ -307,6 +346,19 @@ def _dust_cache_columns(frame: pd.DataFrame) -> list[str]:
     cols = list(DUST_BASE_CACHE_COLUMNS)
     cols.extend(f"{col}_dered" for col in DUST_DERED_SOURCE_COLUMNS if col in frame.columns)
     return cols
+
+
+def _characterize_value_present(value: object) -> bool:
+    if value is None or np.ma.is_masked(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "nan", "none", "<na>", "--"}
+    try:
+        return not bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return True
 
 
 def _run_cached_characterization_module(
@@ -334,6 +386,8 @@ def _run_cached_characterization_module(
             cache = pd.DataFrame()
     cache_columns = [c for c in cache.columns if c not in CHARACTERIZE_CACHE_META_COLUMNS]
     cache_hit_mask = pd.Series(False, index=out.index)
+    cache_status_col = f"char_cache_status_{module}"
+    out[cache_status_col] = "uncacheable" if keys.isna().all() else "miss"
 
     if not cache.empty and cache_columns:
         lookup = cache.set_index("_cache_key")
@@ -344,6 +398,11 @@ def _run_cached_characterization_module(
                     out[col] = pd.NA
                 values = keys.astype(str).map(lookup[col])
                 out.loc[cache_hit_mask, col] = values.loc[cache_hit_mask]
+            cached_status = keys.astype(str).map(lookup.get("_cache_status", pd.Series(dtype=object)))
+            out.loc[cache_hit_mask, cache_status_col] = (
+                "cached_" + cached_status.loc[cache_hit_mask].fillna("hit").astype(str)
+            )
+    out.loc[keys.isna(), cache_status_col] = "uncacheable"
 
     cacheable_mask = keys.notna()
     run_mask = ~cache_hit_mask
@@ -365,12 +424,28 @@ def _run_cached_characterization_module(
             out[col] = pd.NA
         out.loc[result.index, col] = result[col]
 
+    evidence_columns = (
+        [col for col in ("A_v_3d", "ebv_3d") if col in result.columns]
+        if module == "dust"
+        else [
+            col for col in output_columns
+            if not col.endswith(("_status", "_source"))
+        ]
+    )
+    has_data = result[evidence_columns].apply(
+        lambda row: any(_characterize_value_present(value) for value in row), axis=1
+    ) if evidence_columns else pd.Series(False, index=result.index)
+    result_cache_status = pd.Series("miss", index=result.index, dtype=object)
+    result_cache_status.loc[has_data] = "hit"
+    out.loc[result.index, cache_status_col] = np.where(has_data, "fetched", "fetched_no_data")
+
     result_keys = keys.loc[result.index]
     cache_rows = result.loc[result_keys.notna(), output_columns].copy()
     if not cache_rows.empty:
         cache_rows.insert(0, "_cache_key", result_keys.loc[result_keys.notna()].astype(str).values)
-        cache_rows["_cache_status"] = "ok"
+        cache_rows["_cache_status"] = result_cache_status.loc[result_keys.notna()].values
         cache_rows["_cache_updated_at"] = pd.Timestamp.utcnow().isoformat()
+        cache_rows["_cache_version"] = CHARACTERIZE_CACHE_VERSION
         _write_characterize_cache(module, cache_rows, output_columns)
 
     return _add_wise_color_columns(out) if module == "allwise" else out
@@ -384,6 +459,110 @@ def _run_cached_characterization_module(
 def _normalize_source_ids(source_ids: list[str | int]) -> list[str]:
     """Normalize mixed-type source IDs to digit strings."""
     return normalize_gaia_source_ids(source_ids)
+
+
+GAIA_ENRICHMENT_REQUIRED_COLUMNS = tuple(dict.fromkeys((
+    "phot_g_mean_mag",
+    "phot_bp_mean_mag",
+    "phot_rp_mean_mag",
+    "parallax",
+    "parallax_error",
+    *GAIA_BANYAN_REQUIRED_COLUMNS,
+)))
+
+
+def gaia_identifier_series(frame: pd.DataFrame) -> pd.Series:
+    """Return a normalized Gaia DR3 key, preferring the explicit ``gaia_id``."""
+    identifiers = pd.Series(pd.NA, index=frame.index, dtype=object)
+    for column in ("gaia_id", "source_id"):
+        if column not in frame.columns:
+            continue
+        parsed = frame[column].map(parse_gaia_source_id)
+        identifiers = identifiers.combine_first(parsed)
+    return identifiers
+
+
+def gaia_enrichment_needed_mask(frame: pd.DataFrame) -> pd.Series:
+    """Return Gaia-keyed rows missing at least one current enrichment field."""
+    identifiers = gaia_identifier_series(frame)
+    incomplete = pd.Series(False, index=frame.index, dtype=bool)
+    for column in GAIA_ENRICHMENT_REQUIRED_COLUMNS:
+        if column not in frame.columns:
+            incomplete |= True
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        incomplete |= values.isna() | ~np.isfinite(values)
+        if column in {"pmra_error", "pmdec_error"}:
+            incomplete |= values <= 0
+        elif column == "ra":
+            incomplete |= ~values.between(0.0, 360.0, inclusive="left")
+        elif column == "dec":
+            incomplete |= ~values.between(-90.0, 90.0, inclusive="both")
+    return identifiers.notna() & incomplete
+
+
+def merge_gaia_catalog_rows(frame: pd.DataFrame, gaia_df: pd.DataFrame) -> pd.DataFrame:
+    """Fill row-level Gaia gaps from a local catalog using canonical Gaia IDs."""
+    out = frame.copy()
+    identifiers = gaia_identifier_series(out)
+    if "gaia_id" not in out.columns:
+        out["gaia_id"] = identifiers
+    else:
+        out["gaia_id"] = out["gaia_id"].map(parse_gaia_source_id).combine_first(identifiers)
+    if "source_id" not in out.columns:
+        out["source_id"] = identifiers
+
+    lookup_frame = gaia_df.copy()
+    if "source_id" not in lookup_frame.columns:
+        return out
+    lookup_frame["source_id"] = lookup_frame["source_id"].map(parse_gaia_source_id)
+    lookup_frame = lookup_frame.dropna(subset=["source_id"])
+    lookup = lookup_frame.drop_duplicates(subset=["source_id"], keep="last").set_index("source_id")
+    matched = identifiers.notna() & identifiers.isin(lookup.index)
+
+    for column in lookup.columns:
+        values = identifiers.map(lookup[column])
+        if column not in out.columns:
+            out[column] = values
+            continue
+        base = out[column]
+        if pd.api.types.is_object_dtype(base) or pd.api.types.is_string_dtype(base):
+            text = base.astype(str).str.strip().str.lower()
+            missing = base.isna() | text.isin({"", "nan", "none", "<na>"})
+            out.loc[missing, column] = values.loc[missing]
+        else:
+            out[column] = base.combine_first(values)
+
+    complete = gaia_banyan_input_mask(out)
+    status = pd.Series("missing_gaia_id", index=out.index, dtype=object)
+    status.loc[identifiers.notna()] = "not_in_cache"
+    status.loc[matched] = "partial"
+    status.loc[matched & complete] = "complete"
+    status.loc[~matched & complete] = "existing_complete"
+    out["gaia_enrichment_status"] = status
+    out["gaia_enrichment_source"] = np.where(matched, "gaia_dr3_cache", "")
+    out["gaia_astrometry_complete"] = complete.astype(bool)
+    out["gaia_banyan_input_complete"] = complete.astype(bool)
+    out["gaia_enrichment_updated_at"] = pd.Timestamp.now(tz="UTC").isoformat()
+
+    def _missing_fields(row: pd.Series) -> str:
+        missing: list[str] = []
+        for column in GAIA_BANYAN_REQUIRED_COLUMNS:
+            value = pd.to_numeric(
+                pd.Series([row.get(column, np.nan)]), errors="coerce"
+            ).iloc[0]
+            if not np.isfinite(value):
+                missing.append(column)
+            elif column in {"pmra_error", "pmdec_error"} and value <= 0:
+                missing.append(column)
+            elif column == "ra" and not 0.0 <= value < 360.0:
+                missing.append(column)
+            elif column == "dec" and not -90.0 <= value <= 90.0:
+                missing.append(column)
+        return json.dumps(missing, separators=(",", ":"))
+
+    out["gaia_missing_fields_json"] = out.apply(_missing_fields, axis=1)
+    return _add_wise_color_columns(out)
 
 def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = GAIA_CHUNK_SIZE, cache_file: str | None = None) -> pd.DataFrame:
     """
@@ -687,8 +866,13 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         return df
         
     df = df.copy()
-    df['A_v_3d'] = 0.0
+    df['A_v_3d'] = np.nan
     df['ebv_3d'] = np.nan
+    df['dust_sigma'] = np.nan
+    df['dust_max_dist_kpc'] = np.nan
+    df['dust_status'] = 'not_queried'
+    df['dust_distance_source'] = ''
+    df['dust_distance_pc'] = np.nan
     
     if 'ra' in df.columns and 'dec' in df.columns:
         ra_col = 'ra'
@@ -698,34 +882,46 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         dec_col = 'dec_deg'
     else:
         print("Warning: Missing ra/dec columns for dust query.")
+        df['dust_status'] = 'missing_coordinates'
         return df
         
     # Distance (in pc from Gaia, need kpc for dustmaps3d)
     dist_pc = np.full(len(df), np.nan)
     
     if 'gaia_parallax' in df.columns:
-        plx = df['gaia_parallax'].values
+        plx = pd.to_numeric(df['gaia_parallax'], errors='coerce').to_numpy(dtype=float)
         valid_plx = (np.isfinite(plx)) & (plx > 0)
         dist_pc[valid_plx] = 1000.0 / plx[valid_plx]
+        df.loc[valid_plx, 'dust_distance_source'] = 'gaia_parallax'
     elif 'parallax' in df.columns:
-        plx = df['parallax'].values
+        plx = pd.to_numeric(df['parallax'], errors='coerce').to_numpy(dtype=float)
         valid_plx = (np.isfinite(plx)) & (plx > 0)
         dist_pc[valid_plx] = 1000.0 / plx[valid_plx]
+        df.loc[valid_plx, 'dust_distance_source'] = 'parallax'
         
     if 'distance_gspphot' in df.columns:
-        gsp = df['distance_gspphot'].values
+        gsp = pd.to_numeric(df['distance_gspphot'], errors='coerce').to_numpy(dtype=float)
         valid_gsp = np.isfinite(gsp) & (gsp > 0)
         dist_pc[valid_gsp] = gsp[valid_gsp]
+        df.loc[valid_gsp, 'dust_distance_source'] = 'distance_gspphot'
+
+    df['dust_distance_pc'] = dist_pc
         
     if np.isnan(dist_pc).all():
         print("Warning: No distance info for dust query.")
+        df['dust_status'] = 'missing_distance'
         return df
     
     dist_kpc = dist_pc / 1000.0
     valid_mask = (np.isfinite(df[ra_col])) & (np.isfinite(df[dec_col])) & (np.isfinite(dist_kpc)) & (dist_kpc > 0)
     
     if not valid_mask.any():
+        df.loc[~np.isfinite(dist_kpc) | (dist_kpc <= 0), 'dust_status'] = 'missing_distance'
+        coordinate_valid = np.isfinite(pd.to_numeric(df[ra_col], errors='coerce')) & np.isfinite(pd.to_numeric(df[dec_col], errors='coerce'))
+        df.loc[~coordinate_valid, 'dust_status'] = 'missing_coordinates'
         return df
+    df.loc[valid_mask, 'dust_status'] = 'query_pending'
+    df.loc[~valid_mask & (~np.isfinite(dist_kpc) | (dist_kpc <= 0)), 'dust_status'] = 'missing_distance'
     
     # Convert RA/Dec to Galactic l, b
     coords = SkyCoord(ra=df.loc[valid_mask, ra_col].values * u.deg, 
@@ -759,6 +955,10 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[valid_mask_arr, 'A_v_3d'] = A_V
         df.loc[valid_mask_arr, 'dust_sigma'] = sigma_arr
         df.loc[valid_mask_arr, 'dust_max_dist_kpc'] = max_dist_arr
+        finite_result = np.isfinite(ebv_arr) & np.isfinite(A_V)
+        valid_indices = df.index[valid_mask_arr]
+        df.loc[valid_indices[finite_result], 'dust_status'] = 'ok'
+        df.loc[valid_indices[~finite_result], 'dust_status'] = 'no_data'
 
         finite_av = A_V[np.isfinite(A_V)]
         if finite_av.size > 0:
@@ -770,7 +970,7 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         print(f"Error querying dustmaps3d: {e}")
         raise
 
-    df['A_v_3d'] = pd.to_numeric(df['A_v_3d'], errors="coerce").fillna(0.0)
+    df['A_v_3d'] = pd.to_numeric(df['A_v_3d'], errors="coerce")
     
     # Compute dereddened magnitudes for active pipeline bands if they exist
     extinction_coeffs = {
@@ -823,43 +1023,51 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
         'W2': ['w2', 'W2mag', 'w2mpro']
     }
     
-    vals = {}
-    for bands, candidates in col_map.items():
-        found = None
-        for c in candidates:
-            if c in df.columns:
-                found = c
-                break
-        vals[bands] = found
-        
-    if not all(vals.values()):
-        df['yso_class'] = 'unknown'
-        return df
-        
-    H = df[vals['H']]
-    K = df[vals['K']]
-    W1 = df[vals['W1']]
-    W2 = df[vals['W2']]
+    def coalesce(candidates: list[str], label: str) -> pd.Series:
+        values = pd.Series(np.nan, index=df.index, dtype=float)
+        source = pd.Series("", index=df.index, dtype=object)
+        for column in candidates:
+            if column not in df.columns:
+                continue
+            candidate = pd.to_numeric(df[column], errors="coerce")
+            take = values.isna() & candidate.notna()
+            values.loc[take] = candidate.loc[take]
+            source.loc[take] = column
+        df[f"yso_{label}_source"] = source
+        return values
+
+    H = coalesce(col_map['H'], 'h')
+    K = coalesce(col_map['K'], 'k')
+    W1 = coalesce(col_map['W1'], 'w1')
+    W2 = coalesce(col_map['W2'], 'w2')
         
     hk_color = H - K
     w1w2_color = W1 - W2
     
     # Dust Correction
-    if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
-        av = pd.to_numeric(df['A_v_3d'], errors="coerce").fillna(0.0)
-        hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
-        w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
-        df['H_K_dered'] = hk_color
-        df['w1_w2_dered'] = w1w2_color
+    df['yso_extinction_status'] = 'not_available'
+    if 'A_v_3d' in df.columns:
+        av = pd.to_numeric(df['A_v_3d'], errors="coerce")
+        valid_av = av.notna() & np.isfinite(av) & (av >= 0)
+        hk_color.loc[valid_av] = hk_color.loc[valid_av] - (YSO_DUST_CORRECTION_HK * av.loc[valid_av])
+        w1w2_color.loc[valid_av] = w1w2_color.loc[valid_av] - (YSO_DUST_CORRECTION_W1W2 * av.loc[valid_av])
+        df['H_K_dered'] = np.nan
+        df['w1_w2_dered'] = np.nan
+        df.loc[valid_av, 'H_K_dered'] = hk_color.loc[valid_av]
+        df.loc[valid_av, 'w1_w2_dered'] = w1w2_color.loc[valid_av]
+        df.loc[valid_av, 'yso_extinction_status'] = np.where(av.loc[valid_av] > 0, 'corrected', 'measured_zero')
+        df.loc[av.notna() & ~valid_av, 'yso_extinction_status'] = 'invalid'
     
     df['H_K'] = hk_color 
     df['w1_w2'] = w1w2_color
+    valid_colors = hk_color.notna() & w1w2_color.notna()
+    df['yso_input_status'] = np.where(valid_colors, 'ok', 'missing_ir_bands')
     
     # Classification criteria
-    class_i = df['w1_w2'] > YSO_CLASS_I_W1W2
-    class_ii = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
-    trans = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
-    ms = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN
+    class_i = valid_colors & (df['w1_w2'] >= YSO_CLASS_I_W1W2)
+    class_ii = valid_colors & (df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] >= YSO_CLASS_II_HK)
+    trans = valid_colors & (df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK)
+    ms = valid_colors & (df['w1_w2'] <= YSO_CLASS_II_W1W2_MIN)
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -903,75 +1111,16 @@ def classify_galactic_population(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Query BANYAN Σ for young stellar association membership probability.
-    
-    Requires: ra, dec, pmra, pmdec, parallax columns.
-    Optional: radial_velocity for better constraints.
-    
-    Returns dataframe with banyan_field_prob and banyan_best_assoc columns.
-    """
-    if df.empty:
-        return df
-    df = df.copy()
-    
-    # Check for required columns
-    required = ['ra', 'dec', 'pmra', 'pmdec', 'parallax']
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        print(f"Warning: BANYAN Σ requires columns: {missing}")
-        df['banyan_field_prob'] = np.nan
-        df['banyan_best_assoc'] = ''
-        return df
-    
-    field_probs = []
-    best_assocs = []
-    
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="BANYAN Σ"):
-        try:
-            ra = float(row['ra'])
-            dec = float(row['dec'])
-            pmra = float(row['pmra'])
-            pmdec = float(row['pmdec'])
-            plx = float(row['parallax'])
-            
-            if not all(np.isfinite([ra, dec, pmra, pmdec, plx])):
-                field_probs.append(np.nan)
-                best_assocs.append('')
-                continue
-            
-            # Optional RV
-            rv = row.get('radial_velocity', np.nan)
-            rv = float(rv) if np.isfinite(rv) else None
-            
-            if not hasattr(banyan_sigma_pkg, "banyan_sigma"):
-                raise RuntimeError("banyan_sigma package does not expose banyan_sigma()")
-
-            result = banyan_sigma_pkg.banyan_sigma(
-                ra=ra, dec=dec,
-                pmra=pmra, pmdec=pmdec,
-                plx=plx, rv=rv
-            )
-            
-            field_probs.append(float(result.get('field', np.nan)))
-            
-            # Best association (highest non-field probability)
-            assoc_probs = {k: v for k, v in result.items() if k != 'field'}
-            if assoc_probs:
-                best = max(assoc_probs, key=assoc_probs.get)
-                best_assocs.append(best if assoc_probs[best] > BANYAN_MIN_ASSOC_PROB else '')
-            else:
-                best_assocs.append('')
-                
-        except Exception as e:
-            field_probs.append(np.nan)
-            best_assocs.append('')
-    
-    df['banyan_field_prob'] = field_probs
-    df['banyan_best_assoc'] = best_assocs
-    
-    print(f"BANYAN Σ: {(np.array(field_probs) < 0.99).sum()} sources with < 99% field probability")
-    return df
+    """Evaluate BANYAN Σ through MALCA's versioned, schema-stable adapter."""
+    out = compute_banyan_membership(
+        df,
+        association_threshold=BANYAN_MIN_ASSOC_PROB,
+    )
+    if out.empty:
+        return out
+    status_counts = out["banyan_status"].value_counts(dropna=False).to_dict()
+    print(f"BANYAN Σ statuses: {status_counts}")
+    return out
 
 
 # =============================================================================
@@ -1353,9 +1502,14 @@ def crossmatch_allwise(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP
     df = _canonicalize_wise_columns(df)
     
     # Initialize output columns
-    for col in ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]:
+    for col in ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err", *ALLWISE_QUALITY_COLUMNS]:
         if col not in df.columns:
-            df[col] = np.nan
+            if col in ALLWISE_TEXT_QUALITY_COLUMNS:
+                df[col] = pd.Series("", index=df.index, dtype=object)
+            else:
+                df[col] = np.nan
+        elif col in ALLWISE_TEXT_QUALITY_COLUMNS:
+            df[col] = df[col].astype(object)
         
     valid_mask = df['ra'].notna() & df['dec'].notna()
     if not valid_mask.any():
@@ -1388,6 +1542,23 @@ def crossmatch_allwise(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP
                 "W3mag": "w3", "e_W3mag": "w3_err",
                 "W4mag": "w4", "e_W4mag": "w4_err",
             }
+            numeric_quality_map = {
+                "angDist": "allwise_sep_arcsec",
+                "ex": "allwise_ext_flg",
+                "nb": "allwise_nb",
+                "na": "allwise_na",
+                **{f"snr{band}": f"allwise_w{band}_snr" for band in range(1, 5)},
+                **{f"chi2W{band}": f"allwise_w{band}_rchi2" for band in range(1, 5)},
+                **{f"sat{band}": f"allwise_w{band}_sat" for band in range(1, 5)},
+                **{f"nW{band}": f"allwise_w{band}_ndet" for band in range(1, 5)},
+                **{f"mW{band}": f"allwise_w{band}_nframe" for band in range(1, 5)},
+            }
+            text_quality_map = {
+                "AllWISE": "allwise_id",
+                "qph": "allwise_ph_qual",
+                "ccf": "allwise_cc_flags",
+                "var": "allwise_var_flg",
+            }
             
             for _, row in result_df.iterrows():
                 idx = int(row['_idx'])
@@ -1395,11 +1566,116 @@ def crossmatch_allwise(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP
                     val = row.get(viz_col, np.nan)
                     if pd.notna(val):
                         df.at[df.index[idx], my_col] = float(val)
+                for viz_col, my_col in numeric_quality_map.items():
+                    val = _row_first_numeric(row, viz_col)
+                    if np.isfinite(val):
+                        df.at[df.index[idx], my_col] = float(val)
+                for viz_col, my_col in text_quality_map.items():
+                    val = row.get(viz_col, None)
+                    if val is not None and not np.ma.is_masked(val) and str(val).strip() not in {"", "nan", "--"}:
+                        df.at[df.index[idx], my_col] = str(val).strip()
             
             print(f"AllWISE: {len(result_df)} matches found")
     except Exception as e:
         print(f"AllWISE XMatch error: {e}")
         
+    return _add_wise_color_columns(df)
+
+
+def query_allwise_vizier(df: pd.DataFrame, max_sep_arcsec: float = ALLWISE_MAX_SEP_ARCSEC) -> pd.DataFrame:
+    """Query AllWISE directly through VizieR for a small coordinate batch.
+
+    This is the reliable fallback for targeted work when the CDS XMatch upload
+    endpoint returns an invalid/non-VOTable response.  VizieR's ``_q`` column
+    preserves the association with each input coordinate.
+    """
+
+    if df.empty:
+        return df
+    df = _canonicalize_wise_columns(df)
+    for col in ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err", *ALLWISE_QUALITY_COLUMNS]:
+        if col not in df.columns:
+            if col in ALLWISE_TEXT_QUALITY_COLUMNS:
+                df[col] = pd.Series("", index=df.index, dtype=object)
+            else:
+                df[col] = np.nan
+        elif col in ALLWISE_TEXT_QUALITY_COLUMNS:
+            df[col] = df[col].astype(object)
+
+    valid_mask = df["ra"].notna() & df["dec"].notna()
+    if not valid_mask.any():
+        return _add_wise_color_columns(df)
+    valid_indices = df.index[valid_mask].tolist()
+    coordinates = SkyCoord(
+        pd.to_numeric(df.loc[valid_indices, "ra"], errors="coerce").to_numpy(dtype=float),
+        pd.to_numeric(df.loc[valid_indices, "dec"], errors="coerce").to_numpy(dtype=float),
+        unit="deg",
+    )
+    columns = [
+        "AllWISE", "RAJ2000", "DEJ2000",
+        "W1mag", "e_W1mag", "W2mag", "e_W2mag", "W3mag", "e_W3mag", "W4mag", "e_W4mag",
+        "qph", "ccf", "ex", "var", "nb", "na",
+        *[f"snr{band}" for band in range(1, 5)],
+        *[f"chi2W{band}" for band in range(1, 5)],
+        *[f"sat{band}" for band in range(1, 5)],
+        *[f"nW{band}" for band in range(1, 5)],
+        *[f"mW{band}" for band in range(1, 5)],
+        "+_r",
+    ]
+    print(f"Running direct AllWISE VizieR query for {len(valid_indices)} sources...")
+    try:
+        tables = Vizier(columns=columns, row_limit=-1, timeout=60).query_region(
+            coordinates,
+            radius=max_sep_arcsec * u.arcsec,
+            catalog="II/328/allwise",
+        )
+        if not tables:
+            return _add_wise_color_columns(df)
+        result_df = tables[0].to_pandas()
+        if result_df.empty or "_q" not in result_df:
+            return _add_wise_color_columns(df)
+        distance_col = "_r" if "_r" in result_df else None
+        if distance_col:
+            result_df = result_df.sort_values(distance_col)
+        result_df = result_df.drop_duplicates(subset="_q", keep="first")
+        photometry_map = {
+            "W1mag": "w1", "e_W1mag": "w1_err", "W2mag": "w2", "e_W2mag": "w2_err",
+            "W3mag": "w3", "e_W3mag": "w3_err", "W4mag": "w4", "e_W4mag": "w4_err",
+        }
+        numeric_quality_map = {
+            "_r": "allwise_sep_arcsec", "ex": "allwise_ext_flg", "nb": "allwise_nb", "na": "allwise_na",
+            **{f"snr{band}": f"allwise_w{band}_snr" for band in range(1, 5)},
+            **{f"chi2W{band}": f"allwise_w{band}_rchi2" for band in range(1, 5)},
+            **{f"sat{band}": f"allwise_w{band}_sat" for band in range(1, 5)},
+            **{f"nW{band}": f"allwise_w{band}_ndet" for band in range(1, 5)},
+            **{f"mW{band}": f"allwise_w{band}_nframe" for band in range(1, 5)},
+        }
+        text_quality_map = {
+            "AllWISE": "allwise_id", "qph": "allwise_ph_qual",
+            "ccf": "allwise_cc_flags", "var": "allwise_var_flg",
+        }
+        matched = 0
+        for _, row in result_df.iterrows():
+            query_index = int(row["_q"]) - 1
+            if query_index < 0 or query_index >= len(valid_indices):
+                continue
+            output_index = valid_indices[query_index]
+            for viz_col, output_col in photometry_map.items():
+                value = _row_first_numeric(row, viz_col)
+                if np.isfinite(value):
+                    df.at[output_index, output_col] = float(value)
+            for viz_col, output_col in numeric_quality_map.items():
+                value = _row_first_numeric(row, viz_col)
+                if np.isfinite(value):
+                    df.at[output_index, output_col] = float(value)
+            for viz_col, output_col in text_quality_map.items():
+                value = row.get(viz_col, None)
+                if value is not None and not np.ma.is_masked(value) and str(value).strip() not in {"", "nan", "--"}:
+                    df.at[output_index, output_col] = str(value).strip()
+            matched += 1
+        print(f"Direct AllWISE VizieR: {matched}/{len(valid_indices)} matched")
+    except Exception as exc:
+        print(f"Direct AllWISE VizieR error: {exc}")
     return _add_wise_color_columns(df)
 
 
@@ -1923,6 +2199,8 @@ def _set_module_state(
     out = df.copy()
     out[f"char_status_{module}"] = status
     out[f"char_error_{module}"] = error
+    out[f"char_updated_at_{module}"] = pd.Timestamp.utcnow().isoformat()
+    out["characterization_status_version"] = CHARACTERIZE_STATUS_VERSION
     return out
 
 
@@ -1937,13 +2215,28 @@ def _run_optional_module(
 ) -> pd.DataFrame:
     """Run optional characterize module in fail-open mode."""
     if not enabled:
-        return _set_module_state(df, module, "skipped", "")
+        return _set_module_state(df, module, "disabled", "")
 
     print(description)
     try:
         out = func(df, **kwargs)
         if not isinstance(out, pd.DataFrame):
             raise TypeError(f"{module} did not return a pandas DataFrame")
+        cache_columns = [
+            col for col in out.columns
+            if col.startswith("char_cache_status_") and col not in df.columns
+        ]
+        if cache_columns:
+            cache_values = out[cache_columns].fillna("").astype(str)
+            any_data = cache_values.apply(
+                lambda row: any(value in {"fetched", "cached_hit"} for value in row), axis=1
+            )
+            any_no_data = cache_values.apply(
+                lambda row: any(value in {"fetched_no_data", "cached_miss", "cached_no_data"} for value in row), axis=1
+            )
+            out = _set_module_state(out, module, "ok", "")
+            out.loc[~any_data & any_no_data, f"char_status_{module}"] = "no_data"
+            return out
         return _set_module_state(out, module, "ok", "")
     except Exception as e:
         msg = str(e)
@@ -1964,13 +2257,22 @@ def _module_completed(df: pd.DataFrame, module: str) -> bool:
     if col not in df.columns:
         return False
     vals = df[col].dropna().unique()
-    if len(vals) == 0 or any(v not in ("ok", "skipped") for v in vals):
+    # ``skipped`` is a legacy terminal state written by older checkpoints when
+    # an optional query was intentionally omitted.  Keep accepting it so those
+    # checkpoints remain resumable, while the new ``disabled`` state is
+    # deliberately non-terminal and will not masquerade as completed science.
+    if len(vals) == 0 or any(v not in ("ok", "no_data", "not_applicable", "skipped") for v in vals):
         return False
     if "ok" in set(vals):
         required = MODULE_COMPLETION_COLUMNS.get(module, [])
         missing = [out_col for out_col in required if out_col not in df.columns]
         if missing:
             return False
+        if module == "banyan":
+            status = df["banyan_status"].fillna("").astype(str)
+            eligible = gaia_banyan_input_mask(df)
+            if (eligible & status.ne("ok")).any():
+                return False
     return True
 
 
@@ -1998,6 +2300,7 @@ def characterize_candidates_df(
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
 
+    df = df.copy()
     # Fallback for missing ra/dec but present ra_gaia/dec_gaia
     if "ra" not in df.columns and "ra_gaia" in df.columns:
         df["ra"] = df["ra_gaia"]
@@ -2010,30 +2313,10 @@ def characterize_candidates_df(
             chunk_size=chunk_size,
             warn=True,
         )
-    def _has_finite_values(frame: pd.DataFrame, *columns: str) -> bool:
-        for column in columns:
-            if column not in frame.columns:
-                continue
-            values = pd.to_numeric(frame[column], errors="coerce")
-            if values.notna().any():
-                return True
-        return False
-
-    def _needs_gaia_enrichment(frame: pd.DataFrame) -> bool:
-        has_g_mag = _has_finite_values(frame, "phot_g_mean_mag")
-        has_color = _has_finite_values(frame, "bp_rp") or (
-            _has_finite_values(frame, "phot_bp_mean_mag")
-            and _has_finite_values(frame, "phot_rp_mean_mag")
-        )
-        has_distance = _has_finite_values(frame, "distance_gspphot", "parallax")
-        has_motion = _has_finite_values(frame, "pmra") and _has_finite_values(frame, "pmdec")
-        return not (has_g_mag and has_color and has_distance and has_motion)
 
     def _merge_missing_gaia_columns(frame: pd.DataFrame) -> pd.DataFrame:
-        if "source_id" not in frame.columns:
-            return frame
-
-        gaia_ids = _normalize_source_ids(frame["source_id"].dropna().tolist())
+        identifiers = gaia_identifier_series(frame)
+        gaia_ids = _normalize_source_ids(identifiers.dropna().tolist())
         if not gaia_ids:
             return frame
 
@@ -2050,32 +2333,12 @@ def characterize_candidates_df(
 
         if gaia_df.empty:
             print("Warning: characterize Gaia query returned no rows")
-            return frame
-
-        gaia_df = gaia_df.copy()
-        gaia_df["source_id"] = gaia_df["source_id"].astype(str)
-        lookup = gaia_df.drop_duplicates(subset=["source_id"], keep="last").set_index("source_id")
-
-        out = frame.copy()
-        source_ids = out["source_id"].map(parse_gaia_source_id)
-        for column in lookup.columns:
-            values = source_ids.map(lookup[column])
-            if column in out.columns:
-                base = out[column]
-                if pd.api.types.is_object_dtype(base) or pd.api.types.is_string_dtype(base):
-                    base_str = base.astype(str).str.strip().str.lower()
-                    missing = base.isna() | base_str.isin({"", "nan", "none", "<na>"})
-                    out.loc[missing, column] = values.loc[missing]
-                else:
-                    out[column] = base.combine_first(values)
-            else:
-                out[column] = values
-        return _add_wise_color_columns(out)
+        return merge_gaia_catalog_rows(frame, gaia_df)
 
     # If source_id + coordinates already present (e.g. from SkyPatrol fetch),
     # we can skip the crossmatch step and use source_id directly for Gaia enrichment.
     _has_gaia_already = (
-        "source_id" in df.columns
+        gaia_identifier_series(df).notna().any()
         and "ra" in df.columns
         and "dec" in df.columns
     )
@@ -2085,9 +2348,11 @@ def characterize_candidates_df(
 
     # Load checkpoint if available
     df_char = None
+    loaded_checkpoint = False
     if checkpoint_path and Path(checkpoint_path).exists():
         try:
             df_char = pd.read_parquet(checkpoint_path)
+            loaded_checkpoint = True
             df_char = _add_wise_color_columns(df_char)
             completed = [m for m in ["population", "starhorse", "dust", "yso",
                                       "banyan", "iphas", "vphas", "sfr", "clusters", "unwise",
@@ -2104,10 +2369,11 @@ def characterize_candidates_df(
     if df_char is None and _has_gaia_already:
         print("Gaia identifiers already present (source_id + coords), skipping crossmatch")
         df_char = _add_wise_color_columns(df)
-        if "source_id" in df_char.columns:
-            df_char["source_id"] = df_char["source_id"].astype(str)
-        if _needs_gaia_enrichment(df_char):
-            print("Gaia photometry/astrometry incomplete; fetching Gaia catalog rows")
+        if "source_id" not in df_char.columns:
+            df_char["source_id"] = gaia_identifier_series(df_char)
+        if gaia_enrichment_needed_mask(df_char).any():
+            missing_count = int(gaia_enrichment_needed_mask(df_char).sum())
+            print(f"Gaia photometry/astrometry incomplete for {missing_count} row(s); loading Gaia catalog rows")
             df_char = _merge_missing_gaia_columns(df_char)
             df_char = _add_wise_color_columns(df_char)
         _ra_col = "ra"
@@ -2124,6 +2390,13 @@ def characterize_candidates_df(
         if "gal_l" not in df_char.columns:
             df_char["gal_l"] = np.nan
             df_char["gal_b"] = np.nan
+        if checkpoint_path:
+            _save_char_checkpoint(df_char, checkpoint_path)
+
+    if loaded_checkpoint and df_char is not None and gaia_enrichment_needed_mask(df_char).any():
+        missing_count = int(gaia_enrichment_needed_mask(df_char).sum())
+        print(f"Checkpoint Gaia enrichment incomplete for {missing_count} row(s); loading Gaia catalog rows")
+        df_char = _merge_missing_gaia_columns(df_char)
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
@@ -2236,8 +2509,8 @@ def characterize_candidates_df(
                     gaia_df["source_id"] = gaia_df["source_id"].map(parse_gaia_source_id)
                     gaia_df = gaia_df.dropna(subset=["source_id"])
 
-                    print("Merging Gaia results...")
-                    df_char = df_merged.merge(gaia_df, left_on="gaia_id", right_on="source_id", how="left", suffixes=("", "_gaia"))
+                    print("Merging Gaia results by canonical Gaia DR3 ID...")
+                    df_char = merge_gaia_catalog_rows(df_merged, gaia_df)
 
         df_char = _add_wise_color_columns(df_char)
 
@@ -2289,13 +2562,13 @@ def characterize_candidates_df(
                         df_char = classify_galactic_population(df_char)
                     df_char = _set_module_state(df_char, "starhorse", "ok", "")
                 else:
-                    df_char = _set_module_state(df_char, "starhorse", "skipped", "no StarHorse TAP rows returned")
+                    df_char = _set_module_state(df_char, "starhorse", "no_data", "no StarHorse rows returned")
             except Exception as e:
                 msg = str(e)
                 print(f"Warning: characterize module 'starhorse' failed: {msg}")
                 df_char = _set_module_state(df_char, "starhorse", "error", msg)
         else:
-            df_char = _set_module_state(df_char, "starhorse", "skipped", "")
+            df_char = _set_module_state(df_char, "starhorse", "disabled", "")
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
@@ -2348,13 +2621,17 @@ def characterize_candidates_df(
             try:
                 df_char = classify_yso(df_char)
                 df_char = _set_module_state(df_char, "yso", "ok", "")
+                if "yso_input_status" in df_char.columns:
+                    missing_yso = df_char["yso_input_status"].astype(str) != "ok"
+                    df_char.loc[missing_yso, "char_status_yso"] = "no_data"
+                    df_char.loc[missing_yso, "char_error_yso"] = "missing IR photometry"
             except Exception as e:
                 msg = str(e)
                 print(f"Warning: characterize module 'yso' failed: {msg}")
                 df_char = _set_module_state(df_char, "yso", "error", msg)
         else:
             print("Warning: IR photometry columns not found for YSO classification")
-            df_char = _set_module_state(df_char, "yso", "skipped", "missing IR photometry")
+            df_char = _set_module_state(df_char, "yso", "no_data", "missing IR photometry")
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
 
@@ -2470,6 +2747,36 @@ def characterize_candidates_df(
         )
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
+
+    module_status_columns = sorted(
+        col for col in df_char.columns if col.startswith("char_status_")
+    )
+    if module_status_columns:
+        module_status = df_char[module_status_columns].fillna("unknown").astype(str)
+        any_error = module_status.eq("error").any(axis=1)
+        any_ok = module_status.eq("ok").any(axis=1)
+        any_no_data = module_status.eq("no_data").any(axis=1)
+        all_disabled = module_status.eq("disabled").all(axis=1)
+        df_char["characterization_status"] = "ok"
+        df_char.loc[any_no_data, "characterization_status"] = "partial"
+        df_char.loc[~any_ok & any_no_data, "characterization_status"] = "no_data"
+        df_char.loc[all_disabled, "characterization_status"] = "disabled"
+        df_char.loc[any_error, "characterization_status"] = "error"
+        df_char["characterization_modules_json"] = [
+            json.dumps(
+                {
+                    col.removeprefix("char_status_"): str(value)
+                    for col, value in zip(module_status_columns, row)
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for row in module_status.itertuples(index=False, name=None)
+        ]
+    else:
+        df_char["characterization_status"] = "not_run"
+        df_char["characterization_modules_json"] = "{}"
+    df_char["characterization_status_version"] = CHARACTERIZE_STATUS_VERSION
 
     df_char = to_layer_first_frame(df_char)
 

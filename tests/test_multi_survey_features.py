@@ -26,6 +26,7 @@ def _base_event_row(candidate_id: str = "C1") -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
         "asas_sn_id": candidate_id,
+        "failed_any": False,
         "dip_significant": True,
         "dip_bayes_factor": 50.0,
         "dip_best_t0": 8500.0,
@@ -80,8 +81,8 @@ def _write_external_lcs(root: Path, candidate_id: str) -> Path:
 
     pd.DataFrame(
         [
-            {"mjd": t0_jd - 400.0 - MJD_TO_JD, "w1mpro": 12.0, "w2mpro": 11.7},
-            {"mjd": t0_jd - MJD_TO_JD, "w1mpro": 13.0, "w2mpro": 12.5},
+            {"mjd": t0_jd - 400.0 - MJD_TO_JD, "w1mpro": 12.0, "w2mpro": 11.7, "target_identity_status": "matched"},
+            {"mjd": t0_jd - MJD_TO_JD, "w1mpro": 13.0, "w2mpro": 12.5, "target_identity_status": "matched"},
         ]
     ).to_parquet(root / f"neowise_lc_{candidate_id}.parquet", index=False)
 
@@ -91,6 +92,8 @@ def _write_external_lcs(root: Path, candidate_id: str) -> Path:
             - TESS_BTJD_OFFSET,
             "flux": [1.0, 0.98, 0.9, 0.8, 0.9, 0.98, 1.0],
             "quality": [0, 0, 0, 0, 0, 0, 0],
+            "target_identity_status": ["matched"] * 7,
+            "tess_target_id": ["TIC 123"] * 7,
         }
     ).to_parquet(root / f"tess_lc_{candidate_id}.parquet", index=False)
 

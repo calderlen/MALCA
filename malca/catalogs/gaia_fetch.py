@@ -13,6 +13,9 @@ Usage:
 from pathlib import Path
 import argparse
 import hashlib
+import json
+import os
+import tempfile
 import time
 
 from astropy.table import Table
@@ -46,12 +49,28 @@ from malca.io.table_io import (
 _GAIA_QUERY_TEMPLATE = """
 SELECT
     g.source_id,
-    g.ra, g.dec,
-    g.parallax, g.parallax_error, g.ruwe,
-    g.pmra, g.pmdec,
-    g.radial_velocity,
+    g.ra, g.dec, g.ref_epoch,
+    g.parallax, g.parallax_error, g.parallax_over_error, g.ruwe,
+    g.pmra, g.pmra_error, g.pmdec, g.pmdec_error,
+    g.parallax_pmra_corr, g.parallax_pmdec_corr, g.pmra_pmdec_corr,
+    g.astrometric_params_solved,
+    g.astrometric_excess_noise, g.astrometric_excess_noise_sig,
+    g.astrometric_n_good_obs_al, g.astrometric_sigma5d_max,
+    g.visibility_periods_used,
+    g.ipd_frac_multi_peak, g.ipd_frac_odd_win,
+    g.ipd_gof_harmonic_amplitude,
+    g.duplicated_source,
+    g.radial_velocity, g.radial_velocity_error,
     g.rv_amplitude_robust,
+    g.rv_nb_transits, g.rv_chisq_pvalue, g.rv_renormalised_gof,
+    g.rv_time_duration, g.rv_method_used, g.grvs_mag,
     g.phot_g_mean_mag, g.phot_bp_mean_mag, g.phot_rp_mean_mag, g.bp_rp,
+    g.phot_bp_rp_excess_factor,
+    g.phot_bp_n_obs, g.phot_rp_n_obs,
+    g.phot_bp_n_blended_transits, g.phot_rp_n_blended_transits,
+    g.phot_bp_n_contaminated_transits, g.phot_rp_n_contaminated_transits,
+    g.non_single_star, g.phot_variable_flag,
+    g.has_epoch_photometry, g.has_epoch_rv, g.has_rvs,
     g.teff_gspphot, g.logg_gspphot, g.mh_gspphot,
     g.distance_gspphot, g.ag_gspphot,
 
@@ -82,23 +101,60 @@ LEFT JOIN catalogs.allwise AS aw
 
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # seconds
+GAIA_FETCH_SCHEMA_VERSION = "4"
 
 GAIA_REQUIRED_COLUMNS = ("source_id",)
 GAIA_EXPECTED_COLUMNS = (
     "source_id",
     "ra",
     "dec",
+    "ref_epoch",
     "parallax",
     "parallax_error",
+    "parallax_over_error",
     "ruwe",
     "pmra",
+    "pmra_error",
     "pmdec",
+    "pmdec_error",
+    "parallax_pmra_corr",
+    "parallax_pmdec_corr",
+    "pmra_pmdec_corr",
+    "astrometric_params_solved",
+    "astrometric_excess_noise",
+    "astrometric_excess_noise_sig",
+    "astrometric_n_good_obs_al",
+    "astrometric_sigma5d_max",
+    "visibility_periods_used",
+    "ipd_frac_multi_peak",
+    "ipd_frac_odd_win",
+    "ipd_gof_harmonic_amplitude",
+    "duplicated_source",
     "radial_velocity",
+    "radial_velocity_error",
     "rv_amplitude_robust",
+    "rv_nb_transits",
+    "rv_chisq_pvalue",
+    "rv_renormalised_gof",
+    "rv_time_duration",
+    "rv_method_used",
+    "grvs_mag",
     "phot_g_mean_mag",
     "phot_bp_mean_mag",
     "phot_rp_mean_mag",
     "bp_rp",
+    "phot_bp_rp_excess_factor",
+    "phot_bp_n_obs",
+    "phot_rp_n_obs",
+    "phot_bp_n_blended_transits",
+    "phot_rp_n_blended_transits",
+    "phot_bp_n_contaminated_transits",
+    "phot_rp_n_contaminated_transits",
+    "non_single_star",
+    "phot_variable_flag",
+    "has_epoch_photometry",
+    "has_epoch_rv",
+    "has_rvs",
     "teff_gspphot",
     "logg_gspphot",
     "mh_gspphot",
@@ -120,10 +176,66 @@ GAIA_EXPECTED_COLUMNS = (
     "w3_err",
     "w4",
     "w4_err",
+    "gaia_fetch_schema_version",
+    "gaia_fetch_updated_at",
 )
-GAIA_STRING_COLUMNS = {"source_id", "tmass_id", "allwise_id"}
+GAIA_STRING_COLUMNS = {
+    "source_id",
+    "tmass_id",
+    "allwise_id",
+    "phot_variable_flag",
+    "gaia_fetch_schema_version",
+    "gaia_fetch_updated_at",
+}
 WISE_FETCH_COLUMNS = {"w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"}
-GAIA_CURRENT_FETCH_COLUMNS = WISE_FETCH_COLUMNS | {"phot_bp_mean_mag", "phot_rp_mean_mag"}
+GAIA_CURRENT_FETCH_COLUMNS = WISE_FETCH_COLUMNS | {
+    "parallax_over_error",
+    "phot_bp_mean_mag",
+    "phot_rp_mean_mag",
+    "pmra_error",
+    "pmdec_error",
+    "parallax_pmra_corr",
+    "parallax_pmdec_corr",
+    "pmra_pmdec_corr",
+    "radial_velocity_error",
+    "ref_epoch",
+    "astrometric_params_solved",
+    "astrometric_excess_noise",
+    "astrometric_excess_noise_sig",
+    "astrometric_n_good_obs_al",
+    "astrometric_sigma5d_max",
+    "visibility_periods_used",
+    "ipd_frac_multi_peak",
+    "ipd_frac_odd_win",
+    "ipd_gof_harmonic_amplitude",
+    "duplicated_source",
+    "rv_nb_transits",
+    "rv_chisq_pvalue",
+    "rv_renormalised_gof",
+    "rv_time_duration",
+    "rv_method_used",
+    "grvs_mag",
+    "phot_bp_rp_excess_factor",
+    "phot_bp_n_obs",
+    "phot_rp_n_obs",
+    "phot_bp_n_blended_transits",
+    "phot_rp_n_blended_transits",
+    "phot_bp_n_contaminated_transits",
+    "phot_rp_n_contaminated_transits",
+    "non_single_star",
+    "phot_variable_flag",
+    "has_epoch_photometry",
+    "has_epoch_rv",
+    "has_rvs",
+}
+GAIA_BANYAN_REQUIRED_COLUMNS = (
+    "ra",
+    "dec",
+    "pmra",
+    "pmra_error",
+    "pmdec",
+    "pmdec_error",
+)
 
 
 def _has_required_gaia_columns(df: pd.DataFrame | None) -> bool:
@@ -135,6 +247,37 @@ def _has_current_gaia_fetch_schema(df: pd.DataFrame | None) -> bool:
         return False
     columns = {str(col).lower() for col in df.columns}
     return GAIA_CURRENT_FETCH_COLUMNS.issubset(columns)
+
+
+def _current_schema_row_mask(df: pd.DataFrame) -> pd.Series:
+    """Return rows known to have been queried with the current Gaia schema."""
+    if df.empty:
+        return pd.Series(False, index=df.index, dtype=bool)
+    if "gaia_fetch_schema_version" in df.columns:
+        version = df["gaia_fetch_schema_version"].fillna("").astype(str)
+        marked = version.eq(GAIA_FETCH_SCHEMA_VERSION)
+        if marked.any():
+            return marked
+    # Compatibility for complete catalogs written before explicit versioning.
+    return pd.Series(_has_current_gaia_fetch_schema(df), index=df.index, dtype=bool)
+
+
+def gaia_banyan_input_mask(df: pd.DataFrame) -> pd.Series:
+    """Return rows with finite, physical minimum inputs for BANYAN Sigma."""
+    if df.empty or any(column not in df.columns for column in GAIA_BANYAN_REQUIRED_COLUMNS):
+        return pd.Series(False, index=df.index, dtype=bool)
+    numeric = {
+        column: pd.to_numeric(df[column], errors="coerce")
+        for column in GAIA_BANYAN_REQUIRED_COLUMNS
+    }
+    mask = pd.Series(True, index=df.index, dtype=bool)
+    for values in numeric.values():
+        mask &= values.notna() & np.isfinite(values)
+    mask &= numeric["ra"].between(0.0, 360.0, inclusive="left")
+    mask &= numeric["dec"].between(-90.0, 90.0, inclusive="both")
+    mask &= numeric["pmra_error"] > 0
+    mask &= numeric["pmdec_error"] > 0
+    return mask
 
 
 def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -163,6 +306,60 @@ def _ensure_gaia_schema(df: pd.DataFrame) -> pd.DataFrame:
             out[col] = pd.NA if col in GAIA_STRING_COLUMNS else np.nan
 
     return out.loc[:, list(GAIA_EXPECTED_COLUMNS)]
+
+
+def _mark_current_fetch_rows(df: pd.DataFrame) -> pd.DataFrame:
+    out = _ensure_gaia_schema(df)
+    if out.empty:
+        return out
+    out["gaia_fetch_schema_version"] = GAIA_FETCH_SCHEMA_VERSION
+    out["gaia_fetch_updated_at"] = pd.Timestamp.now(tz="UTC").isoformat()
+    return out
+
+
+def _atomic_write_parquet(df: pd.DataFrame, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_mode = output_path.stat().st_mode & 0o777 if output_path.exists() else 0o644
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.", suffix=".tmp.parquet", dir=output_path.parent
+    )
+    os.close(fd)
+    try:
+        df.to_parquet(temp_name, index=False, compression="snappy")
+        check = pd.read_parquet(temp_name)
+        if len(check) != len(df) or not _has_required_gaia_columns(check):
+            raise RuntimeError("Atomic Gaia cache validation failed")
+        os.chmod(temp_name, output_mode)
+        os.replace(temp_name, output_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _write_fetch_report(output_path: Path, payload: dict[str, object]) -> Path:
+    report_path = output_path.with_suffix(output_path.suffix + ".report.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_mode = report_path.stat().st_mode & 0o777 if report_path.exists() else 0o644
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{report_path.name}.", suffix=".tmp", dir=report_path.parent
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True, default=str)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, report_mode)
+        os.replace(temp_name, report_path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return report_path
 
 
 def _normalize_gaia_ids(values: list[object]) -> list[str]:
@@ -347,7 +544,7 @@ def _fetch_chunk(tap_service: pyvo.dal.TAPService, chunk_ids: list[str]) -> pd.D
             upload_table = _chunk_upload_table(chunk_ids)
             result = tap_service.run_async(query, uploads={"upload_table": upload_table})
             chunk_df = result.to_table().to_pandas()
-            chunk_df = _ensure_gaia_schema(chunk_df)
+            chunk_df = _mark_current_fetch_rows(chunk_df)
             if not _has_required_gaia_columns(chunk_df):
                 raise RuntimeError("Gaia TAP response missing required 'source_id' column")
             return chunk_df
@@ -366,18 +563,23 @@ def fetch_gaia_catalog(
     gaia_ids: list[str],
     output_path: Path,
     chunk_size: int = GAIA_CHUNK_SIZE,
+    *,
+    allow_partial: bool = False,
 ) -> pd.DataFrame:
     """
     Download Gaia DR3 data for given source IDs, with incremental caching.
 
-    If output_path already exists, IDs present in it are skipped.
+    If ``output_path`` already exists, requested IDs already queried with the
+    current schema are skipped. Legacy rows are preserved, while requested
+    legacy rows are refreshed so newly required astrometric columns are filled.
     Returns the full catalog (cached + newly fetched).
     """
     output_path = Path(output_path)
-    gaia_ids = _normalize_gaia_ids(gaia_ids)
-    if gaia_ids:
+    requested_ids = _normalize_gaia_ids(gaia_ids)
+    gaia_ids = list(requested_ids)
+    if requested_ids:
         mapping = canonicalize_gaia_ids(
-            gaia_ids,
+            requested_ids,
             gaia_cache_path=output_path,
             chunk_size=chunk_size,
             warn=True,
@@ -387,19 +589,12 @@ def fetch_gaia_catalog(
             gaia_ids = _normalize_gaia_ids(mapping["source_id"].dropna().tolist())
             if translated:
                 print(f"Translated {translated} Gaia DR2 ID(s) to DR3 before Gaia fetch.")
+    requested_ids = list(gaia_ids)
     cached_df = pd.DataFrame()
+    current_cached_ids: set[str] = set()
 
     checkpoint_dir = _checkpoint_dir_for_output(output_path)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    checkpointed_ids = _load_checkpointed_ids(checkpoint_dir)
-    if checkpointed_ids:
-        before = len(gaia_ids)
-        gaia_ids = [g for g in gaia_ids if g not in checkpointed_ids]
-        print(
-            f"  {len(checkpointed_ids)} IDs already checkpointed, "
-            f"{len(gaia_ids)} IDs remain after checkpoint resume filtering."
-        )
 
     # Load existing catalog for incremental fetch.  New writes always go to
     # output_path, but default cache reads can fall back to pre-unification
@@ -416,72 +611,72 @@ def fetch_gaia_catalog(
         except Exception as e:
             print(f"  Warning: could not read existing Gaia cache at {existing_read_path}: {e}")
         else:
-            cache_has_current_gaia_schema = _has_current_gaia_fetch_schema(cached_candidate)
+            current_mask = _current_schema_row_mask(cached_candidate)
             cached_candidate = _ensure_gaia_schema(cached_candidate)
-            if _has_required_gaia_columns(cached_candidate) and cache_has_current_gaia_schema and not cached_candidate.empty:
+            if _has_required_gaia_columns(cached_candidate) and not cached_candidate.empty:
                 cached_df = cached_candidate
-                cached_df["source_id"] = cached_df["source_id"].astype(str)
-                existing_ids = set(cached_df["source_id"])
-                before = len(gaia_ids)
-                gaia_ids = [g for g in gaia_ids if g not in existing_ids]
-                print(f"  {len(existing_ids)} IDs already cached, {len(gaia_ids)} new IDs to fetch.")
-                if not gaia_ids:
-                    print("All IDs already present in local catalog. Nothing to fetch.")
-                    if existing_read_path != output_path:
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        cached_df.to_parquet(output_path, index=False, compression="snappy")
-                        print(f"Migrated Gaia cache to {output_path}")
-                    return cached_df
+                cached_df["source_id"] = cached_df["source_id"].map(
+                    lambda value: _normalize_gaia_ids([value])[0]
+                    if _normalize_gaia_ids([value]) else pd.NA
+                )
+                cached_df = cached_df.dropna(subset=["source_id"])
+                current_cached_ids = set(
+                    cached_df.loc[current_mask.reindex(cached_df.index, fill_value=False), "source_id"]
+                    .dropna()
+                    .astype(str)
+                )
             else:
-                print(f"  Warning: ignoring stale or invalid existing Gaia cache at {existing_read_path}")
+                print(f"  Warning: ignoring invalid existing Gaia cache at {existing_read_path}")
 
-    if not gaia_ids:
-        checkpoint_df = _load_checkpoint_parts(checkpoint_dir)
-        if not checkpoint_df.empty:
-            checkpoint_df = _ensure_gaia_schema(checkpoint_df)
-            if _has_required_gaia_columns(checkpoint_df):
-                checkpoint_df["source_id"] = checkpoint_df["source_id"].astype(str)
-                if not cached_df.empty:
-                    checkpoint_df = pd.concat([cached_df, checkpoint_df], ignore_index=True)
-                checkpoint_df = checkpoint_df.drop_duplicates(subset="source_id", keep="last")
-                print("No Gaia IDs to fetch; returning checkpointed Gaia rows.")
-                return checkpoint_df
-
-        if not cached_df.empty:
-            print("No Gaia IDs to fetch.")
-            return cached_df
-
-        raise RuntimeError(
-            "No Gaia IDs remain to fetch, but no valid Gaia cache rows are available. "
-            "Remove stale checkpoint markers and retry."
+    checkpointed_ids = _load_checkpointed_ids(checkpoint_dir)
+    completed_ids = current_cached_ids | checkpointed_ids
+    gaia_ids = [gaia_id for gaia_id in requested_ids if gaia_id not in completed_ids]
+    if cached_df.empty:
+        print(f"  No valid existing Gaia rows; {len(gaia_ids)} IDs require fetching.")
+    else:
+        existing_ids = set(cached_df["source_id"].dropna().astype(str))
+        legacy_requested = set(requested_ids) & existing_ids - current_cached_ids
+        print(
+            f"  {len(existing_ids)} IDs cached; {len(current_cached_ids)} current-schema; "
+            f"{len(legacy_requested)} requested legacy row(s) require refresh; "
+            f"{len(gaia_ids)} requested ID(s) remain."
         )
-
-    print(f"Fetching Gaia DR3 data for {len(gaia_ids)} sources from {GAIA_AIP_TAP_URL}...")
-    tap_service = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
 
     n_chunks_done = 0
     n_chunks_failed = 0
     n_chunks_empty = 0
     n_rows_written = 0
-    for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia DR3 TAP"):
-        chunk_ids = gaia_ids[i : i + chunk_size]
-        key = _chunk_key(chunk_ids)
+    if gaia_ids:
+        print(f"Fetching Gaia DR3 data for {len(gaia_ids)} sources from {GAIA_AIP_TAP_URL}...")
+        tap_service = pyvo.dal.TAPService(GAIA_AIP_TAP_URL)
+        for i in tqdm(range(0, len(gaia_ids), chunk_size), desc="Gaia DR3 TAP"):
+            chunk_ids = gaia_ids[i : i + chunk_size]
+            key = _chunk_key(chunk_ids)
 
-        if _chunk_is_checkpointed(checkpoint_dir, key):
+            if _chunk_is_checkpointed(checkpoint_dir, key):
+                n_chunks_done += 1
+                continue
+
+            chunk_df = _fetch_chunk(tap_service, chunk_ids)
+            if chunk_df is None:
+                n_chunks_failed += 1
+                continue
+
+            if not chunk_df.empty:
+                chunk_df.to_parquet(
+                    _chunk_part_path(checkpoint_dir, key), index=False, compression="snappy"
+                )
+                n_rows_written += len(chunk_df)
+            else:
+                n_chunks_empty += 1
             n_chunks_done += 1
-            continue
 
-        chunk_df = _fetch_chunk(tap_service, chunk_ids)
-        if chunk_df is None:
-            n_chunks_failed += 1
-            continue
-
-        if not chunk_df.empty:
-            chunk_df.to_parquet(_chunk_part_path(checkpoint_dir, key), index=False, compression="snappy")
-            n_rows_written += len(chunk_df)
-        else:
-            n_chunks_empty += 1
-        n_chunks_done += 1
+    if n_chunks_failed and not allow_partial:
+        raise RuntimeError(
+            f"Gaia fetch left {n_chunks_failed} failed chunk(s); checkpoints were preserved, "
+            "but the canonical cache was not replaced. Retry the command or pass "
+            "allow_partial=True only for diagnostic work."
+        )
 
     checkpoint_df = _load_checkpoint_parts(checkpoint_dir)
     new_df = _ensure_gaia_schema(checkpoint_df) if not checkpoint_df.empty else checkpoint_df.copy()
@@ -509,9 +704,8 @@ def fetch_gaia_catalog(
             "Gaia fetch produced no valid rows; leaving the previous cache untouched."
         )
 
-    # Save
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    full_df.to_parquet(output_path, index=False, compression="snappy")
+    # Save atomically only after the merged cache can be read back.
+    _atomic_write_parquet(full_df, output_path)
     print(f"Saved {len(full_df)} Gaia rows to {output_path}")
     print(
         "  "
@@ -521,6 +715,28 @@ def fetch_gaia_catalog(
 
     fetched = len(new_df) if not new_df.empty else 0
     print(f"  ({fetched} newly fetched, {len(full_df) - fetched} from cache)")
+
+    returned_ids = set(full_df["source_id"].dropna().astype(str))
+    requested_returned = returned_ids & set(requested_ids)
+    requested_rows = full_df[full_df["source_id"].astype(str).isin(requested_returned)]
+    report = {
+        "schema_version": GAIA_FETCH_SCHEMA_VERSION,
+        "output_path": str(output_path),
+        "requested_unique": len(requested_ids),
+        "already_current": len(set(requested_ids) & current_cached_ids),
+        "refresh_requested": len(gaia_ids),
+        "requested_returned": len(requested_returned),
+        "requested_not_returned": sorted(set(requested_ids) - requested_returned),
+        "banyan_input_complete": int(gaia_banyan_input_mask(requested_rows).sum()),
+        "cache_rows_before": int(len(cached_df)),
+        "cache_rows_after": int(len(full_df)),
+        "chunks_completed": n_chunks_done,
+        "chunks_failed": n_chunks_failed,
+        "chunks_empty": n_chunks_empty,
+        "rows_written_to_checkpoints": n_rows_written,
+    }
+    report_path = _write_fetch_report(output_path, report)
+    print(f"Saved Gaia fetch report to {report_path}")
 
     return full_df
 

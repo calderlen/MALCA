@@ -33,7 +33,7 @@ dependencies = [
     "pyvo",
     "lightkurve",
     "healpy",
-    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git",
+    "banyan-sigma @ git+https://github.com/jgagneastro/banyan_sigma.git@84b087cd779474f61496d3b8763f502fe8fc8009",
     "regions",
     "requests",
     "skypatrol",

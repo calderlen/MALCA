@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,10 @@ from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS
 from malca.products.feature_layers import with_feature_columns
 from malca.io.lightcurve_io import load_lightcurve_df
 from malca.io.table_io import read_feature_table, write_feature_table
+from malca.external_lc_manifest import index_external_lc_paths_from_manifest
 
 
-MS_FEATURE_VERSION = "1"
+MS_FEATURE_VERSION = "2"
 EVENT_WINDOW_COLUMNS = (
     "failed_any",
     "dip_best_t0",
@@ -40,6 +42,15 @@ MS_FEATURE_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("ms_event_start_jd", "REAL", "float"),
     ("ms_event_end_jd", "REAL", "float"),
     ("ms_event_half_width_days", "REAL", "float"),
+    ("ms_asassn_status", "TEXT", "text"),
+    ("ms_ztf_status", "TEXT", "text"),
+    ("ms_neowise_status", "TEXT", "text"),
+    ("ms_neowise_identity_status", "TEXT", "text"),
+    ("ms_tess_status", "TEXT", "text"),
+    ("ms_tess_identity_status", "TEXT", "text"),
+    ("ms_tess_target_id", "TEXT", "text"),
+    ("ms_gaia_epoch_status", "TEXT", "text"),
+    ("ms_source_status_json", "TEXT", "text"),
     ("ms_asassn_n_event_g", "INTEGER", "float"),
     ("ms_asassn_n_baseline_g", "INTEGER", "float"),
     ("ms_asassn_event_g_median", "REAL", "float"),
@@ -179,6 +190,12 @@ def _default_features() -> dict[str, object]:
     out["ms_feature_status"] = "no_event"
     out["ms_feature_version"] = MS_FEATURE_VERSION
     out["ms_event_type"] = "none"
+    for source in ("asassn", "ztf", "neowise", "tess", "gaia_epoch"):
+        out[f"ms_{source}_status"] = "not_checked"
+    out["ms_neowise_identity_status"] = "not_checked"
+    out["ms_tess_identity_status"] = "not_checked"
+    out["ms_tess_target_id"] = ""
+    out["ms_source_status_json"] = "{}"
     return out
 
 
@@ -287,11 +304,8 @@ def _index_external_lc_paths(root: Path | str | None) -> dict[str, dict[str, Pat
     if not root_path.exists():
         return index
     for prefix in prefixes:
-        file_prefix = f"{prefix}_lc_"
-        for path in root_path.rglob(f"{file_prefix}*.parquet"):
-            key = path.stem.replace(file_prefix, "", 1)
-            if key:
-                index[prefix][key] = path
+        manifest_paths = index_external_lc_paths_from_manifest(str(root_path), prefix)
+        index[prefix].update({str(key): Path(path) for key, path in manifest_paths.items()})
     return index
 
 
@@ -338,12 +352,40 @@ def _load_asassn_lc(row: pd.Series | dict[str, Any]) -> pd.DataFrame:
 
 
 def _load_external_table(path: Path | None) -> pd.DataFrame:
+    frame, _status = _load_external_table_with_status(path)
+    return frame
+
+
+def _load_external_table_with_status(path: Path | None) -> tuple[pd.DataFrame, str]:
     if path is None or not path.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(), "no_file"
     try:
-        return pd.read_parquet(path)
+        frame = pd.read_parquet(path)
     except Exception:
-        return pd.DataFrame()
+        return pd.DataFrame(), "read_error"
+    if frame.empty:
+        return frame, "empty_file"
+    return frame, "loaded"
+
+
+def _cached_identity_status(frame: pd.DataFrame, source: str) -> tuple[str, str]:
+    if source not in {"tess", "neowise"}:
+        return "not_applicable", ""
+    if "target_identity_status" not in frame.columns:
+        return "legacy_unverified", ""
+    values = sorted({
+        str(value).strip() for value in frame["target_identity_status"].dropna()
+        if str(value).strip()
+    })
+    if not values:
+        return "legacy_unverified", ""
+    if values == ["matched"]:
+        target_id = ""
+        if source == "tess" and "tess_target_id" in frame.columns:
+            ids = [str(value).strip() for value in frame["tess_target_id"].dropna() if str(value).strip()]
+            target_id = ids[0] if ids else ""
+        return "matched", target_id
+    return "conflicting:" + ",".join(values), ""
 
 
 def _normalize_ztf_lc(df: pd.DataFrame) -> pd.DataFrame:
@@ -646,6 +688,7 @@ def compute_candidate_multi_survey_features(
     index = external_index if external_index is not None else _index_external_lc_paths(external_lc_dir)
 
     asassn = _load_asassn_lc(row)
+    features["ms_asassn_status"] = "loaded" if not asassn.empty else "no_file_or_invalid"
     if not asassn.empty:
         _add_band_median_features(
             features,
@@ -659,7 +702,11 @@ def compute_candidate_multi_survey_features(
         )
         _add_median_color(features, prefix="ms_asassn", blue_key="g", red_key="v", color_name="g_minus_v")
 
-    ztf = _normalize_ztf_lc(_load_external_table(_lookup_external_path(index, "ztf", row)))
+    ztf_raw, ztf_load_status = _load_external_table_with_status(_lookup_external_path(index, "ztf", row))
+    ztf = _normalize_ztf_lc(ztf_raw)
+    features["ms_ztf_status"] = (
+        "loaded" if not ztf.empty else ("invalid_schema" if ztf_load_status == "loaded" else ztf_load_status)
+    )
     if not ztf.empty:
         _add_band_median_features(
             features,
@@ -673,14 +720,65 @@ def compute_candidate_multi_survey_features(
         )
         _add_ztf_color(features, ztf, start_jd, end_jd)
 
-    neowise = _normalize_neowise_lc(_load_external_table(_lookup_external_path(index, "neowise", row)))
+    neowise_raw, neowise_load_status = _load_external_table_with_status(
+        _lookup_external_path(index, "neowise", row)
+    )
+    neowise_identity_status, _unused_target_id = _cached_identity_status(neowise_raw, "neowise")
+    features["ms_neowise_identity_status"] = neowise_identity_status
+    neowise = (
+        _normalize_neowise_lc(neowise_raw)
+        if neowise_identity_status == "matched" else pd.DataFrame(columns=["jd", "w1", "w2"])
+    )
+    if neowise_load_status == "loaded" and neowise_identity_status != "matched":
+        features["ms_neowise_status"] = f"identity_unverified:{neowise_identity_status}"
+    else:
+        features["ms_neowise_status"] = (
+            "loaded" if not neowise.empty else (
+                "invalid_schema" if neowise_load_status == "loaded" else neowise_load_status
+            )
+        )
     _add_neowise_features(features, neowise, t0_jd)
 
-    tess = _normalize_tess_lc(_load_external_table(_lookup_external_path(index, "tess", row)))
+    tess_raw, tess_load_status = _load_external_table_with_status(
+        _lookup_external_path(index, "tess", row)
+    )
+    tess_identity_status, tess_target_id = _cached_identity_status(tess_raw, "tess")
+    features["ms_tess_identity_status"] = tess_identity_status
+    features["ms_tess_target_id"] = tess_target_id
+    tess = (
+        _normalize_tess_lc(tess_raw)
+        if tess_identity_status == "matched" else pd.DataFrame(columns=["jd", "flux"])
+    )
+    if tess_load_status == "loaded" and tess_identity_status != "matched":
+        features["ms_tess_status"] = f"identity_unverified:{tess_identity_status}"
+    else:
+        features["ms_tess_status"] = (
+            "loaded" if not tess.empty else (
+                "invalid_schema" if tess_load_status == "loaded" else tess_load_status
+            )
+        )
     _add_tess_features(features, tess, event)
 
-    gaia = _normalize_gaia_epoch_lc(_load_external_table(_lookup_external_path(index, "gaia_epoch", row)))
+    gaia_raw, gaia_load_status = _load_external_table_with_status(
+        _lookup_external_path(index, "gaia_epoch", row)
+    )
+    gaia = _normalize_gaia_epoch_lc(gaia_raw)
+    features["ms_gaia_epoch_status"] = (
+        "loaded" if not gaia.empty else (
+            "invalid_schema" if gaia_load_status == "loaded" else gaia_load_status
+        )
+    )
     _add_gaia_epoch_features(features, gaia, start_jd, end_jd)
+
+    source_status = {
+        source: str(features.get(f"ms_{source}_status") or "")
+        for source in ("asassn", "ztf", "neowise", "tess", "gaia_epoch")
+    }
+    source_status["neowise_identity"] = str(features.get("ms_neowise_identity_status") or "")
+    source_status["tess_identity"] = str(features.get("ms_tess_identity_status") or "")
+    features["ms_source_status_json"] = json.dumps(
+        source_status, sort_keys=True, separators=(",", ":")
+    )
 
     return features
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import multiprocessing as mp
 from pathlib import Path
@@ -25,6 +26,111 @@ DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
     "allwise": "II/328/allwise",
     "vsx": "B/vsx/vsx",
 }
+
+_CATALOG_OBJECT_ID_COLUMNS = (
+    "Source", "source_id", "SOURCE_ID", "AllWISE", "_2MASS", "2MASS",
+    "Name", "OID", "VarID", "objID", "ObjectId",
+)
+
+
+def _first_nonempty_text(row: pd.Series, columns: tuple[str, ...]) -> str:
+    for column in columns:
+        if column not in row.index:
+            continue
+        value = row.get(column)
+        try:
+            if value is None or pd.isna(value):
+                continue
+        except Exception:
+            if value is None:
+                continue
+        text = str(value).strip()
+        if text and text.lower() not in {"nan", "none", "<na>"}:
+            return text
+    return ""
+
+
+def _normalize_neighbor_records(
+    neighbors: pd.DataFrame,
+    candidates: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add stable row identity, remove repeated cache/query rows, and mark self matches."""
+    if neighbors.empty:
+        return neighbors
+    out = neighbors.copy()
+    out["candidate_id"] = out["candidate_id"].astype(str)
+    if "catalog" not in out.columns:
+        out["catalog"] = ""
+    else:
+        out["catalog"] = out["catalog"].fillna("").astype(str)
+    if "sep_arcsec" not in out.columns:
+        out["sep_arcsec"] = np.nan
+    else:
+        out["sep_arcsec"] = pd.to_numeric(out["sep_arcsec"], errors="coerce")
+    out["neighbor_catalog_object_id"] = out.apply(
+        lambda row: _first_nonempty_text(row, _CATALOG_OBJECT_ID_COLUMNS), axis=1
+    )
+
+    def stable_key(row: pd.Series) -> str:
+        object_id = str(row.get("neighbor_catalog_object_id") or "")
+        if object_id:
+            token = f"{row['catalog']}|id:{object_id}"
+        else:
+            # The fallback is intentionally based only on stable astronomical
+            # values, never on dataframe row position or query ordering.
+            coordinate_tokens = []
+            for axis, names in (
+                ("ra", ("RA_ICRS", "RAJ2000", "RAdeg", "ra")),
+                ("dec", ("DE_ICRS", "DEJ2000", "DEdeg", "dec")),
+            ):
+                for name in names:
+                    value = pd.to_numeric(row.get(name), errors="coerce")
+                    if np.isfinite(value):
+                        coordinate_tokens.append(f"{axis}:{float(value):.8f}")
+                        break
+            sep = pd.to_numeric(row.get("sep_arcsec"), errors="coerce")
+            token = "|".join(
+                [str(row.get("catalog") or ""), *coordinate_tokens, f"sep:{float(sep):.5f}" if np.isfinite(sep) else "sep:nan"]
+            )
+        digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:20]
+        return f"{row['catalog']}:{digest}"
+
+    out["neighbor_record_key"] = out.apply(stable_key, axis=1)
+    out = out.sort_values(
+        ["candidate_id", "catalog", "neighbor_record_key", "sep_arcsec"],
+        na_position="last",
+        kind="mergesort",
+    ).drop_duplicates(
+        subset=["candidate_id", "catalog", "neighbor_record_key"], keep="first"
+    )
+
+    target_ids: dict[str, str] = {}
+    for source_column in ("source_id", "gaia_id", "gaia_source_id"):
+        if source_column not in candidates.columns:
+            continue
+        for _, row in candidates[["candidate_id", source_column]].dropna().iterrows():
+            value = str(row[source_column]).strip()
+            if value and value.lower() not in {"nan", "none", "<na>"}:
+                target_ids.setdefault(str(row["candidate_id"]), value)
+    out["is_target_match"] = False
+    gaia = out["catalog"].str.contains("I/355|gaia", case=False, na=False, regex=True)
+    if target_ids:
+        uploaded_source = out["candidate_id"].map(target_ids).fillna("")
+        catalog_source = out["neighbor_catalog_object_id"].fillna("").astype(str)
+        out.loc[gaia & uploaded_source.ne("") & catalog_source.eq(uploaded_source), "is_target_match"] = True
+
+    # For catalogs without a shared identifier, only a sub-arcsecond nearest
+    # match is treated as the target.  Wider matches remain real neighbors.
+    nearest_index = (
+        out.loc[~out["is_target_match"] & out["sep_arcsec"].notna()]
+        .sort_values("sep_arcsec", kind="mergesort")
+        .groupby(["candidate_id", "catalog"], sort=False)
+        .head(1)
+        .index
+    )
+    close_nearest = nearest_index[out.loc[nearest_index, "sep_arcsec"].to_numpy(dtype=float) <= 1.0]
+    out.loc[close_nearest, "is_target_match"] = True
+    return out.reset_index(drop=True)
 
 
 class XMatchChunkTimeoutError(TimeoutError):
@@ -410,6 +516,7 @@ def run_neighbor_enrichment(
     parts = [p for p in [ckpt_df, cache_df, fresh_df] if not p.empty]
     neighbors_long = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if not neighbors_long.empty:
+        neighbors_long = _normalize_neighbor_records(neighbors_long, df_use)
         keep_cols = [c for c in ["candidate_id", "catalog", "sep_arcsec", "phot_g_mean_mag", "VarType", "Type"] if c in neighbors_long.columns]
         keep_cols += [c for c in neighbors_long.columns if c not in keep_cols]
         neighbors_long = neighbors_long[keep_cols]
@@ -421,32 +528,71 @@ def run_neighbor_enrichment(
         neighbors_long.to_parquet(cache_file, index=False, compression="snappy")
 
     summary = coords[["candidate_id"]].copy()
+    summary["candidate_id"] = summary["candidate_id"].astype(str)
     if neighbors_long.empty:
         summary["neighbor_count"] = 0
+        summary["neighbor_unique_count"] = 0
+        summary["neighbor_catalog_match_count"] = 0
+        summary["neighbor_target_match_count"] = 0
+        summary["neighbor_catalog_count"] = 0
+        summary["neighbor_count_by_catalog_json"] = "{}"
         summary["nearest_sep_arcsec"] = np.nan
         summary["nearby_known_variable"] = False
         summary["bright_close_neighbor"] = False
         summary["local_density_n_15as"] = 0
     else:
-        grp = neighbors_long.groupby("candidate_id")
-        summary = summary.merge(grp.size().rename("neighbor_count"), on="candidate_id", how="left")
+        target_match_count = (
+            neighbors_long.groupby("candidate_id")["is_target_match"].sum().astype(int)
+            .rename("neighbor_target_match_count")
+        )
+        actual_neighbors = neighbors_long.loc[~neighbors_long["is_target_match"].fillna(False)].copy()
+        grp = actual_neighbors.groupby("candidate_id")
+        raw_grp = neighbors_long.groupby("candidate_id")
+        summary = summary.merge(grp.size().rename("neighbor_unique_count"), on="candidate_id", how="left")
+        summary["neighbor_count"] = summary["neighbor_unique_count"]
+        summary = summary.merge(raw_grp.size().rename("neighbor_catalog_match_count"), on="candidate_id", how="left")
+        summary = summary.merge(target_match_count, on="candidate_id", how="left")
+        summary = summary.merge(grp["catalog"].nunique().rename("neighbor_catalog_count"), on="candidate_id", how="left")
         summary = summary.merge(grp["sep_arcsec"].min().rename("nearest_sep_arcsec"), on="candidate_id", how="left")
+        by_catalog = (
+            actual_neighbors.groupby(["candidate_id", "catalog"]).size().unstack(fill_value=0)
+            if not actual_neighbors.empty else pd.DataFrame()
+        )
+        count_json = {
+            str(candidate_id): json.dumps(
+                {str(catalog): int(count) for catalog, count in row.items() if int(count) > 0},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for candidate_id, row in by_catalog.iterrows()
+        }
+        summary["neighbor_count_by_catalog_json"] = summary["candidate_id"].map(count_json).fillna("{}")
         summary["neighbor_count"] = summary["neighbor_count"].fillna(0).astype(int)
-        summary["local_density_n_15as"] = summary["neighbor_count"]
+        for count_col in (
+            "neighbor_unique_count", "neighbor_catalog_match_count",
+            "neighbor_target_match_count", "neighbor_catalog_count",
+        ):
+            summary[count_col] = summary[count_col].fillna(0).astype(int)
+        density = (
+            actual_neighbors.loc[pd.to_numeric(actual_neighbors["sep_arcsec"], errors="coerce") <= 15.0]
+            .groupby("candidate_id").size().rename("local_density_n_15as")
+        )
+        summary = summary.merge(density, on="candidate_id", how="left")
+        summary["local_density_n_15as"] = summary["local_density_n_15as"].fillna(0).astype(int)
 
-        known_var_mask = neighbors_long["catalog"].astype(str).str.contains("vsx", case=False, na=False)
-        known_var = neighbors_long.loc[known_var_mask, ["candidate_id"]].drop_duplicates()
+        known_var_mask = actual_neighbors["catalog"].astype(str).str.contains("vsx", case=False, na=False)
+        known_var = actual_neighbors.loc[known_var_mask, ["candidate_id"]].drop_duplicates()
         known_var["nearby_known_variable"] = True
         summary = summary.merge(known_var, on="candidate_id", how="left")
         summary["nearby_known_variable"] = (
             summary["nearby_known_variable"].astype("boolean").fillna(False).astype(bool)
         )
 
-        if "phot_g_mean_mag" in neighbors_long.columns:
-            bright_mask = (pd.to_numeric(neighbors_long["phot_g_mean_mag"], errors="coerce") <= 13.0) & (
-                pd.to_numeric(neighbors_long["sep_arcsec"], errors="coerce") <= 5.0
+        if "phot_g_mean_mag" in actual_neighbors.columns:
+            bright_mask = (pd.to_numeric(actual_neighbors["phot_g_mean_mag"], errors="coerce") <= 13.0) & (
+                pd.to_numeric(actual_neighbors["sep_arcsec"], errors="coerce") <= 5.0
             )
-            bright = neighbors_long.loc[bright_mask, ["candidate_id"]].drop_duplicates()
+            bright = actual_neighbors.loc[bright_mask, ["candidate_id"]].drop_duplicates()
             bright["bright_close_neighbor"] = True
             summary = summary.merge(bright, on="candidate_id", how="left")
             summary["bright_close_neighbor"] = (

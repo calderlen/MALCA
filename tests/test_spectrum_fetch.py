@@ -239,6 +239,92 @@ def test_fetch_galah_accepts_vizier_galah_identifier(monkeypatch) -> None:
     assert result.message == "GALAH lookup row missing file_path and url"
 
 
+def test_fetch_galah_uses_direct_fits_link_before_optional_lookup(monkeypatch) -> None:
+    import malca.enrich.spectrum_fetch as spectrum_fetch
+
+    expected = SpectrumData(
+        wavelength=np.array([5000.0, 5001.0]),
+        flux=np.array([1.0, 0.9]),
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_fetch(url: str, *, label: str):
+        calls.append((url, label))
+        return spectrum_fetch.SpectrumFetchResult(FetchStatus.OK, data=expected)
+
+    monkeypatch.setattr(spectrum_fetch, "_fetch_direct_fits_url", fake_fetch)
+    monkeypatch.setattr(spectrum_fetch, "_GALAH_LOOKUP", None)
+    row = pd.Series(
+        {
+            "candidate_id": "C1",
+            "survey": "galah_dr3",
+            "link": "https://example.org/galah/123.0.fits",
+        }
+    )
+
+    result = spectrum_fetch._fetch_galah(row)
+
+    assert result.status == FetchStatus.OK
+    assert result.data is expected
+    assert calls == [("https://example.org/galah/123.0.fits", "GALAH")]
+
+
+def test_desi_sparcl_falls_back_to_nearest_coordinate_for_float_targetid() -> None:
+    import malca.enrich.spectrum_fetch as spectrum_fetch
+
+    exact_targetid = 2305843028272617471
+
+    class Found:
+        def __init__(self, records):
+            self.records = records
+
+    class FakeClient:
+        def __init__(self):
+            self.constraints = []
+
+        def find(self, *, outfields, constraints, limit):
+            self.constraints.append(constraints)
+            if "targetid" in constraints:
+                return Found([])
+            return Found(
+                [
+                    {
+                        "sparcl_id": "far",
+                        "ra": 23.0050,
+                        "dec": 1.6029,
+                        "targetid": exact_targetid + 1,
+                    },
+                    {
+                        "sparcl_id": "nearest",
+                        "ra": 23.0045463,
+                        "dec": 1.6027922,
+                        "targetid": exact_targetid,
+                    },
+                ]
+            )
+
+    client = FakeClient()
+    row = pd.Series(
+        {
+            "TargetID": float(exact_targetid),
+            "ra": 23.0045498,
+            "dec": 1.6027908,
+        }
+    )
+
+    record = spectrum_fetch._find_desi_sparcl_record(
+        client,
+        row,
+        row["TargetID"],
+        radius_arcsec=2.0,
+    )
+
+    assert record["sparcl_id"] == "nearest"
+    assert record["targetid"] == exact_targetid
+    assert "targetid" in client.constraints[0]
+    assert set(client.constraints[1]) == {"ra", "dec"}
+
+
 def test_apogee_apstar_parser_reads_error_hdu_not_flux_row(tmp_path) -> None:
     fits = pytest.importorskip("astropy.io.fits")
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import argparse
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -61,6 +63,12 @@ SPECTRA_QUERY_STATUS_COLUMNS: tuple[str, ...] = (
     "chunk_start",
     "chunk_stop",
     "error_message",
+)
+SPECTRUM_RECORD_ID_COLUMNS: tuple[str, ...] = (
+    "SpecObjID", "SpObjID", "specobjid", "ObsID", "obsid", "obsID",
+    "spectrum_id", "visit_id", "exposure_id", "PLATEIFU", "plateifu",
+    "sobject_id", "SOBJECT_ID", "RAVEID", "APOGEE_ID", "ID",
+    "TARGETID", "TargetID", "targetid", "source_id", "SOURCE_ID", "Source",
 )
 
 
@@ -248,6 +256,38 @@ def _spectra_query_status_frame(rows: list[dict]) -> pd.DataFrame:
     return out[list(SPECTRA_QUERY_STATUS_COLUMNS) + [col for col in out.columns if col not in SPECTRA_QUERY_STATUS_COLUMNS]]
 
 
+def _spectrum_record_identity(row: pd.Series) -> tuple[str, str]:
+    object_id = ""
+    for column in SPECTRUM_RECORD_ID_COLUMNS:
+        if column not in row.index:
+            continue
+        value = row.get(column)
+        try:
+            if value is None or pd.isna(value):
+                continue
+        except Exception:
+            if value is None:
+                continue
+        text = str(value).strip()
+        if text and text.lower() not in {"nan", "none", "<na>"}:
+            # Prefer the strongest survey-specific record identifier.  Using
+            # every populated identifier makes a key unstable when a cache
+            # refresh merely adds (for example) a source_id column.
+            object_id = f"{column}:{text}"
+            break
+    if not object_id:
+        for column in ("provenance_name", "link"):
+            value = row.get(column)
+            if value is not None and pd.notna(value) and str(value).strip():
+                object_id = f"{column}:{str(value).strip()}"
+                break
+    if not object_id:
+        sep = pd.to_numeric(row.get("sep_arcsec"), errors="coerce")
+        object_id = f"sep:{float(sep):.6f}" if np.isfinite(sep) else "unidentified"
+    token = f"{row.get('survey', '')}|{row.get('catalog', '')}|{object_id}"
+    return object_id, hashlib.sha1(token.encode("utf-8")).hexdigest()[:24]
+
+
 def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
     if spectra_long.empty:
         return spectra_long
@@ -279,6 +319,27 @@ def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
 
     out = normalize_apogee_metadata_columns(out)
 
+    identities = out.apply(_spectrum_record_identity, axis=1)
+    out["spectrum_object_id"] = [item[0] for item in identities]
+    out["spectrum_record_key"] = [item[1] for item in identities]
+    provenance_only = out.get("catalog", pd.Series("", index=out.index)).fillna("").astype(str).str.startswith("provenance:")
+    transient_count = pd.to_numeric(out.get("transient_n_spectra", pd.Series(np.nan, index=out.index)), errors="coerce")
+    out["spectrum_record_status"] = np.where(
+        provenance_only & ~(transient_count > 0), "metadata_only", "available"
+    )
+    out = (
+        out.sort_values(
+            ["candidate_id", "survey", "spectrum_record_key", "sep_arcsec"],
+            na_position="last",
+            kind="mergesort",
+        )
+        .drop_duplicates(
+            subset=["candidate_id", "survey", "spectrum_record_key"],
+            keep="first",
+        )
+        .reset_index(drop=True)
+    )
+
     keep_cols = [
         c
         for c in [
@@ -292,6 +353,9 @@ def _normalize_spectra_long(spectra_long: pd.DataFrame) -> pd.DataFrame:
             "provenance_name",
             "transient_n_spectra",
             "transient_instrument",
+            "spectrum_object_id",
+            "spectrum_record_key",
+            "spectrum_record_status",
         ]
         if c in out.columns
     ]
@@ -303,6 +367,12 @@ def _summarize_spectra_long(coords: pd.DataFrame, spectra_long: pd.DataFrame) ->
     summary = coords[["candidate_id"]].copy()
     if spectra_long.empty:
         summary["has_spectrum"] = False
+        summary["has_spectral_metadata"] = False
+        summary["spectrum_status"] = "no_match"
+        summary["spectrum_n_unique_records"] = 0
+        summary["spectrum_redshift_conflict"] = False
+        summary["spectrum_spectral_type_conflict"] = False
+        summary["spectrum_conflict_details_json"] = "{}"
         summary["spectrum_sources"] = ""
         summary["spectrum_links"] = ""
         summary["spectrum_redshift"] = np.nan
@@ -313,9 +383,15 @@ def _summarize_spectra_long(coords: pd.DataFrame, spectra_long: pd.DataFrame) ->
         return summary
 
     work = normalize_apogee_metadata_columns(spectra_long.copy())
+    if "spectrum_record_key" not in work.columns or "spectrum_record_status" not in work.columns:
+        work = _normalize_spectra_long(work)
     work["sep_arcsec"] = pd.to_numeric(work.get("sep_arcsec"), errors="coerce")
     work = work.sort_values(["candidate_id", "sep_arcsec"], na_position="last")
     nearest = work.drop_duplicates(subset=["candidate_id"], keep="first")
+    redshift_rows = work.loc[pd.to_numeric(work["spectrum_redshift"], errors="coerce").notna()]
+    redshift_nearest = redshift_rows.drop_duplicates(subset=["candidate_id"], keep="first")
+    type_rows = work.loc[work["spectrum_spectral_type"].fillna("").astype(str).str.strip().ne("")]
+    type_nearest = type_rows.drop_duplicates(subset=["candidate_id"], keep="first")
 
     by_id = work.groupby("candidate_id")
     sources = by_id["survey"].apply(lambda s: ",".join(sorted({str(x) for x in s.dropna() if str(x)}))).rename("spectrum_sources")
@@ -326,17 +402,67 @@ def _summarize_spectra_long(coords: pd.DataFrame, spectra_long: pd.DataFrame) ->
     summary = summary.merge(sources, on="candidate_id", how="left")
     summary = summary.merge(links_agg, on="candidate_id", how="left")
     summary = summary.merge(
-        nearest[["candidate_id", "spectrum_redshift", "spectrum_spectral_type", "sep_arcsec"]].rename(
-            columns={"sep_arcsec": "spectrum_sep_arcsec"}
-        ),
-        on="candidate_id",
-        how="left",
+        nearest[["candidate_id", "sep_arcsec"]].rename(columns={"sep_arcsec": "spectrum_sep_arcsec"}),
+        on="candidate_id", how="left",
+    )
+    summary = summary.merge(
+        redshift_nearest[["candidate_id", "spectrum_redshift"]], on="candidate_id", how="left",
+    )
+    summary = summary.merge(
+        type_nearest[["candidate_id", "spectrum_spectral_type"]], on="candidate_id", how="left",
     )
 
     summary["spectrum_sources"] = summary["spectrum_sources"].fillna("")
     summary["spectrum_links"] = summary["spectrum_links"].fillna("")
     summary["spectrum_spectral_type"] = summary["spectrum_spectral_type"].fillna("")
-    summary["has_spectrum"] = summary["spectrum_sources"].str.len() > 0
+    record_counts = work.groupby("candidate_id")["spectrum_record_key"].nunique().rename("spectrum_n_unique_records")
+    available = (
+        work.loc[work["spectrum_record_status"].astype(str) == "available", ["candidate_id"]]
+        .drop_duplicates().assign(has_spectrum=True)
+    )
+    summary = summary.merge(record_counts, on="candidate_id", how="left")
+    summary = summary.merge(available, on="candidate_id", how="left")
+    summary["spectrum_n_unique_records"] = summary["spectrum_n_unique_records"].fillna(0).astype(int)
+    summary["has_spectral_metadata"] = summary["spectrum_n_unique_records"] > 0
+    summary["has_spectrum"] = summary["has_spectrum"].astype("boolean").fillna(False).astype(bool)
+    summary["spectrum_status"] = np.where(
+        summary["has_spectrum"], "available",
+        np.where(summary["has_spectral_metadata"], "metadata_only", "no_match"),
+    )
+
+    conflict_rows: list[dict[str, object]] = []
+    for candidate_id, group in work.groupby("candidate_id"):
+        redshifts = pd.to_numeric(group["spectrum_redshift"], errors="coerce").dropna().to_numpy(dtype=float)
+        types = sorted({
+            " ".join(str(value).strip().upper().split())
+            for value in group["spectrum_spectral_type"].dropna()
+            if str(value).strip()
+        })
+        z_conflict = False
+        z_min = z_max = np.nan
+        if redshifts.size:
+            z_min, z_max = float(np.nanmin(redshifts)), float(np.nanmax(redshifts))
+            tolerance = max(0.001, 0.05 * abs(float(np.nanmedian(redshifts))))
+            z_conflict = (z_max - z_min) > tolerance
+        type_conflict = len(types) > 1
+        conflict_rows.append({
+            "candidate_id": str(candidate_id),
+            "spectrum_redshift_conflict": bool(z_conflict),
+            "spectrum_spectral_type_conflict": bool(type_conflict),
+            "spectrum_conflict_details_json": json.dumps(
+                {
+                    "redshift_min": None if not np.isfinite(z_min) else z_min,
+                    "redshift_max": None if not np.isfinite(z_max) else z_max,
+                    "spectral_types": types,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        })
+    summary = summary.merge(pd.DataFrame(conflict_rows), on="candidate_id", how="left")
+    summary["spectrum_redshift_conflict"] = summary["spectrum_redshift_conflict"].astype("boolean").fillna(False).astype(bool)
+    summary["spectrum_spectral_type_conflict"] = summary["spectrum_spectral_type_conflict"].astype("boolean").fillna(False).astype(bool)
+    summary["spectrum_conflict_details_json"] = summary["spectrum_conflict_details_json"].fillna("{}")
 
     apogee = work[work["survey"].astype(str).str.contains("apogee", case=False, na=False)]
     if not apogee.empty:
@@ -495,6 +621,7 @@ def run_spectra_availability(
         )
         if not transient.empty:
             spectra_long = pd.concat([spectra_long, _normalize_spectra_long(transient)], ignore_index=True)
+            spectra_long = _normalize_spectra_long(spectra_long)
 
     if cache_file and not spectra_long.empty:
         _write_spectra_parquet(spectra_long, cache_file, compression="snappy")

@@ -9,8 +9,8 @@ import malca.enrichment.vetting as vetting
 
 
 def test_asassn_variables_default_local_csv_prefers_repo_input(monkeypatch, tmp_path) -> None:
-    repo_csv = tmp_path / "input" / "asassn_variables_220326.csv"
-    package_csv = tmp_path / "malca" / "input" / "asassn_variables_220326.csv"
+    repo_csv = tmp_path / "input" / "asassn_catalog_full.csv"
+    package_csv = tmp_path / "malca" / "input" / "asassn_catalog_full.csv"
     repo_csv.parent.mkdir(parents=True)
     repo_csv.write_text("ID,RAJ2000,DEJ2000\n", encoding="utf-8")
 
@@ -25,6 +25,19 @@ def test_asassn_variables_explicit_local_csv_override_wins(tmp_path) -> None:
     local_csv.write_text("ID,RAJ2000,DEJ2000\n", encoding="utf-8")
 
     assert vetting.resolve_asassn_var_local_csv(local_csv) == local_csv
+
+
+def test_asassn_variables_default_local_csv_falls_back_to_legacy(monkeypatch, tmp_path) -> None:
+    full_repo_csv = tmp_path / "input" / "asassn_catalog_full.csv"
+    full_package_csv = tmp_path / "malca" / "input" / "asassn_catalog_full.csv"
+    legacy_repo_csv = full_repo_csv.with_name("asassn_variables_220326.csv")
+    legacy_repo_csv.parent.mkdir(parents=True)
+    legacy_repo_csv.write_text("ID,RAJ2000,DEJ2000\n", encoding="utf-8")
+
+    monkeypatch.setattr(vetting, "ASASSN_VAR_REPO_LOCAL_CSV", full_repo_csv)
+    monkeypatch.setattr(vetting, "ASASSN_VAR_PACKAGE_LOCAL_CSV", full_package_csv)
+
+    assert vetting.resolve_asassn_var_local_csv() == legacy_repo_csv
 
 
 def test_asassn_variables_local_csv_does_not_call_tap(monkeypatch, tmp_path) -> None:
@@ -50,6 +63,40 @@ def test_asassn_variables_local_csv_does_not_call_tap(monkeypatch, tmp_path) -> 
     assert out.loc[0, "asassn_var_name"] == "ASASSN-V LOCAL"
     assert out.loc[0, "asassn_var_type"] == "EA"
     assert float(out.loc[0, "asassn_var_period"]) == 1.25
+
+
+def test_asassn_variables_full_catalog_schema_and_gaia_identity(tmp_path) -> None:
+    local_csv = tmp_path / "asassn_catalog_full.csv"
+    pd.DataFrame(
+        {
+            "id": ["internal-uuid-1", "internal-uuid-2"],
+            "asassn_name": ["ASASSN-V SAME", "ASASSN-V NEIGHBOR"],
+            "raj2000": [10.0, 20.001],
+            "dej2000": [-5.0, 1.0],
+            "variable_type": ["YSO", "YSO"],
+            "period": [np.nan, np.nan],
+            "edr3_source_id": ["EDR3 123456789012345678", "EDR3 999999999999999999"],
+        }
+    ).to_csv(local_csv, index=False)
+
+    df = pd.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [-5.0, 1.0],
+            "gaia_id": ["123456789012345678", "888888888888888888"],
+        }
+    )
+    out = vetting.crossmatch_asassn_variables(
+        df,
+        method="local",
+        local_csv=local_csv,
+        radius_arcsec=5.0,
+    )
+
+    assert out.loc[0, "asassn_var_name"] == "ASASSN-V SAME"
+    assert out.loc[0, "asassn_var_type"] == "YSO"
+    assert out.loc[1, "asassn_var_name"] == ""
+    assert out.loc[1, "asassn_var_type"] == ""
 
 
 def test_asassn_transients_populate_tns_fields(tmp_path) -> None:
