@@ -755,7 +755,7 @@ def ce_find_period(
     refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
     refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
 ) -> tuple[float, np.ndarray, np.ndarray]:
-    """Run Conditional Entropy period search.
+    """Run Conditional Entropy period search on a uniform-frequency grid.
 
     Returns (best_period, period_array, entropy_array).
     Lower entropy = better period.
@@ -764,7 +764,19 @@ def ce_find_period(
     yvals = np.asarray(yvals, dtype=np.float64)
     t0 = np.min(times)
     t_shifted = times - t0
-    period_arr = np.linspace(min_period, max_period, n_periods)
+    min_period = float(min_period)
+    max_period = float(max_period)
+    if max_period < min_period:
+        min_period, max_period = max_period, min_period
+    if min_period <= 0 or not np.isfinite(min_period) or not np.isfinite(max_period):
+        raise ValueError("CE period bounds must be finite and positive")
+    n_periods = max(int(n_periods), 2)
+    # Periodogram peak widths are approximately uniform in frequency, not in
+    # period.  A linear-period grid badly undersamples short periods when the
+    # requested range is wide.  Reverse the reciprocal grid so the public
+    # period array remains monotonically increasing for existing consumers.
+    frequency_arr = np.linspace(1.0 / max_period, 1.0 / min_period, n_periods)
+    period_arr = (1.0 / frequency_arr)[::-1].copy()
     best_idx, entropy = _ce_scan_grid(t_shifted, yvals, period_arr, n_phase_bins, n_mag_bins)
     best_idx = int(best_idx)
     best_period = float(period_arr[best_idx])

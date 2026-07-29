@@ -346,7 +346,7 @@ def test_compute_stats_q_uses_all_bands_after_camera_band_offset_normalization(
         },
     )
 
-    _df, summary = stats_mod.compute_stats(
+    df_combined, summary = stats_mod.compute_stats(
         "123",
         "/tmp",
         compute_ls=False,
@@ -357,6 +357,47 @@ def test_compute_stats_q_uses_all_bands_after_camera_band_offset_normalization(
     assert summary["variability_quasi_periodicity_status"] == "ok"
     assert summary["variability_quasi_periodicity_n_points"] == 440
     assert summary["variability_quasi_periodicity_q"] < 0.05
+    assert summary["photometry_band_mode"] == "g+V"
+    assert summary["photometry_band_alignment"] == "v_median_to_g_median"
+    assert summary["photometry_g_points"] == 220
+    assert summary["photometry_v_points"] == 220
+    assert summary["file_points_total"] == 440
+    assert summary["file_points_kept_after_filter"] == 440
+    assert summary["photometry_v_minus_g_offset_mag"] == pytest.approx(
+        float(df_v["mag"].median() - df_g["mag"].median())
+    )
+    assert len(df_combined) == 440
+    assert "mag_raw" in df_combined.columns
+    assert df_combined.loc[df_combined["v_g_band"] == 0, "mag"].median() == pytest.approx(
+        df_combined.loc[df_combined["v_g_band"] == 1, "mag"].median()
+    )
+    assert summary["photometry_std_mag"] < 0.25
+
+
+def test_compute_stats_explicit_use_g_preserves_single_band_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_compute_stats_loaders(monkeypatch, period=2.75)
+    df_g, _ = _stats_lightcurve(period=2.75)
+    df_v = df_g.copy()
+    df_v["JD"] = df_v["JD"] + 0.001
+    df_v["mag"] = df_v["mag"] + 1.5
+    df_v["v_g_band"] = 1
+    df_v["camera_name"] = "cam-v"
+    monkeypatch.setattr(stats_mod, "read_lc_csv", lambda *_args, **_kwargs: (df_g.copy(), df_v.copy()))
+
+    g_only, g_summary = stats_mod.compute_stats("123", "/tmp", use_g=True, compute_ls=False)
+    v_only, v_summary = stats_mod.compute_stats("123", "/tmp", use_g=False, compute_ls=False)
+
+    assert len(g_only) == len(df_g)
+    assert g_summary["photometry_band_mode"] == "g"
+    assert g_summary["photometry_g_points"] == len(df_g)
+    assert g_summary["photometry_v_points"] == 0
+    assert len(v_only) == len(df_v)
+    assert v_summary["photometry_band_mode"] == "V"
+    assert v_summary["photometry_g_points"] == 0
+    assert v_summary["photometry_v_points"] == len(df_v)
+    assert v_summary["photometry_median_mag"] - g_summary["photometry_median_mag"] == pytest.approx(1.5)
 
 
 def test_qm_stats_merge_and_review_schema_entries() -> None:
@@ -364,6 +405,11 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
     merge_stats_summary_into_payload(
         payload,
         {
+            "photometry_band_mode": "g+V",
+            "photometry_band_alignment": "v_median_to_g_median",
+            "photometry_g_points": 80,
+            "photometry_v_points": 40,
+            "photometry_v_minus_g_offset_mag": 1.2,
             "variability_quasi_periodicity_q": 0.12,
             "variability_quasi_periodicity_method": "phase_template_med500m2",
             "variability_quasi_periodicity_n_points": 120,
@@ -377,11 +423,17 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
             "variability_quasi_periodicity_scatter_ratio": 0.39,
             "variability_quasi_periodicity_status": "ok",
             "variability_flux_asymmetry_m": 0.34,
+            "variability_sokolovsky_v": 0.024,
             "variability_periodic_feature_period_days": 2.75,
             "variability_periodic_feature_period_source": "ce_corrected_period",
         },
     )
 
+    assert feature_mapping_get(payload, "stats_photometry_band_mode") == "g+V"
+    assert feature_mapping_get(payload, "stats_photometry_band_alignment") == "v_median_to_g_median"
+    assert feature_mapping_get(payload, "stats_photometry_g_points") == 80
+    assert feature_mapping_get(payload, "stats_photometry_v_points") == 40
+    assert feature_mapping_get(payload, "stats_photometry_v_minus_g_offset_mag") == 1.2
     assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_q") == 0.12
     assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_method") == "phase_template_med500m2"
     assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_n_points") == 120
@@ -395,6 +447,7 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
     assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_scatter_ratio") == 0.39
     assert feature_mapping_get(payload, "stats_variability_quasi_periodicity_status") == "ok"
     assert feature_mapping_get(payload, "stats_variability_flux_asymmetry_m") == 0.34
+    assert feature_mapping_get(payload, "stats_variability_sokolovsky_v") == 0.024
     assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_days") == 2.75
     assert feature_mapping_get(payload, "stats_variability_periodic_feature_period_source") == "ce_corrected_period"
     assert "stats_variability_quasi_periodicity_q" in _COL_NAMES
@@ -410,8 +463,14 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
     assert "stats_variability_quasi_periodicity_scatter_ratio" in _COL_NAMES
     assert "stats_variability_quasi_periodicity_status" in _COL_NAMES
     assert "stats_variability_flux_asymmetry_m" in _COL_NAMES
+    assert "stats_variability_sokolovsky_v" in _COL_NAMES
     assert "stats_variability_periodic_feature_period_days" in _COL_NAMES
     assert "stats_variability_periodic_feature_period_source" in _COL_NAMES
+    assert "stats_photometry_band_mode" in _COL_NAMES
+    assert "stats_photometry_band_alignment" in _COL_NAMES
+    assert "stats_photometry_g_points" in _COL_NAMES
+    assert "stats_photometry_v_points" in _COL_NAMES
+    assert "stats_photometry_v_minus_g_offset_mag" in _COL_NAMES
 
     filter_columns = {entry[1] for _group, entries in SIDEBAR_GROUPS for entry in entries}
     assert "stats_variability_quasi_periodicity_q" in filter_columns
@@ -421,6 +480,7 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
     assert "stats_variability_quasi_periodicity_populated_bins" in filter_columns
     assert "stats_variability_quasi_periodicity_bin_coverage" in filter_columns
     assert "stats_variability_quasi_periodicity_smooth_window_bins" in filter_columns
+    assert "stats_variability_sokolovsky_v" in filter_columns
     assert "stats_variability_quasi_periodicity_template_amplitude" in filter_columns
     assert "stats_variability_quasi_periodicity_raw_scatter" in filter_columns
     assert "stats_variability_quasi_periodicity_resid_scatter" in filter_columns
@@ -429,3 +489,8 @@ def test_qm_stats_merge_and_review_schema_entries() -> None:
     assert "stats_variability_flux_asymmetry_m" in filter_columns
     assert "stats_variability_periodic_feature_period_days" in filter_columns
     assert "stats_variability_periodic_feature_period_source" in filter_columns
+    assert "stats_photometry_band_mode" in filter_columns
+    assert "stats_photometry_band_alignment" in filter_columns
+    assert "stats_photometry_g_points" in filter_columns
+    assert "stats_photometry_v_points" in filter_columns
+    assert "stats_photometry_v_minus_g_offset_mag" in filter_columns

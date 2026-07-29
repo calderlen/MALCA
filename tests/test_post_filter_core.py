@@ -375,11 +375,11 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
             "periodicity_method": "pdm",
             "periodicity_bootstrap_sig": 1e-3,
             "periodicity_is_significant": True,
-            "lsp_power": np.nan,
-            "lsp_period": 2.5,
-            "lsp_bootstrap_sig": 1e-3,
+            "lsp_power": 0.73,
+            "lsp_period": 9.5,
+            "lsp_bootstrap_sig": 0.02,
             "lsp_is_alias": False,
-            "lsp_is_significant": True,
+            "lsp_is_significant": False,
             "pdm_period": 2.5,
             "pdm_min_theta": 0.2,
             "pdm_snr": 7.0,
@@ -425,7 +425,9 @@ def test_validate_periodicity_uses_local_bundle_lightcurves(
     assert float(row["pdm_corrected_period"]) == 2.5
     assert float(row["ce_corrected_period"]) == 2.5
     assert row["periodicity_method"] == "pdm"
-    assert float(row["lsp_period"]) == 2.5
+    assert float(row["lsp_period"]) == 9.5
+    assert float(row["lsp_bootstrap_sig"]) == 0.02
+    assert bool(row["lsp_is_significant"]) is False
 
 
 def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -477,9 +479,21 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
             "ce_is_significant": True,
         }
 
+    def _fake_lsp_stats(_jd: np.ndarray, mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, object]:
+        captured["lsp_mag"] = np.asarray(mag, dtype=float).copy()
+        assert _kwargs["n_bootstrap"] == 8
+        return {
+            "ls_power": 0.81,
+            "ls_period_days": 7.25,
+            "ls_bootstrap_sig": 0.02,
+            "ls_is_alias": False,
+            "ls_is_significant": False,
+        }
+
     monkeypatch.setattr(post_filter, "read_lc_dat2", _fake_read_lc_dat2)
     monkeypatch.setattr(post_filter, "compute_pdm_stats", _fake_pdm_stats)
     monkeypatch.setattr(post_filter, "compute_ce_stats", _fake_ce_stats)
+    monkeypatch.setattr(post_filter, "bootstrap_lomb_scargle", _fake_lsp_stats)
 
     out = post_filter._lsp_worker(
         ("/data/poohbah/cluster/123.dat3", "/tmp/123.dat3", 8, 0.01, True, "plavchan")
@@ -487,17 +501,22 @@ def test_lsp_worker_aligns_simple_v_minus_g_median_offset(monkeypatch: pytest.Mo
 
     g_count = len(df_g)
     expected_offset = float(np.median(signal_v) - np.median(signal_g))
-    for key in ("pdm_mag", "ce_mag"):
+    for key in ("pdm_mag", "ce_mag", "lsp_mag"):
         mag = captured[key]
         assert np.isclose(np.median(mag[:g_count]), np.median(mag[g_count:]), atol=1e-10)
     assert out["pdm_method"] == "plavchan"
     assert out["periodicity_period"] == 4.0
-    assert out["periodicity_method"] == "pdm"
+    assert out["periodicity_method"] == "pdm+ce"
+    assert out["period_method"] == "pdm+ce"
+    assert out["period_confidence"] in {"high", "tentative"}
     assert out["pdm_period"] == 4.0
     assert out["ce_period"] == 4.0
     assert out["pdm_corrected_period"] == 4.0
     assert out["ce_corrected_period"] == 4.0
-    assert out["lsp_period"] == 4.0
+    assert out["lsp_power"] == 0.81
+    assert out["lsp_period"] == 7.25
+    assert out["lsp_bootstrap_sig"] == 0.02
+    assert out["lsp_is_significant"] is False
     assert captured["file_ext"] == "dat3"
     assert np.isclose(expected_offset, 0.8, atol=5e-3)
 
@@ -550,9 +569,20 @@ def test_lsp_worker_no_bootstrap_selects_supported_ce_without_defaulting_to_pdm(
             "ce_is_significant": False,
         }
 
+    def _fake_lsp_stats(_jd: np.ndarray, _mag: np.ndarray, _err: np.ndarray, **_kwargs: object) -> dict[str, object]:
+        assert _kwargs["n_bootstrap"] == 0
+        return {
+            "ls_power": 0.4,
+            "ls_period_days": 11.0,
+            "ls_bootstrap_sig": np.nan,
+            "ls_is_alias": False,
+            "ls_is_significant": False,
+        }
+
     def _fake_correct_native_period(
         raw_period: float,
         _band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+        **kwargs: object,
     ) -> dict[str, object]:
         raw = float(raw_period)
         corrected = raw / 2.0
@@ -568,10 +598,26 @@ def test_lsp_worker_no_bootstrap_selects_supported_ce_without_defaulting_to_pdm(
             "candidates": [],
         }
 
+    def _fake_consensus(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "period_consensus_days": np.nan,
+            "period_method": "none",
+            "period_confidence": "none",
+            "period_baseline_cycles": np.nan,
+            "period_confidence_reason": "mocked",
+            "long_ls_period_days": np.nan,
+            "long_ls_is_significant": False,
+            "long_ls_status": "mocked",
+            "dip_epochs_source": "none",
+            "dip_epochs_count": 0,
+        }
+
     monkeypatch.setattr(post_filter, "read_lc_dat2", _fake_read_lc_dat2)
     monkeypatch.setattr(post_filter, "compute_pdm_stats", _fake_pdm_stats)
     monkeypatch.setattr(post_filter, "compute_ce_stats", _fake_ce_stats)
+    monkeypatch.setattr(post_filter, "bootstrap_lomb_scargle", _fake_lsp_stats)
     monkeypatch.setattr(post_filter, "_correct_native_period", _fake_correct_native_period)
+    monkeypatch.setattr(post_filter, "compute_period_consensus_for_lc", _fake_consensus)
 
     out = post_filter._lsp_worker(
         ("/data/poohbah/cluster/123.dat3", "/tmp/123.dat3", 0, 0.01, True, "plavchan")
@@ -586,6 +632,7 @@ def test_lsp_worker_no_bootstrap_selects_supported_ce_without_defaulting_to_pdm(
     assert out["periodicity_base_period"] == 8.0
     assert out["periodicity_period"] == 4.0
     assert out["periodicity_harmonic_factor"] == 0.5
+    assert out["lsp_period"] == 11.0
 
 
 def test_annotate_phase_plot_candidates_uses_native_support_not_lsp_power() -> None:

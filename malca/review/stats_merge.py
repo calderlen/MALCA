@@ -29,6 +29,11 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         return
 
     scalar_map = {
+        "photometry_band_mode": "stats_photometry_band_mode",
+        "photometry_band_alignment": "stats_photometry_band_alignment",
+        "photometry_g_points": "stats_photometry_g_points",
+        "photometry_v_points": "stats_photometry_v_points",
+        "photometry_v_minus_g_offset_mag": "stats_photometry_v_minus_g_offset_mag",
         "file_points_total": "stats_file_points_total",
         "file_points_kept_after_filter": "stats_file_points_kept_after_filter",
         "jd_start": "stats_jd_start",
@@ -53,11 +58,16 @@ def merge_stats_summary_into_payload(payload: dict, summary: dict) -> None:
         "photometry_p84_mag": "stats_photometry_p84_mag",
         "photometry_p95_mag": "stats_photometry_p95_mag",
         "clipped_mean_mag_3sigma_about_median": "stats_clipped_mean_mag_3sigma_about_median",
+        "clipped_mean_mag_3sigma_about_median_g": "stats_clipped_mean_mag_3sigma_about_median_g",
+        "clipped_mean_mag_3sigma_about_median_vband": "stats_clipped_mean_mag_3sigma_about_median_vband",
         "clipped_std_mag_3sigma_about_median": "stats_clipped_std_mag_3sigma_about_median",
         "n_outliers_removed_robust_3sigma": "stats_n_outliers_removed_robust_3sigma",
         "variability_reduced_chi2_vs_constant": "stats_variability_reduced_chi2_vs_constant",
         "variability_von_neumann_ratio": "stats_variability_von_neumann_ratio",
         "variability_roms": "stats_variability_roms",
+        "variability_sokolovsky_v": "stats_variability_sokolovsky_v",
+        "variability_sokolovsky_v_g": "stats_variability_sokolovsky_v_g",
+        "variability_sokolovsky_v_vband": "stats_variability_sokolovsky_v_vband",
         "variability_lag1_autocorr": "stats_variability_lag1_autocorr",
         "variability_stetson_I": "stats_variability_stetson_I",
         "variability_stetson_J": "stats_variability_stetson_J",

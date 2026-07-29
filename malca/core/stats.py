@@ -9,6 +9,7 @@ Outputs:
 - Per-camera / per-field / per-band usage + offsets and scatter
 """
 from collections import OrderedDict
+from pathlib import Path
 import sys, io, argparse, math
 
 from astropy.timeseries import LombScargle
@@ -25,6 +26,7 @@ from malca.core.period_arbitration import (
     NATIVE_PERIOD_WITH_MULTIPLES_FACTORS,
     choose_native_harmonic_candidate,
     native_harmonic_period_candidates,
+    period_alias_matches,
 )
 from malca.config import (
     MAD_SCALE,
@@ -64,6 +66,7 @@ _LC_COLUMNS = [
 ]
 
 Q_TEMPLATE_METHOD = "phase_template_med500m2"
+Q_TEMPLATE_EVALUATION = "cycle_block_out_of_fold_v1"
 Q_TEMPLATE_N_PHASE_BINS = 500
 Q_TEMPLATE_MIN_BIN_POINTS = 2
 Q_TEMPLATE_SMOOTH_WINDOW_BINS = 1
@@ -98,6 +101,19 @@ def robust_sigma(x):
     return MAD_SCALE * np.median(np.abs(x - np.median(x)))
 
 
+def three_sigma_clipped_mean_mag(mag) -> float:
+    """Return the 3-sigma-about-median mean used by the stats summary."""
+    values = np.asarray(mag, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return np.nan
+    median = float(np.nanmedian(values))
+    sigma = robust_sigma(values)
+    if np.isfinite(sigma) and sigma > 0:
+        values = values[np.abs(values - median) <= 3.0 * sigma]
+    return float(np.nanmean(values)) if values.size else np.nan
+
+
 def _prepare_stats_lightcurve_frame(raw: pd.DataFrame | None) -> pd.DataFrame:
     """Normalize loaded ASAS-SN light-curve columns for compute_stats."""
     if raw is None or raw.empty:
@@ -113,6 +129,48 @@ def _prepare_stats_lightcurve_frame(raw: pd.DataFrame | None) -> pd.DataFrame:
     df["good_bad"] = df["good_bad"].fillna(1)
     df["saturated"] = df["saturated"].fillna(0)
     return df.dropna(subset=["JD", "mag", "error"]).sort_values("JD").reset_index(drop=True)
+
+
+def _load_stats_lightcurve_frames(
+    asassn_id: object,
+    path: str | Path,
+    *,
+    file_ext: str | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load one stats light curve without discarding an exact input path.
+
+    Directory inputs retain the legacy ``<source_id>.<extension>`` lookup.  An
+    existing file input is authoritative: its complete stem and its own suffix
+    are used, so catalogue IDs containing punctuation are never truncated and a
+    mixed-extension manifest does not accidentally load a same-named neighbor.
+    """
+    input_path = Path(path).expanduser()
+    if input_path.is_file():
+        exact_source_id = input_path.stem
+        exact_extension = input_path.suffix.lstrip(".") or file_ext
+        if input_path.suffix.lower() == ".csv":
+            # The two supported CSV readers currently accept a directory plus
+            # source name.  Using the exact file's full stem reconstructs only
+            # the path we have already established, never a shortened ID.
+            df_g, df_v = read_lc_csv(exact_source_id, str(input_path.parent))
+            if df_g.empty and df_v.empty:
+                df_g, df_v = read_skypatrol_lc_csv(
+                    exact_source_id,
+                    str(input_path.parent),
+                )
+            return df_g, df_v
+        return read_lc_dat2(
+            exact_source_id,
+            str(input_path),
+            file_ext=exact_extension,
+        )
+
+    df_g, df_v = read_lc_csv(asassn_id, path)
+    if df_g.empty and df_v.empty:
+        df_g, df_v = read_skypatrol_lc_csv(asassn_id, path)
+    if df_g.empty and df_v.empty:
+        df_g, df_v = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+    return df_g, df_v
 
 
 def _filter_stats_lightcurve_frame(
@@ -135,6 +193,54 @@ def _filter_stats_lightcurve_frame(
         saturated = pd.to_numeric(out.get("saturated"), errors="coerce").fillna(0) == 0
         out = out[good & saturated].reset_index(drop=True)
     return out
+
+
+def _align_v_to_g_with_overlap_policy(
+    df: pd.DataFrame,
+    *,
+    min_points_per_band: int = 5,
+    min_overlap_fraction: float = 0.5,
+) -> tuple[pd.DataFrame, float, str]:
+    """Align bands only when their observing windows substantially overlap."""
+    if df.empty or "v_g_band" not in df or "JD" not in df or "mag" not in df:
+        return df, np.nan, "none"
+    band = pd.to_numeric(df["v_g_band"], errors="coerce")
+    jd = pd.to_numeric(df["JD"], errors="coerce")
+    mag = pd.to_numeric(df["mag"], errors="coerce")
+    g = (band == 0) & jd.notna() & mag.notna()
+    v = (band == 1) & jd.notna() & mag.notna()
+    if int(g.sum()) < min_points_per_band or int(v.sum()) < min_points_per_band:
+        return df, np.nan, "not_aligned_insufficient_band_points"
+
+    g_lo, g_hi = float(jd[g].min()), float(jd[g].max())
+    v_lo, v_hi = float(jd[v].min()), float(jd[v].max())
+    overlap_lo, overlap_hi = max(g_lo, v_lo), min(g_hi, v_hi)
+    g_span, v_span = g_hi - g_lo, v_hi - v_lo
+    overlap = max(0.0, overlap_hi - overlap_lo)
+    reference_span = max(min(g_span, v_span), 1e-12)
+    overlap_fraction = overlap / reference_span
+    if overlap <= 0 or overlap_fraction < float(min_overlap_fraction):
+        return df, np.nan, "not_aligned_no_temporal_overlap"
+
+    # For nearly coextensive surveys the full medians are the most stable
+    # overlap estimate. For partial overlap, restrict the color estimate to
+    # the common time interval so secular evolution is not absorbed as color.
+    if overlap_fraction >= 0.9:
+        g_ref, v_ref = g, v
+    else:
+        in_overlap = jd.between(overlap_lo, overlap_hi, inclusive="both")
+        g_ref, v_ref = g & in_overlap, v & in_overlap
+    if int(g_ref.sum()) < min_points_per_band or int(v_ref.sum()) < min_points_per_band:
+        return df, np.nan, "not_aligned_insufficient_overlap_points"
+    offset = float(np.median(mag[v_ref]) - np.median(mag[g_ref]))
+    if not np.isfinite(offset):
+        return df, np.nan, "not_aligned_invalid_overlap_offset"
+    out = df.copy()
+    out["mag_raw"] = mag
+    out.loc[v, "mag"] = mag[v] - offset
+    # Keep the established label for downstream schema compatibility; unlike
+    # the former implementation, this label now guarantees temporal overlap.
+    return out, offset, "v_median_to_g_median"
 
 
 def _camera_band_normalized_q_arrays(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -423,6 +529,125 @@ def roms_statistic(mag, err):
     return float(np.sum(np.abs(mag - med) / err) / (mag.size - 1.0))
 
 
+def sokolovsky_peak_to_peak_variability(mag, err):
+    """Return the uncertainty-aware peak-to-peak variability statistic ``v``.
+
+    This is the Sokolovsky et al. (2017) definition used by Bredall et al.
+    (2020):
+
+    ``v = (max(m - sigma) - min(m + sigma)) / (max(m - sigma) + min(m + sigma))``.
+
+    The statistic is dimensionless and intentionally uses the error-adjusted
+    extrema rather than the robust ALeRCE ``amplitude`` feature. Negative
+    values are retained when the two extrema overlap within their uncertainties.
+    """
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err >= 0)
+    if mask.sum() < 2:
+        return np.nan
+
+    lower = mag[mask] - err[mask]
+    upper = mag[mask] + err[mask]
+    faint_limit = float(np.max(lower))
+    bright_limit = float(np.min(upper))
+    denominator = faint_limit + bright_limit
+    if not np.isfinite(denominator) or denominator == 0:
+        return np.nan
+    return float((faint_limit - bright_limit) / denominator)
+
+
+def compute_sokolovsky_peak_to_peak_summary(
+    asassn_id,
+    path,
+    *,
+    use_only_good: bool = True,
+    drop_dupes: bool = True,
+    file_ext: str | None = None,
+    input_frame: pd.DataFrame | None = None,
+):
+    """Compute one Sokolovsky ``v`` from a median-offset combined light curve.
+
+    All usable g observations are retained.  When V is present, every usable
+    V magnitude is shifted by ``median(V) - median(g)`` before g and V are
+    concatenated and the statistic is calculated.  This is intentionally the
+    only Sokolovsky implementation used by the July 1 backfill and plot.
+    """
+
+    if input_frame is not None:
+        loaded = input_frame.copy()
+        if "v_g_band" in loaded.columns:
+            band_values = pd.to_numeric(loaded["v_g_band"], errors="coerce")
+            df_g_raw = loaded.loc[band_values != 1].copy()
+            df_v_raw = loaded.loc[band_values == 1].copy()
+        else:
+            df_g_raw, df_v_raw = loaded, pd.DataFrame()
+    else:
+        df_g_raw, df_v_raw = _load_stats_lightcurve_frames(
+            asassn_id,
+            path,
+            file_ext=file_ext,
+        )
+
+    df_g = _filter_stats_lightcurve_frame(
+        _prepare_stats_lightcurve_frame(df_g_raw),
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        duplicate_subset=("JD", "camera#", "camera_name", "field"),
+    )
+    df_v = _filter_stats_lightcurve_frame(
+        _prepare_stats_lightcurve_frame(df_v_raw),
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        duplicate_subset=("JD", "camera#", "camera_name", "field"),
+    )
+    if not df_g.empty and not df_v.empty:
+        v_minus_g_offset = float(np.median(df_v["mag"]) - np.median(df_g["mag"]))
+        df_v = df_v.copy()
+        df_v["mag"] = df_v["mag"].to_numpy(dtype=float) - v_minus_g_offset
+        df = pd.concat([df_g, df_v], ignore_index=True)
+        effective_band = "g+V_v_full_median_to_g_full_median"
+    elif not df_g.empty:
+        v_minus_g_offset = np.nan
+        df = df_g.copy()
+        effective_band = "g_only"
+    elif not df_v.empty:
+        v_minus_g_offset = np.nan
+        df = df_v.copy()
+        effective_band = "V_only_no_g_reference"
+    else:
+        v_minus_g_offset = np.nan
+        df = pd.DataFrame(columns=_LC_COLUMNS)
+        effective_band = "none"
+
+    df = df.sort_values("JD").reset_index(drop=True)
+
+    n_points = int(len(df))
+    if n_points == 0:
+        value = np.nan
+        status = "no_usable_band_coverage"
+    elif n_points < 2:
+        value = np.nan
+        status = "insufficient_points"
+    else:
+        value = sokolovsky_peak_to_peak_variability(
+            df["mag"].to_numpy(dtype=float),
+            df["error"].to_numpy(dtype=float),
+        )
+        status = "ok" if np.isfinite(value) else "invalid_denominator"
+
+    return df, OrderedDict(
+        [
+            ("variability_sokolovsky_v", value),
+            ("clipped_mean_mag_3sigma_about_median", three_sigma_clipped_mean_mag(df["mag"])),
+            ("sokolovsky_v_band", effective_band),
+            ("sokolovsky_v_v_minus_g_median_offset_mag", v_minus_g_offset),
+            ("sokolovsky_v_n_points", n_points),
+            ("sokolovsky_v_status", status),
+        ]
+    )
+
+
 def baseline_subtracted_string_length(
     df: pd.DataFrame,
     *,
@@ -701,6 +926,41 @@ def lomb_scargle_summary(jd, mag, err):
         return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
 
 
+def _block_permute_values(
+    jd: np.ndarray,
+    values: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    block_days: float = 1.0,
+) -> np.ndarray:
+    """Permute observing blocks while preserving within-block correlations."""
+    jd = np.asarray(jd, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if values.size < 2:
+        return values.copy()
+    order = np.argsort(jd, kind="stable")
+    times_sorted = jd[order]
+    values_sorted = values[order]
+    width = float(block_days)
+    if not np.isfinite(width) or width <= 0:
+        width = 1.0
+    labels = np.floor((times_sorted - times_sorted[0]) / width).astype(np.int64)
+    blocks = [values_sorted[labels == label] for label in np.unique(labels)]
+    if len(blocks) <= 1:
+        shift = int(rng.integers(1, values_sorted.size))
+        permuted_sorted = np.roll(values_sorted, shift)
+    else:
+        block_order = rng.permutation(len(blocks))
+        permuted_sorted = np.concatenate([blocks[int(idx)] for idx in block_order])
+    # Blocks can have unequal lengths; assigning their concatenation to the
+    # fixed time grid preserves local correlation without preserving phase.
+    out = np.empty_like(values_sorted)
+    out[:] = permuted_sorted
+    restored = np.empty_like(out)
+    restored[order] = out
+    return restored
+
+
 def bootstrap_lomb_scargle(
     jd: np.ndarray,
     mag: np.ndarray,
@@ -711,6 +971,9 @@ def bootstrap_lomb_scargle(
     max_frequency: float = LS_MAX_FREQUENCY,
     exclude_alias_periods: bool = True,
     alias_tolerance: float = LS_ALIAS_TOLERANCE,
+    significance_level: float = 0.01,
+    random_state: int | None = 0,
+    block_days: float = 1.0,
 ) -> dict:
     """
     Bootstrap Lomb-Scargle periodogram with significance testing.
@@ -746,14 +1009,19 @@ def bootstrap_lomb_scargle(
         - ls_is_alias: bool, True if near known alias period
         - ls_is_significant: bool, True if bootstrap_sig < 0.01 and not alias
     """
-    if LombScargle is None:
-        return {
+    empty = {
             "ls_power": np.nan,
             "ls_period_days": np.nan,
             "ls_bootstrap_sig": np.nan,
             "ls_is_alias": False,
             "ls_is_significant": False,
+            "ls_bootstrap_attempted": int(max(n_bootstrap, 0)),
+            "ls_bootstrap_successful": 0,
+            "ls_bootstrap_method": "observing_block_permutation",
+            "ls_status": "unavailable",
         }
+    if LombScargle is None:
+        return empty
 
     jd = np.asarray(jd, float)
     mag = np.asarray(mag, float)
@@ -761,20 +1029,321 @@ def bootstrap_lomb_scargle(
 
     mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
     if mask.sum() < 50:
-        return {
-            "ls_power": np.nan,
-            "ls_period_days": np.nan,
-            "ls_bootstrap_sig": np.nan,
-            "ls_is_alias": False,
-            "ls_is_significant": False,
-        }
+        return {**empty, "ls_status": "insufficient_points"}
 
     jd = jd[mask]
     mag = mag[mask]
     err = err[mask]
 
-    # Known alias periods (sidereal day, half-day, lunar month, year, half-year)
-    alias_periods = LS_ALIAS_PERIODS
+    order = np.argsort(jd, kind="stable")
+    jd, mag, err = jd[order], mag[order], err[order]
+
+    try:
+        ls = LombScargle(jd, mag, err)
+        freq, power_spec = ls.autopower(
+            minimum_frequency=min_frequency,
+            maximum_frequency=max_frequency,
+        )
+        if power_spec.size == 0 or not np.isfinite(power_spec).any():
+            return {**empty, "ls_status": "empty_periodogram"}
+
+        max_idx = int(np.nanargmax(power_spec))
+        ls_power = float(power_spec[max_idx])
+        best_period = float(1.0 / freq[max_idx]) if freq[max_idx] > 0 else np.nan
+
+        rng = np.random.default_rng(random_state)
+        bootstrap_powers = np.full(int(max(n_bootstrap, 0)), np.nan, dtype=float)
+        for idx in range(bootstrap_powers.size):
+            shuffled_mag = _block_permute_values(jd, mag, rng, block_days=block_days)
+            try:
+                power_boot = LombScargle(jd, shuffled_mag, err).power(freq)
+                if power_boot.size and np.isfinite(power_boot).any():
+                    bootstrap_powers[idx] = float(np.nanmax(power_boot))
+            except Exception:
+                continue
+        finite = bootstrap_powers[np.isfinite(bootstrap_powers)]
+        bootstrap_sig = (
+            float((np.count_nonzero(finite >= ls_power) + 1) / (finite.size + 1))
+            if finite.size else np.nan
+        )
+        span = float(np.ptp(jd)) if jd.size > 1 else np.nan
+        aliases = period_alias_matches(
+            best_period,
+            alias_periods=LS_ALIAS_PERIODS,
+            alias_tolerance=alias_tolerance,
+            time_span_days=span,
+        ) if exclude_alias_periods else []
+        is_alias = bool(aliases)
+        is_significant = bool(
+            np.isfinite(bootstrap_sig)
+            and bootstrap_sig < float(significance_level)
+            and not is_alias
+        )
+        return {
+            "ls_power": ls_power,
+            "ls_period_days": best_period,
+            "ls_bootstrap_sig": bootstrap_sig,
+            "ls_is_alias": is_alias,
+            "ls_alias_matches": aliases,
+            "ls_is_significant": is_significant,
+            "ls_bootstrap_attempted": int(bootstrap_powers.size),
+            "ls_bootstrap_successful": int(finite.size),
+            "ls_bootstrap_method": "observing_block_permutation",
+            "ls_status": "ok" if finite.size or bootstrap_powers.size == 0 else "bootstrap_failed",
+        }
+    except Exception:
+        return {**empty, "ls_status": "error"}
+
+
+def long_period_ls_search(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    *,
+    stage: str = "long",
+    baseline_days: float | None = None,
+    cadence_median_days: float | None = None,
+    n_bootstrap: int = 200,
+    samples_per_peak: int = 10,
+    block_days: float = 30.0,
+    significance_level: float = 0.01,
+    random_state: int | None = 0,
+    min_period_days: float | None = None,
+    max_period_days: float | None = None,
+) -> dict:
+    """Search for long-period signals with a baseline-adaptive frequency range.
+
+    This complements ``bootstrap_lomb_scargle`` which is bounded at
+    ``LS_MIN_FREQUENCY = 1/365.25``. Long-recurrence variables (e.g. AA-Tau-like
+    dippers with two dips separated by ~2000 d) live below that frequency and
+    need a search window scaled to the observed baseline.
+
+    Bootstrap FAP is estimated with block permutation using a 30-day block by
+    default so short-period correlations do not leak into long-period power.
+
+    Parameters
+    ----------
+    jd, mag, err : array-like
+        Julian dates, magnitudes, magnitude errors. Non-finite / non-positive
+        error entries are dropped.
+    stage : str
+        Bounds stage forwarded to ``adaptive_period_bounds`` when
+        ``min_period_days`` / ``max_period_days`` are not supplied. Defaults
+        to ``"long"`` (see ``malca.core.period_bounds``).
+    baseline_days, cadence_median_days :
+        If not provided they are derived from ``jd``.
+    n_bootstrap :
+        Number of block-permutation bootstrap iterations. 200 is a reasonable
+        default; use >=500 when you need tight FAPs.
+    samples_per_peak :
+        LombScargle oversampling factor. Higher = finer period resolution at
+        the cost of runtime; 10 is a safe default for long-P searches.
+    block_days :
+        Permutation block width in days. Larger blocks preserve long-timescale
+        correlated noise so we do not spuriously reject red-noise periods.
+    significance_level :
+        FAP threshold to set ``long_ls_is_significant``.
+    random_state :
+        Seed for reproducibility.
+
+    Returns
+    -------
+    dict with keys:
+        long_ls_period_days, long_ls_peak_power,
+        long_ls_fap_bootstrap, long_ls_baseline_cycles,
+        long_ls_is_significant, long_ls_min_period_days,
+        long_ls_max_period_days, long_ls_n_bootstrap_attempted,
+        long_ls_n_bootstrap_successful, long_ls_status,
+        long_ls_alias_matches, long_ls_is_alias.
+    """
+    from malca.core.period_bounds import adaptive_period_bounds
+
+    empty = {
+        "long_ls_period_days": np.nan,
+        "long_ls_peak_power": np.nan,
+        "long_ls_fap_bootstrap": np.nan,
+        "long_ls_baseline_cycles": np.nan,
+        "long_ls_is_significant": False,
+        "long_ls_min_period_days": np.nan,
+        "long_ls_max_period_days": np.nan,
+        "long_ls_n_bootstrap_attempted": int(max(n_bootstrap, 0)),
+        "long_ls_n_bootstrap_successful": 0,
+        "long_ls_status": "unavailable",
+        "long_ls_alias_matches": [],
+        "long_ls_is_alias": False,
+        "long_ls_top_periods_days": [],
+        "long_ls_top_powers": [],
+    }
+
+    if LombScargle is None:
+        return empty
+
+    jd = np.asarray(jd, dtype=float)
+    mag = np.asarray(mag, dtype=float)
+    err = np.asarray(err, dtype=float)
+    mask = np.isfinite(jd) & np.isfinite(mag)
+    if err.size == mag.size:
+        mask &= np.isfinite(err) & (err > 0)
+    if mask.sum() < 20:
+        return {**empty, "long_ls_status": "insufficient_points"}
+
+    jd = jd[mask]
+    mag = mag[mask]
+    err = err[mask] if err.size == mask.size else None
+
+    order = np.argsort(jd, kind="stable")
+    jd = jd[order]
+    mag = mag[order]
+    if err is not None:
+        err = err[order]
+
+    baseline = (
+        float(baseline_days)
+        if baseline_days is not None and np.isfinite(baseline_days) and float(baseline_days) > 0
+        else float(jd[-1] - jd[0])
+    )
+    if not np.isfinite(baseline) or baseline <= 0:
+        return {**empty, "long_ls_status": "zero_baseline"}
+
+    if cadence_median_days is None:
+        diffs = np.diff(jd)
+        diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+        cadence_median_days = float(np.median(diffs)) if diffs.size else None
+
+    bounds = adaptive_period_bounds(
+        baseline_days=baseline,
+        stage=stage,
+        cadence_median_days=cadence_median_days,
+        n_points=int(jd.size),
+        user_min_period=min_period_days,
+        user_max_period=max_period_days,
+    )
+    min_period, max_period = bounds.as_tuple()
+    if max_period <= min_period:
+        return {**empty, "long_ls_status": "invalid_bounds"}
+
+    min_freq = 1.0 / max_period
+    max_freq = 1.0 / min_period
+
+    try:
+        ls = LombScargle(jd, mag, err) if err is not None else LombScargle(jd, mag)
+        freq, power_spec = ls.autopower(
+            minimum_frequency=min_freq,
+            maximum_frequency=max_freq,
+            samples_per_peak=samples_per_peak,
+        )
+        if power_spec.size == 0 or not np.isfinite(power_spec).any():
+            return {**empty, "long_ls_status": "empty_periodogram"}
+
+        max_idx = int(np.nanargmax(power_spec))
+        peak_power = float(power_spec[max_idx])
+        best_freq = float(freq[max_idx])
+        best_period = float(1.0 / best_freq) if best_freq > 0 else np.nan
+        baseline_cycles = float(baseline / best_period) if best_period > 0 else np.nan
+
+        top_periods, top_powers = _select_long_ls_top_peaks(
+            freq=np.asarray(freq),
+            power=np.asarray(power_spec),
+            top_k=5,
+            min_period=min_period,
+            max_period=max_period,
+        )
+
+        rng = np.random.default_rng(random_state)
+        n_boot = int(max(n_bootstrap, 0))
+        boot_powers = np.full(n_boot, np.nan, dtype=float)
+        for idx in range(n_boot):
+            shuffled = _block_permute_values(jd, mag, rng, block_days=block_days)
+            try:
+                power_boot = LombScargle(jd, shuffled, err).power(freq) if err is not None else LombScargle(jd, shuffled).power(freq)
+                if power_boot.size and np.isfinite(power_boot).any():
+                    boot_powers[idx] = float(np.nanmax(power_boot))
+            except Exception:
+                continue
+
+        finite = boot_powers[np.isfinite(boot_powers)]
+        fap = (
+            float((np.count_nonzero(finite >= peak_power) + 1) / (finite.size + 1))
+            if finite.size
+            else np.nan
+        )
+        span = float(np.ptp(jd)) if jd.size > 1 else np.nan
+        aliases = period_alias_matches(
+            best_period,
+            alias_periods=LS_ALIAS_PERIODS,
+            alias_tolerance=LS_ALIAS_TOLERANCE,
+            time_span_days=span,
+        )
+        is_alias = bool(aliases)
+        is_significant = bool(
+            np.isfinite(fap)
+            and fap < float(significance_level)
+            and not is_alias
+        )
+        return {
+            "long_ls_period_days": best_period,
+            "long_ls_peak_power": peak_power,
+            "long_ls_fap_bootstrap": fap,
+            "long_ls_baseline_cycles": baseline_cycles,
+            "long_ls_is_significant": is_significant,
+            "long_ls_min_period_days": float(min_period),
+            "long_ls_max_period_days": float(max_period),
+            "long_ls_n_bootstrap_attempted": int(n_boot),
+            "long_ls_n_bootstrap_successful": int(finite.size),
+            "long_ls_status": "ok" if finite.size or n_boot == 0 else "bootstrap_failed",
+            "long_ls_alias_matches": aliases,
+            "long_ls_is_alias": is_alias,
+            "long_ls_top_periods_days": top_periods,
+            "long_ls_top_powers": top_powers,
+        }
+    except Exception as exc:
+        return {**empty, "long_ls_status": f"error:{type(exc).__name__}"}
+
+
+def _select_long_ls_top_peaks(
+    *,
+    freq: np.ndarray,
+    power: np.ndarray,
+    top_k: int,
+    min_period: float,
+    max_period: float,
+) -> tuple[list[float], list[float]]:
+    """Return the top-K well-separated periodogram peaks.
+
+    Peaks are enforced to be at least ~2 frequency bins apart so a single broad
+    peak does not consume the whole shortlist. The output is sorted by
+    descending power.
+    """
+    freq = np.asarray(freq, dtype=float)
+    power = np.asarray(power, dtype=float)
+    if freq.size == 0 or power.size == 0:
+        return [], []
+    finite = np.isfinite(power) & np.isfinite(freq) & (freq > 0)
+    if not finite.any():
+        return [], []
+
+    periods = np.where(finite, 1.0 / np.where(freq == 0, np.nan, freq), np.nan)
+    valid = finite & np.isfinite(periods) & (periods >= float(min_period)) & (periods <= float(max_period))
+    if not valid.any():
+        return [], []
+
+    order = np.argsort(-power)
+    order = order[valid[order]]
+
+    chosen_idx: list[int] = []
+    for idx in order:
+        i = int(idx)
+        if any(abs(i - j) < 2 for j in chosen_idx):
+            continue
+        chosen_idx.append(i)
+        if len(chosen_idx) >= int(top_k):
+            break
+
+    return (
+        [float(periods[i]) for i in chosen_idx],
+        [float(power[i]) for i in chosen_idx],
+    )
+
 
 def _bootstrap_min_metric(
     period_finder,
@@ -786,6 +1355,8 @@ def _bootstrap_min_metric(
     max_period: float,
     n_periods: int,
     period_finder_kwargs: dict | None = None,
+    random_state: int | None = 0,
+    block_days: float = 1.0,
 ) -> np.ndarray:
     """Return bootstrap distribution of minimum periodogram statistic."""
     n_bootstrap = int(max(n_bootstrap, 0))
@@ -794,10 +1365,10 @@ def _bootstrap_min_metric(
 
     period_finder_kwargs = dict(period_finder_kwargs or {})
     mins = np.full(n_bootstrap, np.nan, dtype=float)
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(random_state)
     for i in range(n_bootstrap):
         try:
-            shuffled_mag = rng.permutation(mag)
+            shuffled_mag = _block_permute_values(jd, mag, rng, block_days=block_days)
             _, _, metric = period_finder(
                 jd,
                 shuffled_mag,
@@ -830,6 +1401,8 @@ def compute_pdm_stats(
     refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
     refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
     refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
+    random_state: int | None = 0,
+    bootstrap_block_days: float = 1.0,
 ) -> dict:
     """
     Run Phase Dispersion Minimization and compute significance metrics.
@@ -848,6 +1421,10 @@ def compute_pdm_stats(
         "pdm_snr": np.nan,
         "pdm_bootstrap_sig": np.nan,
         "pdm_is_significant": False,
+        "pdm_bootstrap_attempted": int(max(n_bootstrap, 0)),
+        "pdm_bootstrap_successful": 0,
+        "pdm_bootstrap_method": "observing_block_permutation",
+        "pdm_status": "insufficient_points",
     }
 
     mask = np.isfinite(jd) & np.isfinite(mag)
@@ -884,6 +1461,7 @@ def compute_pdm_stats(
             "pdm_period": float(best_p),
             "pdm_min_theta": min_theta,
             "pdm_snr": pdm_snr,
+            "pdm_status": "ok",
         })
 
         if int(n_bootstrap) > 0 and np.isfinite(min_theta):
@@ -900,15 +1478,23 @@ def compute_pdm_stats(
                     "phase_width": pdm_phase_width,
                     "min_neighbors": pdm_min_neighbors,
                 },
+                random_state=random_state,
+                block_days=bootstrap_block_days,
             )
             finite = null_min_theta[np.isfinite(null_min_theta)]
+            out["pdm_bootstrap_successful"] = int(finite.size)
             if finite.size > 0:
-                bootstrap_sig = float(np.mean(finite <= min_theta))
+                bootstrap_sig = float(
+                    (np.count_nonzero(finite <= min_theta) + 1) / (finite.size + 1)
+                )
                 out["pdm_bootstrap_sig"] = bootstrap_sig
                 out["pdm_is_significant"] = bool(bootstrap_sig < float(significance_level))
+            else:
+                out["pdm_status"] = "bootstrap_failed"
 
         return out
     except Exception:
+        out["pdm_status"] = "error"
         return out
 
 def compute_ce_stats(
@@ -924,6 +1510,8 @@ def compute_ce_stats(
     refine_top_k: int = PERIODOGRAM_REFINE_TOP_K,
     refine_window_steps: float = PERIODOGRAM_REFINE_WINDOW_STEPS,
     refine_n_grid: int = PERIODOGRAM_REFINE_N_GRID,
+    random_state: int | None = 0,
+    bootstrap_block_days: float = 1.0,
 ) -> dict:
     """
     Run Conditional Entropy and compute significance metrics.
@@ -941,6 +1529,10 @@ def compute_ce_stats(
         "ce_snr": np.nan,
         "ce_bootstrap_sig": np.nan,
         "ce_is_significant": False,
+        "ce_bootstrap_attempted": int(max(n_bootstrap, 0)),
+        "ce_bootstrap_successful": 0,
+        "ce_bootstrap_method": "observing_block_permutation",
+        "ce_status": "insufficient_points",
     }
 
     mask = np.isfinite(jd) & np.isfinite(mag)
@@ -973,6 +1565,7 @@ def compute_ce_stats(
             "ce_period": float(best_p),
             "ce_min_entropy": min_entropy,
             "ce_snr": ce_snr,
+            "ce_status": "ok",
         })
 
         if int(n_bootstrap) > 0 and np.isfinite(min_entropy):
@@ -984,69 +1577,24 @@ def compute_ce_stats(
                 min_period=min_period,
                 max_period=max_period,
                 n_periods=n_periods,
+                random_state=random_state,
+                block_days=bootstrap_block_days,
             )
             finite = null_min_entropy[np.isfinite(null_min_entropy)]
+            out["ce_bootstrap_successful"] = int(finite.size)
             if finite.size > 0:
-                bootstrap_sig = float(np.mean(finite <= min_entropy))
+                bootstrap_sig = float(
+                    (np.count_nonzero(finite <= min_entropy) + 1) / (finite.size + 1)
+                )
                 out["ce_bootstrap_sig"] = bootstrap_sig
                 out["ce_is_significant"] = bool(bootstrap_sig < float(significance_level))
+            else:
+                out["ce_status"] = "bootstrap_failed"
 
         return out
     except Exception:
+        out["ce_status"] = "error"
         return out
-
-    try:
-        ls = LombScargle(jd, mag, err)
-        freq, power_spec = ls.autopower(minimum_frequency=min_frequency, maximum_frequency=max_frequency)
-
-        if power_spec.size == 0:
-            return {
-                "ls_power": np.nan,
-                "ls_period_days": np.nan,
-                "ls_bootstrap_sig": np.nan,
-                "ls_is_alias": False,
-                "ls_is_significant": False,
-            }
-
-        max_idx = int(np.argmax(power_spec))
-        ls_power = float(power_spec[max_idx])
-        best_period = float(1.0 / freq[max_idx]) if freq[max_idx] > 0 else np.nan
-
-        # Bootstrap significance
-        bootstrap_powers = np.empty(n_bootstrap)
-        rng = np.random.default_rng()
-        for i in range(n_bootstrap):
-            shuffled_mag = rng.permutation(mag)
-            ls_boot = LombScargle(jd, shuffled_mag, err)
-            _, power_boot = ls_boot.autopower(minimum_frequency=min_frequency, maximum_frequency=max_frequency)
-            bootstrap_powers[i] = np.max(power_boot) if power_boot.size > 0 else 0.0
-
-        bootstrap_sig = float(np.sum(bootstrap_powers >= ls_power) / n_bootstrap)
-
-        # Check for alias periods
-        is_alias = False
-        if exclude_alias_periods and np.isfinite(best_period):
-            is_alias = any(abs(best_period - ap) < alias_tolerance for ap in alias_periods)
-
-        # Significant if bootstrap sig < 1% and not an alias
-        is_significant = (bootstrap_sig < 0.01) and (not is_alias)
-
-        return {
-            "ls_power": ls_power,
-            "ls_period_days": best_period,
-            "ls_bootstrap_sig": bootstrap_sig,
-            "ls_is_alias": is_alias,
-            "ls_is_significant": is_significant,
-        }
-
-    except Exception:
-        return {
-            "ls_power": np.nan,
-            "ls_period_days": np.nan,
-            "ls_bootstrap_sig": np.nan,
-            "ls_is_alias": False,
-            "ls_is_significant": False,
-        }
 
 def linear_trend(x, y):
     # returns slope, intercept, r^2; robust to NaNs
@@ -1696,16 +2244,18 @@ def fit_fourier_decomposition(mag, time, period, err=None, max_harmonics=7):
     if phase_fit is None:
         return result
 
-    max_order = int(phase_fit["max_order"])
     best_fit = phase_fit["best_fit"]
-    full_fit = phase_fit["full_fit"]
-    coeffs = np.asarray(full_fit["coeffs"], float)
+    # Every returned coefficient and fit-quality value must describe the same
+    # BIC-selected model.  Previously ``harmonics_order`` described the best
+    # model while coefficients and chi-square came from the maximum order.
+    max_order = int(best_fit["order"])
+    coeffs = np.asarray(best_fit["coeffs"], float)
 
     result["harmonics_order"] = int(best_fit["order"])
     result["harmonics_period"] = float(period)
     result["harmonics_a0"] = float(coeffs[0])
-    result["harmonics_reduced_chi2"] = float(full_fit["reduced_chi2"]) if np.isfinite(full_fit["reduced_chi2"]) else np.nan
-    result["harmonics_mse"] = float(full_fit["mse"])
+    result["harmonics_reduced_chi2"] = float(best_fit["reduced_chi2"]) if np.isfinite(best_fit["reduced_chi2"]) else np.nan
+    result["harmonics_mse"] = float(best_fit["mse"])
 
     amplitudes: dict[int, float] = {}
     phases_abs: dict[int, float] = {}
@@ -1753,6 +2303,8 @@ def _empty_quasi_periodicity_result(
         "raw_scatter": float(raw_scatter) if np.isfinite(raw_scatter) else np.nan,
         "resid_scatter": np.nan,
         "scatter_ratio": np.nan,
+        "evaluation": Q_TEMPLATE_EVALUATION,
+        "n_folds": 0,
         "status": str(status),
     }
 
@@ -1878,8 +2430,44 @@ def phase_template_quasi_periodicity(
     smoothed = _circular_boxcar_smooth(filled, int(smooth_window_bins))
     centers = (np.arange(n_bins, dtype=float) + 0.5) / float(n_bins)
     xp = np.concatenate([centers - 1.0, centers, centers + 1.0])
-    fp = np.concatenate([smoothed, smoothed, smoothed])
-    model = np.interp(phase, xp, fp)
+    # Evaluate each point with a template that did not include its observing
+    # cycle. This prevents Q from looking artificially good because the same
+    # noisy point helped create the model used to score it.
+    cycle = np.floor((time - float(np.min(time))) / period_value).astype(np.int64)
+    unique_cycles = np.unique(cycle)
+    n_folds = min(5, int(unique_cycles.size))
+    model = np.full(mag.size, np.nan, dtype=float)
+    if n_folds >= 2:
+        fold_id = np.mod(cycle, n_folds)
+        for fold in range(n_folds):
+            train = fold_id != fold
+            test = ~train
+            if np.count_nonzero(train) < max(10, int(min_bin_points) * 4) or not np.any(test):
+                continue
+            train_template = np.full(n_bins, np.nan, dtype=float)
+            for idx in range(n_bins):
+                vals = mag[train & (bin_idx == idx)]
+                if vals.size >= int(min_bin_points):
+                    train_template[idx] = float(np.median(vals))
+            train_filled = _circular_fill_template(train_template)
+            if train_filled is None:
+                continue
+            train_smoothed = _circular_boxcar_smooth(train_filled, int(smooth_window_bins))
+            train_fp = np.concatenate([train_smoothed, train_smoothed, train_smoothed])
+            model[test] = np.interp(phase[test], xp, train_fp)
+    else:
+        # With fewer than two observed cycles there is no honest held-out
+        # estimate of repeatability.
+        result = _empty_quasi_periodicity_result(
+            "insufficient_cycles",
+            n_points=n_points,
+            n_phase_bins=n_bins,
+            smooth_window_bins=smooth_window_bins,
+            raw_scatter=raw_scatter,
+        )
+        result["populated_bins"] = populated_bins
+        result["bin_coverage"] = bin_coverage
+        return result
     valid_model = np.isfinite(model) & np.isfinite(mag)
     if int(valid_model.sum()) < 2:
         result = _empty_quasi_periodicity_result(
@@ -1914,6 +2502,8 @@ def phase_template_quasi_periodicity(
         "raw_scatter": raw_scatter,
         "resid_scatter": resid_scatter,
         "scatter_ratio": scatter_ratio,
+        "evaluation": Q_TEMPLATE_EVALUATION,
+        "n_folds": int(n_folds),
         "status": "ok" if np.isfinite(q_value) else "invalid_q",
     }
 
@@ -1964,10 +2554,11 @@ def psi_eta(mag, time, period):
 
 
 def fit_drw(jd, mag, mag_err):
-    """Fit a Damped Random Walk GP model and return (sigma, tau).
+    """Fit an Ornstein-Uhlenbeck (true DRW) GP and return (RMS, tau days).
 
-    Uses celerite2 SHOTerm with Q = 1/sqrt(2) (the DRW limit).
-    Returns (NaN, NaN) if fit fails or < 20 points.
+    The covariance is ``sigma**2 * exp(-|dt| / tau)``.  This uses a
+    celerite ``RealTerm``; the formerly used fixed-Q SHO kernel is not a DRW.
+    Returns ``(NaN, NaN)`` if the fit is not measurable or has <20 points.
     """
     jd = np.asarray(jd, float)
     mag = np.asarray(mag, float)
@@ -1976,9 +2567,10 @@ def fit_drw(jd, mag, mag_err):
     if mask.sum() < 20:
         return np.nan, np.nan
 
-    t = jd[mask]
-    mag_fit = mag[mask]
-    mag_err_fit = mag_err[mask]
+    order = np.argsort(jd[mask], kind="stable")
+    t = jd[mask][order]
+    mag_fit = mag[mask][order]
+    mag_err_fit = mag_err[mask][order]
 
     # Subtract mean for numerical stability
     mean_mag = np.mean(mag_fit)
@@ -1990,31 +2582,31 @@ def fit_drw(jd, mag, mag_err):
     if tau0 <= 0 or var <= 0:
         return np.nan, np.nan
 
-    Q = 1.0 / np.sqrt(2.0)
-    w0_init = 1.0 / tau0
-    S0_init = var * tau0
-
-
-
     def neg_log_like(params):
-        log_S0, log_w0 = params
-        S0 = np.exp(log_S0)
-        w0 = np.exp(log_w0)
-        kernel = _cterms.SHOTerm(S0=S0, w0=w0, Q=Q)
+        log_variance, log_inv_tau = params
+        variance = np.exp(log_variance)
+        inv_tau = np.exp(log_inv_tau)
+        kernel = _cterms.RealTerm(a=variance, c=inv_tau)
         gp = _GP(kernel)
         gp.compute(t, diag=mag_err_fit**2)
         return -gp.log_likelihood(mag_fit)
 
     try:
-        x0 = np.array([np.log(S0_init), np.log(w0_init)])
-        result = minimize(neg_log_like, x0, method="L-BFGS-B")
+        positive_dt = np.diff(t)
+        positive_dt = positive_dt[np.isfinite(positive_dt) & (positive_dt > 0)]
+        min_tau = max(float(np.median(positive_dt)) if positive_dt.size else 1e-3, 1e-3)
+        max_tau = max(float(t[-1] - t[0]) * 10.0, min_tau * 10.0)
+        x0 = np.array([np.log(var), np.log(1.0 / tau0)])
+        bounds = [
+            (np.log(max(var * 1e-6, 1e-12)), np.log(max(var * 1e6, 1e-6))),
+            (np.log(1.0 / max_tau), np.log(1.0 / min_tau)),
+        ]
+        result = minimize(neg_log_like, x0, method="L-BFGS-B", bounds=bounds)
         if not result.success:
             return np.nan, np.nan
-        log_S0, log_w0 = result.x
-        S0 = np.exp(log_S0)
-        w0 = np.exp(log_w0)
-        tau = 1.0 / w0
-        sigma = np.sqrt(S0 / tau)
+        log_variance, log_inv_tau = result.x
+        tau = 1.0 / np.exp(log_inv_tau)
+        sigma = np.sqrt(np.exp(log_variance))
         if not (np.isfinite(sigma) and np.isfinite(tau) and sigma > 0 and tau > 0):
             return np.nan, np.nan
         return float(sigma), float(tau)
@@ -2134,23 +2726,61 @@ def compute_stats(
     path,
     use_only_good=True,
     drop_dupes=True,
-    use_g=True,
+    use_g: bool | None = None,
     compute_ls=False,
     file_ext: str | None = None,
     feature_period_days: float | None = None,
     feature_period_source: str | None = None,
+    input_frame: pd.DataFrame | None = None,
 ):
+    """Compute light-curve statistics from aligned ASAS-SN photometry.
 
-    df_g_raw, df_v_raw = read_lc_csv(asassn_id, path)
-    if df_g_raw.empty and df_v_raw.empty:
-        df_g_raw, df_v_raw = read_skypatrol_lc_csv(asassn_id, path)
-    if df_g_raw.empty and df_v_raw.empty:
-        df_g_raw, df_v_raw = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+    By default (``use_g=None``), g and V observations are treated as one time
+    series after shifting the V-band median onto the g-band median.  Explicit
+    ``use_g=True`` and ``use_g=False`` retain the legacy g-only and V-only
+    modes, respectively, including fallback to the other band when the
+    requested band is empty.
+    """
+
+    if input_frame is not None:
+        loaded = input_frame.copy()
+        if "v_g_band" in loaded.columns:
+            band = pd.to_numeric(loaded["v_g_band"], errors="coerce")
+            df_g_raw = loaded.loc[band != 1].copy()
+            df_v_raw = loaded.loc[band == 1].copy()
+        else:
+            df_g_raw, df_v_raw = loaded, pd.DataFrame()
+    else:
+        df_g_raw, df_v_raw = _load_stats_lightcurve_frames(
+            asassn_id,
+            path,
+            file_ext=file_ext,
+        )
 
     df_g = _prepare_stats_lightcurve_frame(df_g_raw)
     df_v = _prepare_stats_lightcurve_frame(df_v_raw)
+    sokolovsky_g_input = df_g.copy()
+    sokolovsky_v_input = df_v.copy()
+    if not sokolovsky_g_input.empty:
+        sokolovsky_g_input["v_g_band"] = 0
+    if not sokolovsky_v_input.empty:
+        sokolovsky_v_input["v_g_band"] = 1
+    sokolovsky_input = pd.concat(
+        [frame for frame in (sokolovsky_g_input, sokolovsky_v_input) if not frame.empty],
+        ignore_index=True,
+    ) if (not sokolovsky_g_input.empty or not sokolovsky_v_input.empty) else pd.DataFrame(columns=_LC_COLUMNS)
+    _sokolovsky_frame, sokolovsky_summary = compute_sokolovsky_peak_to_peak_summary(
+        asassn_id,
+        path,
+        use_only_good=use_only_good,
+        drop_dupes=drop_dupes,
+        input_frame=sokolovsky_input,
+    )
 
-    if use_g:
+    if use_g is None:
+        frames = [frame for frame in (df_g, df_v) if not frame.empty]
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_LC_COLUMNS)
+    elif use_g:
         if df_g.empty and not df_v.empty:
             print(f"[warn] {asassn_id}: g-band empty; using V-band instead.")
             df = df_v.copy()
@@ -2168,9 +2798,49 @@ def compute_stats(
         df,
         use_only_good=use_only_good,
         drop_dupes=drop_dupes,
-        duplicate_subset=("JD",),
+        duplicate_subset=("JD", "v_g_band", "camera#", "camera_name", "field")
+        if use_g is None else ("JD", "camera#", "camera_name", "field"),
     )
+
+    band_values = pd.to_numeric(df.get("v_g_band"), errors="coerce")
+    g_points = int((band_values == 0).sum())
+    v_points = int((band_values == 1).sum())
+    v_minus_g_offset = np.nan
+    band_alignment = "none"
+    if use_g is None and g_points > 0 and v_points > 0:
+        df_aligned, v_minus_g_offset, band_alignment = _align_v_to_g_with_overlap_policy(df)
+        if np.isfinite(v_minus_g_offset):
+            df = df_aligned
+        else:
+            # Combined scalar statistics are unsafe without a measured color
+            # offset. Use the better sampled band while retaining both bands
+            # separately for camera/band-normalized Q below.
+            preferred_band = 0 if g_points >= v_points else 1
+            df = df.loc[band_values == preferred_band].copy()
+
+    if g_points > 0 and v_points > 0:
+        band_mode = "g+V" if np.isfinite(v_minus_g_offset) else "g+V_unaligned_single_band_stats"
+    elif g_points > 0:
+        band_mode = "g"
+    elif v_points > 0:
+        band_mode = "V"
+    else:
+        band_mode = "none"
+
+    df = df.sort_values("JD").reset_index(drop=True)
     kept_n = len(df)
+    if df.empty:
+        return df, OrderedDict([
+            ("compute_status", "insufficient_data"),
+            ("compute_error", "no usable photometry after quality filtering"),
+            ("photometry_band_mode", band_mode),
+            ("photometry_band_alignment", band_alignment),
+            ("photometry_g_points", g_points),
+            ("photometry_v_points", v_points),
+            ("photometry_v_minus_g_offset_mag", np.nan),
+            ("file_points_total", int(base_n)),
+            ("file_points_kept_after_filter", 0),
+        ])
     field_summary = compute_field_summary(df)
 
     q_frames = [frame for frame in (df_g, df_v) if not frame.empty]
@@ -2283,6 +2953,7 @@ def compute_stats(
     slope_d_per_day, intercept, r2 = linear_trend(df["t_days"].values, mag)
     slope_d_per_year = slope_d_per_day * 365.25 if np.isfinite(slope_d_per_day) else np.nan
     roms = float(roms_statistic(mag, merr))
+    sokolovsky_v = float(sokolovsky_summary["variability_sokolovsky_v"])
     stetson = paper_stetson_indices(df["JD"].values, mag, merr)
     flux_asymmetry_m = flux_asymmetry_metric(mag)
     string_length_stats = baseline_subtracted_string_length(df)
@@ -2422,6 +3093,13 @@ def compute_stats(
 
     # package summary
     summary = OrderedDict([
+        ("compute_status", "ok"),
+        ("compute_error", ""),
+        ("photometry_band_mode", band_mode),
+        ("photometry_band_alignment", band_alignment),
+        ("photometry_g_points", g_points),
+        ("photometry_v_points", v_points),
+        ("photometry_v_minus_g_offset_mag", float(v_minus_g_offset)),
         ("file_points_total", int(base_n)),
         ("file_points_kept_after_filter", int(kept_n)),
         ("jd_start", float(df["JD"].iloc[0])),
@@ -2455,6 +3133,7 @@ def compute_stats(
         ("variability_reduced_chi2_vs_constant", rchisq),
         ("variability_von_neumann_ratio", vnr),
         ("variability_roms", roms),
+        ("variability_sokolovsky_v", sokolovsky_v),
         ("variability_lag1_autocorr", ac1),
         ("variability_stetson_I", stetson["stetson_I"]),
         ("variability_stetson_J", stetson["stetson_J"]),
@@ -2474,6 +3153,8 @@ def compute_stats(
         ("variability_quasi_periodicity_raw_scatter", q_result["raw_scatter"]),
         ("variability_quasi_periodicity_resid_scatter", q_result["resid_scatter"]),
         ("variability_quasi_periodicity_scatter_ratio", q_result["scatter_ratio"]),
+        ("variability_quasi_periodicity_evaluation", q_result["evaluation"]),
+        ("variability_quasi_periodicity_n_folds", q_result["n_folds"]),
         ("variability_quasi_periodicity_status", q_result["status"]),
         ("variability_periodic_feature_period_days", best_period),
         ("variability_periodic_feature_period_source", periodic_feature_source),
@@ -2571,6 +3252,7 @@ def compute_stats(
         # stochastic model features
         ("gp_drw_sigma", _drw_sigma),
         ("gp_drw_tau", _drw_tau),
+        ("gp_drw_model", "ornstein_uhlenbeck_realterm_v1"),
         ("iar_phi", _iar_phi),
         ("mhps_high", _mhps["mhps_high"]),
         ("mhps_low", _mhps["mhps_low"]),
@@ -2858,11 +3540,11 @@ def compute_quasi_periodicity_summary(
     This is the lightweight refresh path for review products that already have
     current non-Q stats and only need the native-period Q semantics updated.
     """
-    df_g_raw, df_v_raw = read_lc_csv(asassn_id, path)
-    if df_g_raw.empty and df_v_raw.empty:
-        df_g_raw, df_v_raw = read_skypatrol_lc_csv(asassn_id, path)
-    if df_g_raw.empty and df_v_raw.empty:
-        df_g_raw, df_v_raw = read_lc_dat2(asassn_id, path, file_ext=file_ext)
+    df_g_raw, df_v_raw = _load_stats_lightcurve_frames(
+        asassn_id,
+        path,
+        file_ext=file_ext,
+    )
 
     df_g = _prepare_stats_lightcurve_frame(df_g_raw)
     df_v = _prepare_stats_lightcurve_frame(df_v_raw)
@@ -2906,6 +3588,8 @@ def compute_quasi_periodicity_summary(
             ("variability_quasi_periodicity_raw_scatter", q_result["raw_scatter"]),
             ("variability_quasi_periodicity_resid_scatter", q_result["resid_scatter"]),
             ("variability_quasi_periodicity_scatter_ratio", q_result["scatter_ratio"]),
+            ("variability_quasi_periodicity_evaluation", q_result["evaluation"]),
+            ("variability_quasi_periodicity_n_folds", q_result["n_folds"]),
             ("variability_quasi_periodicity_status", q_result["status"]),
             ("variability_periodic_feature_period_days", best_period),
             ("variability_periodic_feature_period_source", periodic_feature_source),
@@ -2917,22 +3601,32 @@ def _enrich_row_worker(args: tuple) -> dict:
     """Top-level picklable worker for parallel compute_stats enrichment.
 
     Args:
-        args: (row_dict, asassn_id, dir_path, compute_ls[, file_ext])
+        args: (row_dict, asassn_id, path, compute_ls[, file_ext]).  When the
+            row contains ``lc_path``, that exact path is authoritative and the
+            positional ID/path values are retained only for legacy callers.
 
     Returns:
         Row dict with flattened stats_* columns merged in, or the original
         row dict unchanged if compute_stats raises.
     """
     if len(args) >= 5:
-        row_dict, asassn_id, dir_path, compute_ls, file_ext = args[:5]
+        row_dict, asassn_id, stats_path, compute_ls, file_ext = args[:5]
     else:
-        row_dict, asassn_id, dir_path, compute_ls = args
+        row_dict, asassn_id, stats_path, compute_ls = args
         file_ext = None
     try:
+        raw_lc_path = row_dict.get("lc_path")
+        if raw_lc_path is not None and raw_lc_path is not pd.NA:
+            lc_path_text = str(raw_lc_path).strip()
+            if lc_path_text.lower() not in {"", "nan", "none", "null", "<na>"}:
+                exact_lc_path = Path(lc_path_text).expanduser()
+                asassn_id = exact_lc_path.stem
+                stats_path = str(exact_lc_path)
+                file_ext = exact_lc_path.suffix.lstrip(".") or file_ext
         feature_period_days, feature_period_source = _period_feature_from_row(row_dict)
         _, stats_dict = compute_stats(
             asassn_id,
-            dir_path,
+            stats_path,
             use_only_good=True,
             compute_ls=compute_ls,
             file_ext=file_ext,
@@ -2941,6 +3635,9 @@ def _enrich_row_worker(args: tuple) -> dict:
         )
         merged = dict(row_dict)
         for k, v in stats_dict.items():
+            if k in {"compute_status", "compute_error"}:
+                merged[f"stats_{k}"] = v
+                continue
             if isinstance(v, dict):
                 for sub_k, sub_v in v.items():
                     col = f"stats_{k}_{sub_k}"
@@ -2960,8 +3657,11 @@ def _enrich_row_worker(args: tuple) -> dict:
         if not layered.empty:
             merged.update(layered.iloc[0].to_dict())
         return merged
-    except Exception:
-        return row_dict
+    except Exception as exc:
+        failed = dict(row_dict)
+        failed["stats_compute_status"] = "error"
+        failed["stats_compute_error"] = f"{type(exc).__name__}: {exc}"
+        return failed
 
 
 def main():
@@ -2973,13 +3673,23 @@ def main():
     ap.add_argument("--lomb-scargle", action="store_true", help="compute Lomb-Scargle periodogram summary stats")
     args = ap.parse_args()
 
-    df = load_dat(args.path, has_header=args.has_header)
+    input_path = Path(args.path).expanduser()
+    df = load_dat(input_path, has_header=args.has_header)
     df2, summary = compute_stats(
-        df,
+        input_path.stem,
+        input_path.parent,
         use_only_good=not args.include_all,
         drop_dupes=not args.keep_dupes,
         compute_ls=args.lomb_scargle,
+        file_ext=input_path.suffix.lstrip(".") or None,
+        input_frame=df,
     )
+    if summary.get("compute_status") != "ok":
+        print(
+            f"Statistics unavailable: {summary.get('compute_status', 'error')} - "
+            f"{summary.get('compute_error', '')}"
+        )
+        return
     print_summary(summary)
 
 if __name__ == "__main__":

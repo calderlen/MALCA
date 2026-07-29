@@ -154,10 +154,39 @@ VSX_MODE = "tag"
 CAMERA_MEDIAN_TOLERANCE = 0.2
 STATS_CHUNK_SIZE = 100000
 
-# Pre-events periodicity gate
+# Pre-events periodicity gate. Kept at the classic short-period bounds: the
+# pre-gate is a fast CE filter, and long-period discovery lives in its own
+# LS-based stage (see LONG_PERIOD_* below).
 PRE_PERIODICITY_MIN_PERIOD = 0.2
 PRE_PERIODICITY_MAX_PERIOD = 100.0
 PRE_PERIODICITY_N_PERIODS = 5000
+
+# Baseline-adaptive bounds (see malca/core/period_bounds.py). For most stages
+# the maximum period searched is ``PERIOD_BOUNDS_MAX_BASELINE_FRACTION * baseline``
+# so the periodogram sees at least ~2 cycles of any candidate signal. Long-period
+# discovery relaxes to LONG_PERIOD_BASELINE_FRACTION (~0.55) to catch signals
+# with only ~1.8 cycles observed.
+#
+# Set ADAPTIVE_BOUNDS_ENABLED=False (and LONG_PERIOD_ENABLED=False) for
+# byte-identical regression against the pre-adaptive short-period pipeline.
+ADAPTIVE_BOUNDS_ENABLED = True
+LONG_PERIOD_ENABLED = True
+PERIOD_BOUNDS_MAX_BASELINE_FRACTION = 0.5
+PERIOD_BOUNDS_MIN_CADENCE_MULTIPLIER = 2.0
+LONG_PERIOD_MIN_DAYS = 10.0
+LONG_PERIOD_BASELINE_FRACTION = 0.6
+LONG_PERIOD_ABSOLUTE_CAP_DAYS = 5000.0
+REVIEW_PERIOD_MIN_DAYS = 0.1
+REVIEW_PERIOD_MAX_ABSOLUTE_CAP_DAYS = 5000.0
+# Historical post-filter PDM/CE call-site defaults (used when adaptive is off).
+POST_FILTER_LEGACY_MIN_PERIOD = 1.0
+POST_FILTER_LEGACY_MAX_PERIOD = 100.0
+# Event-based period confidence gates (see malca/stv/event_period.py).
+EVENT_PERIOD_MIN_EVENTS_HIGH = 3
+EVENT_PERIOD_REL_STD_HIGH = 0.15
+EVENT_PERIOD_REFINE_FRACTION = 0.2
+# Review auto-period: prefer long_ls seed when stored short period is below this.
+REVIEW_LONG_LS_SEED_MAX_STORED_DAYS = 30.0
 PRE_PERIODICITY_CE_SNR_THRESHOLD = 10.0
 PRE_PERIODICITY_MIN_POINTS = 50
 PRE_PERIODICITY_SCATTER_RATIO_MAX = 0.8
@@ -417,9 +446,11 @@ LTV_BINNED_SF_LAG_BINS_DAYS = (
     (1800.0, float("inf")),
 )
 
-# LTV Lomb-Scargle
+# LTV Lomb-Scargle. Max period is baseline-adaptive at call sites via
+# ``adaptive_period_bounds(stage="long")``; the absolute cap below is the
+# hard ceiling for enrichment LS.
 LTV_LS_MIN_PERIOD_DAYS = 10.0
-LTV_LS_MAX_PERIOD_DAYS = 1000.0
+LTV_LS_MAX_PERIOD_DAYS = 5000.0
 LTV_LS_FAP_THRESHOLD = 0.1
 LTV_LS_SAMPLES_PER_PEAK = 5
 
