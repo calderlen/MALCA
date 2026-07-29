@@ -44,6 +44,7 @@ BEST_FIELDS = [
     "dip_inter_event_spacing_std",
     "dip_amplitude_consistency",
     "dip_duration_consistency",
+    "prob_dipper_like",
     "dipper_score",
     "stats_photometry_robust_sigma_mag",
     "stats_amplitude",
@@ -70,6 +71,32 @@ DEFAULT_MAIN_X = "period_n_sources"
 DEFAULT_MAIN_Y = "dip_run_count"
 DEFAULT_COLOR = "periodic_evidence_bucket"
 DEFAULT_SYMBOL = "oneoff_like"
+
+EDA_REQUIRED_FIELDS = tuple(dict.fromkeys([
+    "candidate_id",
+    "candidate_key",
+    "source_path",
+    "asas_sn_id",
+    "gaia_id",
+    "status",
+    "workflow_status",
+    "event_class",
+    "review_event_class",
+    "classification_confidence",
+    "review_pass",
+    "period_asassn_var_class",
+    "period_ztf_periodic_class",
+    "ztf_var_type",
+    "alerce_lc_class",
+    "tns_type",
+    "catalog_match",
+    "period_consensus_agree",
+    "periodicity_alias_flag",
+    "lsp_is_significant",
+    "lsp_is_alias",
+    "dip_is_single_event",
+    *BEST_FIELDS,
+]))
 
 TRUE_SET = {"1", "true", "t", "yes", "y"}
 FALSE_SET = {"0", "false", "f", "no", "n"}
@@ -114,18 +141,81 @@ def infer_plot_dir_from_source(source_path: str | Path, explicit_plot_dir: str |
     return None
 
 
-def load_review_db(source_path: str | Path) -> pd.DataFrame:
+def _quote_sql_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def load_review_db(
+    source_path: str | Path,
+    *,
+    columns: list[str] | tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """Load review candidate data, optionally restricted to requested fields.
+
+    The EDA path supplies ``columns`` so it does not materialize all ~1,000
+    candidate columns.  Missing requested SQL fields are recovered from the
+    flattened payload JSON without expanding unrelated payload keys.
+    """
+
     path = Path(source_path).expanduser().resolve()
     with sqlite3.connect(path) as conn:
-        df = pd.read_sql_query("SELECT * FROM candidates", conn)
+        requested = list(dict.fromkeys(str(col) for col in (columns or []) if str(col)))
+        if not requested:
+            df = pd.read_sql_query("SELECT * FROM candidates", conn)
+        else:
+            candidate_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
+            }
+            review_columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+            }
+            selected_candidate_columns = [
+                col for col in requested if col in candidate_columns
+            ]
+            if "candidate_id" in candidate_columns and "candidate_id" not in selected_candidate_columns:
+                selected_candidate_columns.insert(0, "candidate_id")
+            payload_fields = [
+                col for col in requested
+                if col not in candidate_columns
+                and col not in review_columns
+                and col != "payload_json"
+            ]
+            select_columns = list(selected_candidate_columns)
+            if payload_fields and "payload_json" in candidate_columns:
+                select_columns.append("payload_json")
+            if not select_columns:
+                select_columns = ["candidate_id"]
+            select_sql = ", ".join(_quote_sql_identifier(col) for col in select_columns)
+            df = pd.read_sql_query(f"SELECT {select_sql} FROM candidates", conn)
+            if payload_fields and "payload_json" in df.columns:
+                payload_rows = []
+                for raw in df["payload_json"].tolist():
+                    payload = _loads_payload(raw)
+                    payload_rows.append({key: payload.get(key) for key in payload_fields})
+                payload_df = pd.DataFrame(payload_rows, index=df.index)
+                df = pd.concat([df.drop(columns=["payload_json"]), payload_df], axis=1)
         try:
-            reviews = pd.read_sql_query(
-                "SELECT * FROM reviews",
-                conn,
-            )
+            if not requested:
+                reviews = pd.read_sql_query("SELECT * FROM reviews", conn)
+            else:
+                selected_review_columns = [
+                    col for col in requested
+                    if col in review_columns and col != "candidate_id"
+                ]
+                if "candidate_id" in review_columns:
+                    selected_review_columns.insert(0, "candidate_id")
+                if selected_review_columns:
+                    review_sql = ", ".join(
+                        _quote_sql_identifier(col) for col in selected_review_columns
+                    )
+                    reviews = pd.read_sql_query(f"SELECT {review_sql} FROM reviews", conn)
+                else:
+                    reviews = pd.DataFrame()
         except Exception:
             reviews = pd.DataFrame()
-    if "payload_json" in df.columns:
+    if columns is None and "payload_json" in df.columns:
         payload_df = pd.json_normalize(df["payload_json"].map(_loads_payload))
         payload_df = payload_df.loc[:, ~payload_df.columns.duplicated()].reindex(df.index)
         base = df.drop(columns=["payload_json"])
@@ -154,19 +244,25 @@ def load_candidate_source(source_path: str | Path, source_kind: str | None = Non
     raise ValueError(f"Unsupported source kind: {kind}")
 
 
-def bool_series(frame: pd.DataFrame, col: str, default: bool = False) -> pd.Series:
+def bool_series(frame: pd.DataFrame, col: str, default: bool | None = None) -> pd.Series:
+    """Parse a stored boolean without turning missing/malformed data into False."""
     if col not in frame.columns:
-        return pd.Series(default, index=frame.index, dtype="bool")
+        return pd.Series(default, index=frame.index, dtype="boolean")
     s = frame[col]
     if pd.api.types.is_bool_dtype(s):
-        return s.fillna(default)
+        out = s.astype("boolean")
+        return out if default is None else out.fillna(default)
     if pd.api.types.is_numeric_dtype(s):
-        return s.fillna(0).astype(float) != 0
-    text = s.astype(str).str.strip().str.lower()
-    out = pd.Series(default, index=frame.index, dtype="bool")
+        numeric = pd.to_numeric(s, errors="coerce")
+        out = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+        out.loc[numeric.eq(1)] = True
+        out.loc[numeric.eq(0)] = False
+        return out if default is None else out.fillna(default)
+    text = s.astype("string").str.strip().str.lower()
+    out = pd.Series(pd.NA, index=frame.index, dtype="boolean")
     out.loc[text.isin(TRUE_SET)] = True
     out.loc[text.isin(FALSE_SET)] = False
-    return out
+    return out if default is None else out.fillna(default)
 
 
 def numeric_series(frame: pd.DataFrame, col: str) -> pd.Series:
@@ -179,6 +275,19 @@ def text_series(frame: pd.DataFrame, col: str) -> pd.Series:
     if col not in frame.columns:
         return pd.Series("", index=frame.index, dtype="object")
     return frame[col].fillna("").astype(str)
+
+
+def numeric_predicate(frame: pd.DataFrame, col: str, op: str, threshold: float) -> pd.Series:
+    values = numeric_series(frame, col)
+    result = pd.Series(pd.NA, index=frame.index, dtype="boolean")
+    valid = values.notna() & np.isfinite(values)
+    if op == "ge":
+        result.loc[valid] = values.loc[valid].ge(threshold)
+    elif op == "le":
+        result.loc[valid] = values.loc[valid].le(threshold)
+    else:
+        raise ValueError(f"Unsupported comparison: {op}")
+    return result
 
 
 def _coalesce_text_column(frame: pd.DataFrame, target: str, aliases: list[str]) -> None:
@@ -194,31 +303,15 @@ def _coalesce_text_column(frame: pd.DataFrame, target: str, aliases: list[str]) 
 
 
 def contains_periodic_label(series: pd.Series) -> pd.Series:
-    patterns = [
-        r"\bEA\b",
-        r"\bEB\b",
-        r"\bEW\b",
-        r"\bELL\b",
-        r"\bECL\b",
-        r"RR",
-        r"CEP",
-        r"DSCT",
-        r"ROT",
-        r"LPV",
-        r"MIRA",
-        r"ACV",
-        r"BY",
-        r"W UMA",
-        r"ALGOL",
-        r"EB\*",
-        r"CV",
-        r"PERIODIC",
-    ]
+    # Catalog class codes must be token matches. Unbounded fragments such as
+    # ``RR`` and ``ROT`` incorrectly classified IRREGULAR and PROTOSTAR.
+    pattern = (
+        r"(?:^|[^A-Z0-9])(?:EA|EB|EW|ELL|ECL|RR(?:AB|C|D|LYR)?|"
+        r"CEP(?:H|I|II)?|DSCT|ROT|LPV|MIRA|ACV|BY|W\s*UMA|ALGOL|CV|PERIODIC)"
+        r"(?:$|[^A-Z0-9])"
+    )
     upper = series.fillna("").astype(str).str.upper()
-    mask = pd.Series(False, index=series.index)
-    for pattern in patterns:
-        mask |= upper.str.contains(pattern, regex=True, na=False)
-    return mask
+    return upper.str.contains(pattern, regex=True, na=False)
 
 
 def normalize_review_label(series: pd.Series) -> pd.Series:
@@ -259,6 +352,7 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
         "dip_inter_event_spacing_std",
         "dip_amplitude_consistency",
         "dip_duration_consistency",
+        "prob_dipper_like",
         "dipper_score",
         "P_eb",
         "P_disk",
@@ -269,54 +363,76 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    periodic_text_match = (
-        contains_periodic_label(text_series(out, "vsx_class"))
-        | contains_periodic_label(text_series(out, "asassn_var_type"))
-        | contains_periodic_label(text_series(out, "ztf_var_type"))
-        | contains_periodic_label(text_series(out, "gaia_var_class"))
-        | contains_periodic_label(text_series(out, "simbad_otype"))
-        | contains_periodic_label(text_series(out, "alerce_lc_class"))
-        | contains_periodic_label(text_series(out, "tns_type"))
-    )
+    catalog_label_columns = [
+        "vsx_class",
+        "asassn_var_type",
+        "ztf_var_type",
+        "gaia_var_class",
+        "simbad_otype",
+        "alerce_lc_class",
+        "tns_type",
+    ]
+    catalog_label_present = pd.Series(False, index=out.index, dtype="bool")
+    periodic_text_match_raw = pd.Series(False, index=out.index, dtype="bool")
+    for catalog_col in catalog_label_columns:
+        if catalog_col not in out.columns:
+            continue
+        text = text_series(out, catalog_col).str.strip()
+        catalog_label_present |= text.ne("")
+        periodic_text_match_raw |= contains_periodic_label(text)
+    periodic_text_match = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    periodic_text_match.loc[catalog_label_present] = periodic_text_match_raw.loc[catalog_label_present]
 
-    out["known_periodic_catalog"] = bool_series(out, "vetting_likely_known") | periodic_text_match
+    out["known_periodic_catalog"] = periodic_text_match
     out["strong_catalog_period"] = (
         bool_series(out, "catalog_match")
         & bool_series(out, "period_consensus_agree")
-        & (numeric_series(out, "period_n_sources").fillna(0) >= 2)
+        & numeric_predicate(out, "period_n_sources", "ge", 2)
     )
     periodicity_significant = bool_series(out, "periodicity_is_significant") | bool_series(out, "lsp_is_significant")
+    alias_flag = bool_series(out, "periodicity_alias_flag")
+    alias_flag = alias_flag.fillna(bool_series(out, "lsp_is_alias"))
     out["strong_native_period"] = (
         periodicity_significant
-        & (~bool_series(out, "lsp_is_alias"))
-        & (numeric_series(out, "phase_quality_score").fillna(-np.inf) >= 0.5)
+        & (~alias_flag)
+        & numeric_predicate(out, "phase_quality_score", "ge", 0.5)
     )
     out["recurrent_dips"] = (
-        (numeric_series(out, "dip_run_count").fillna(0) >= 2)
-        | (numeric_series(out, "dipper_n_valid_dips").fillna(0) >= 3)
+        numeric_predicate(out, "dip_run_count", "ge", 2)
+        | numeric_predicate(out, "dipper_n_valid_dips", "ge", 3)
     )
-    out["oneoff_like"] = (
-        bool_series(out, "dip_is_single_event")
-        | (numeric_series(out, "dip_run_count").fillna(0) <= 1)
-    )
+    dip_run_count = numeric_series(out, "dip_run_count")
+    exactly_one_run = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    valid_run_count = dip_run_count.notna() & np.isfinite(dip_run_count)
+    exactly_one_run.loc[valid_run_count] = dip_run_count.loc[valid_run_count].eq(1)
+    explicit_single = bool_series(out, "dip_is_single_event")
+    oneoff_like = explicit_single.fillna(False) | exactly_one_run.fillna(False)
+    out["oneoff_like"] = oneoff_like.where(explicit_single.notna() | exactly_one_run.notna(), pd.NA)
 
-    out["periodic_evidence_score"] = (
-        out["known_periodic_catalog"].astype(int)
-        + out["strong_catalog_period"].astype(int)
-        + out["strong_native_period"].astype(int)
-        + out["recurrent_dips"].astype(int)
-    )
+    evidence_columns = [
+        "known_periodic_catalog",
+        "strong_catalog_period",
+        "strong_native_period",
+        "recurrent_dips",
+    ]
+    evidence = out[evidence_columns].astype("boolean")
+    evidence_complete = evidence.notna().all(axis=1)
+    score = evidence.astype("Int64").sum(axis=1, min_count=len(evidence_columns)).astype("Int64")
+    out["periodic_evidence_complete"] = evidence_complete
+    out["periodic_evidence_score"] = score.where(evidence_complete, pd.NA)
+    score_numeric = out["periodic_evidence_score"].astype("Float64").fillna(-1)
     out["periodic_evidence_bucket"] = pd.Categorical(
         np.select(
             [
-                out["periodic_evidence_score"] >= 3,
-                out["periodic_evidence_score"] == 2,
-                out["periodic_evidence_score"] == 1,
+                score_numeric >= 3,
+                score_numeric == 2,
+                score_numeric == 1,
+                score_numeric == 0,
             ],
-            ["3+ signals", "2 signals", "1 signal"],
-            default="0 signals",
+            ["3+ signals", "2 signals", "1 signal", "0 signals"],
+            default="unknown",
         ),
-        categories=["0 signals", "1 signal", "2 signals", "3+ signals"],
+        categories=["unknown", "0 signals", "1 signal", "2 signals", "3+ signals"],
         ordered=True,
     )
 
@@ -327,26 +443,31 @@ def add_eda_columns(frame: pd.DataFrame) -> pd.DataFrame:
             normalize_review_label(text_series(out, "review_event_class")),
         )
     out["review_label"] = review_label
-    out["is_reviewed"] = review_label.isin({
-        "dipper",
-        "yso",
-        "microlensing",
-        "flare",
-        "instrumental",
-        "unknown_interesting",
-        "other",
-    })
-    out["is_reviewed_dipper"] = review_label.eq("dipper")
-    out["is_reviewed_non_dipper"] = out["is_reviewed"] & (~out["is_reviewed_dipper"])
+    workflow = text_series(out, "workflow_status").str.strip().str.lower()
+    status = text_series(out, "status").str.strip().str.lower()
+    workflow = workflow.where(workflow.ne(""), status)
+    has_workflow = workflow.ne("")
+    out["is_reviewed"] = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    out.loc[has_workflow, "is_reviewed"] = workflow.loc[has_workflow].eq("reviewed")
+    out["review_status_known"] = has_workflow
+    out["is_reviewed_dipper"] = out["is_reviewed"] & review_label.eq("dipper").astype("boolean")
+    recognized_non_dipper = review_label.isin(
+        {"ltv", "microlensing", "flare", "instrumental", "other", "periodic"}
+    )
+    reviewed_non_dipper = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    reviewed_non_dipper.loc[out["is_reviewed"].eq(False)] = False
+    reviewed_non_dipper.loc[out["is_reviewed"].eq(True) & review_label.eq("dipper")] = False
+    reviewed_non_dipper.loc[out["is_reviewed"].eq(True) & recognized_non_dipper] = True
+    out["is_reviewed_non_dipper"] = reviewed_non_dipper
 
     out["proxy_periodic_contaminant"] = out["known_periodic_catalog"] | out["strong_catalog_period"]
     out["proxy_oneoff_dipper"] = (
         (~out["proxy_periodic_contaminant"])
         & out["oneoff_like"]
-        & (numeric_series(out, "dipper_score").fillna(0) >= 5)
+        & numeric_predicate(out, "dipper_score", "ge", 5)
     )
 
-    if out["is_reviewed_dipper"].any():
+    if out["is_reviewed_dipper"].fillna(False).any():
         out.attrs["default_target_col"] = "is_reviewed_dipper"
         out.attrs["default_reject_col"] = "is_reviewed_non_dipper"
     else:

@@ -5,6 +5,8 @@ import sys
 import types
 
 import numpy as np
+import pandas as pd
+import pytest
 
 if "iar.IARModel" not in sys.modules:
     fake_iar_pkg = types.ModuleType("iar")
@@ -29,10 +31,13 @@ from malca.config import (
 from malca.products.feature_layers import feature_mapping_get
 from malca.review.stats_merge import merge_stats_summary_into_payload
 from malca.core.stats import (
+    compute_sokolovsky_peak_to_peak_summary,
     inverse_von_neumann_ratio,
     paper_iqr,
     paper_stetson_indices,
     roms_statistic,
+    sokolovsky_peak_to_peak_variability,
+    three_sigma_clipped_mean_mag,
     weighted_std,
 )
 
@@ -91,6 +96,78 @@ def test_roms_matches_paper_definition() -> None:
     np.testing.assert_allclose(roms_statistic(mag, err), expected)
 
 
+def test_sokolovsky_peak_to_peak_variability_matches_definition() -> None:
+    mag = np.array([10.0, 11.0, 13.0, np.nan])
+    err = np.array([0.1, 0.3, 0.5, 0.2])
+    faint_limit = 13.0 - 0.5
+    bright_limit = 10.0 + 0.1
+    expected = (faint_limit - bright_limit) / (faint_limit + bright_limit)
+
+    np.testing.assert_allclose(sokolovsky_peak_to_peak_variability(mag, err), expected)
+
+
+def test_sokolovsky_peak_to_peak_variability_preserves_overlap_and_handles_missing() -> None:
+    overlap = sokolovsky_peak_to_peak_variability(
+        np.array([10.0, 10.05]), np.array([0.1, 0.1])
+    )
+
+    assert overlap < 0
+    assert np.isnan(sokolovsky_peak_to_peak_variability([10.0], [0.1]))
+
+
+def test_three_sigma_clipped_mean_mag_matches_stats_policy() -> None:
+    assert three_sigma_clipped_mean_mag([10.0, 10.1, 10.2, 30.0]) == pytest.approx(10.1)
+
+
+def test_sokolovsky_summary_uses_available_single_band_when_only_one_exists() -> None:
+    frame = pd.DataFrame(
+        {
+            "JD": [1.0, 2.0, 3.0, 4.0],
+            "mag": [10.0, 11.0, 12.0, 13.0],
+            "error": [0.1, 0.2, 0.3, 0.1],
+            "good_bad": [1, 1, 1, 0],
+            "camera#": [1, 1, 1, 1],
+            "v_g_band": [1, 1, 1, 1],
+            "saturated": [0, 0, 0, 0],
+            "camera_name": ["cam"] * 4,
+            "field": ["field"] * 4,
+        }
+    )
+
+    v_frame, v_summary = compute_sokolovsky_peak_to_peak_summary("source", ".", input_frame=frame)
+
+    assert len(v_frame) == 3
+    assert v_summary["sokolovsky_v_status"] == "ok"
+    assert v_summary["variability_sokolovsky_v"] == pytest.approx(1.6 / 21.8)
+    assert v_summary["sokolovsky_v_band"] == "V_only_no_g_reference"
+
+
+def test_combined_sokolovsky_summary_offsets_full_v_median_to_g_before_computing_v() -> None:
+    frame = pd.DataFrame(
+        {
+            "JD": [1.0, 2.0, 3.0, 4.0, 5.0, 1.1, 2.1, 3.1, 4.1, 5.1],
+            "mag": [10.0, 10.2, 10.4, 10.6, 10.8, 11.0, 11.2, 11.4, 11.6, 11.8],
+            "error": [0.1] * 10,
+            "good_bad": [1] * 10,
+            "camera#": [1] * 10,
+            "v_g_band": [0] * 5 + [1] * 5,
+            "saturated": [0] * 10,
+            "camera_name": ["cam"] * 10,
+            "field": ["field"] * 10,
+        }
+    )
+
+    combined_frame, summary = compute_sokolovsky_peak_to_peak_summary(
+        "source", ".", input_frame=frame
+    )
+
+    assert len(combined_frame) == 10
+    assert summary["sokolovsky_v_band"] == "g+V_v_full_median_to_g_full_median"
+    assert summary["sokolovsky_v_status"] == "ok"
+    assert summary["variability_sokolovsky_v"] == pytest.approx(0.6 / 20.8)
+    assert summary["sokolovsky_v_v_minus_g_median_offset_mag"] == pytest.approx(1.0)
+
+
 def test_paper_stetson_indices_match_manual_single_band_formulae() -> None:
     time = np.array([0.0, 1.0, 2.0, 3.0])
     mag = np.array([10.0, 10.2, 10.1, 11.6])
@@ -129,6 +206,7 @@ def test_merge_stats_summary_maps_new_paper_stats() -> None:
             "photometry_weighted_std_mag": 0.21,
             "variability_von_neumann_ratio": 1.8,
             "variability_roms": 1.3,
+            "variability_sokolovsky_v": 0.024,
             "variability_stetson_L": 2.4,
             "variability_stetson_J_time": 1.7,
             "variability_stetson_L_time": 2.1,
@@ -138,6 +216,7 @@ def test_merge_stats_summary_maps_new_paper_stats() -> None:
     assert feature_mapping_get(payload, "stats_photometry_weighted_std_mag") == 0.21
     assert feature_mapping_get(payload, "stats_variability_von_neumann_ratio") == 1.8
     assert feature_mapping_get(payload, "stats_variability_roms") == 1.3
+    assert feature_mapping_get(payload, "stats_variability_sokolovsky_v") == 0.024
     assert feature_mapping_get(payload, "stats_variability_stetson_L") == 2.4
     assert feature_mapping_get(payload, "stats_variability_stetson_J_time") == 1.7
     assert feature_mapping_get(payload, "stats_variability_stetson_L_time") == 2.1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import time
@@ -12,10 +13,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.external_lc_manifest import index_external_lc_paths_from_manifest
+from malca.enrichment.atlas_forced_photometry import ATLAS_SUMMARY_COLUMNS
+from malca.external_lc_manifest import (
+    index_external_lc_paths_from_manifest,
+    upsert_external_lc_manifest_entry,
+)
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.products.feature_layers import feature_mapping_get, with_feature_columns
-from malca.review.store import db_connect, merge_candidate_results
+from malca.review.store import (
+    db_connect,
+    ensure_review_db_schema,
+    merge_candidate_results,
+)
 from malca.io.table_io import read_feature_table, write_feature_table
 
 try:
@@ -27,6 +36,7 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 EXTERNAL_LC_PATTERNS = (
     "atlas_lc_*.parquet",
     "ztf_lc_*.parquet",
+    "ztf_forced_lc_*.parquet",
     "gaia_epoch_lc_*.parquet",
     "tess_lc_*.parquet",
     "neowise_lc_*.parquet",
@@ -37,7 +47,12 @@ EXTERNAL_LC_PATTERNS = (
     "allwise_mep_lc_*.parquet",
     "vvvx_virac_lc_*.parquet",
     "ps1_lc_*.parquet",
+    "superwasp_lc_*.parquet",
+    "kelt_lc_*.parquet",
+    "nsvs_lc_*.parquet",
+    "asas3_lc_*.parquet",
     "crts_lc_*.parquet",
+    "dasch_lc_*.parquet",
 )
 
 EXTERNAL_LC_COLUMNS = (
@@ -46,17 +61,31 @@ EXTERNAL_LC_COLUMNS = (
     "atlas_n_det_orange",
     "atlas_cyan_range",
     "atlas_orange_range",
+    "atlas_preprocess_version",
+    "atlas_n_raw",
+    "atlas_n_good",
+    "atlas_n_rejected",
     "ztf_lc_n_det",
     "ztf_lc_g_range",
     "ztf_lc_r_range",
+    "ztf_forced_lc_n_epochs",
+    "ztf_forced_lc_n_good",
+    "ztf_forced_lc_n_zg",
+    "ztf_forced_lc_n_zr",
+    "ztf_forced_lc_n_zi",
     "gaia_epoch_lc_n_g",
     "gaia_epoch_lc_g_range",
     "tess_n_sectors",
     "tess_total_points",
     "tess_flux_range",
+    "tess_identity_status",
+    "tess_identity_sep_arcsec",
+    "tess_target_id",
     "neowise_n_epochs",
     "neowise_w1_range",
     "neowise_w2_range",
+    "neowise_identity_status",
+    "neowise_identity_sep_arcsec",
     "kepler_n_quarters",
     "kepler_total_points",
     "kepler_flux_range",
@@ -82,7 +111,24 @@ EXTERNAL_LC_COLUMNS = (
     "vvvx_virac_h_range",
     "vvvx_virac_ks_range",
     "ps1_lc_n_points",
+    "superwasp_lc_n_points",
+    "superwasp_lc_time_span_days",
+    "superwasp_lc_state",
+    "kelt_lc_n_points",
+    "kelt_lc_time_span_days",
+    "kelt_lc_state",
+    "nsvs_lc_n_points",
+    "nsvs_lc_time_span_days",
+    "nsvs_lc_state",
+    "asas3_lc_n_points",
+    "asas3_lc_time_span_days",
+    "asas3_lc_state",
     "crts_lc_n_points",
+    "crts_lc_time_span_days",
+    "crts_lc_state",
+    "dasch_lc_n_points",
+    "dasch_lc_time_span_days",
+    "dasch_lc_state",
 )
 
 EXTERNAL_LC_INPUT_COLUMNS = (
@@ -92,6 +138,12 @@ EXTERNAL_LC_INPUT_COLUMNS = (
     "dec_deg",
     "gaia_id",
     "source_id",
+    "pmra",
+    "pmdec",
+    "ref_epoch",
+    "tic_id",
+    "ticid",
+    "tess_id",
     "gaia_epoch_available",
     "gaia_epoch_n_obs",
     "gaia_epoch_g_range",
@@ -110,6 +162,34 @@ EXTERNAL_LC_INPUT_COLUMNS = (
     "failed_any",
 )
 
+ZTF_FORCED_SUMMARY_COLUMNS = (
+    "ztf_forced_lc_n_epochs",
+    "ztf_forced_lc_n_good",
+    "ztf_forced_lc_n_zg",
+    "ztf_forced_lc_n_zr",
+    "ztf_forced_lc_n_zi",
+)
+
+REVIEW_CLASS_BUCKETS = {
+    "dipper": "Dipper",
+    "ltv": "LTV",
+    "microlensing": "Microlensing",
+}
+
+
+def _atlas_batch_size(value: str) -> int:
+    size = int(value)
+    if not 1 <= size <= 100:
+        raise argparse.ArgumentTypeError("ATLAS batch size must be between 1 and 100")
+    return size
+
+
+def _ztf_forced_batch_size(value: str) -> int:
+    size = int(value)
+    if not 1 <= size <= 1500:
+        raise argparse.ArgumentTypeError("ZTF forced-photometry batch size must be between 1 and 1500")
+    return size
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -125,16 +205,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output Parquet path (default: <input>_external_lcs.parquet)",
     )
     parser.add_argument(
+        "--ztf-forced",
+        dest="run_ztf_forced",
+        action="store_true",
+        default=False,
+        help="Enable resumable IPAC ZTF forced photometry (default: disabled)",
+    )
+    parser.add_argument(
+        "--ztf-forced-only",
+        action="store_true",
+        help="Run only IPAC ZTF forced photometry; avoids ordinary catalog ZTF and other sources",
+    )
+    parser.add_argument("--ztf-forced-email", type=str, default=None, help="Registered ZFPS email (or MALCA_ZTF_FORCED_EMAIL)")
+    parser.add_argument("--ztf-forced-userpass", type=str, default=None, help="Personal ZFPS password (or MALCA_ZTF_FORCED_USERPASS)")
+    parser.add_argument("--ztf-forced-task-checkpoint", type=Path, default=None, help="ZTF forced-photometry request journal")
+    parser.add_argument("--ztf-forced-batch-size", type=_ztf_forced_batch_size, default=1500, help="Coordinates per ZFPS request, at most 1500")
+    parser.add_argument("--ztf-forced-jd-start", type=float, default=2458194.5, help="Earliest ZFPS epoch JD (default: survey start)")
+    parser.add_argument("--ztf-forced-jd-end", type=float, default=None, help="Latest ZFPS epoch JD (default: 2026-01-01)")
+    parser.add_argument("--ztf-forced-submit-only", action="store_true", help="Submit missing ZFPS batches without checking/downloading results")
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory for per-candidate LC parquet files (default: input parent)",
+        help=(
+            "Directory for per-candidate LC parquet files (default: input parent; "
+            "ATLAS-only review DB: <run>/results/external_lcs)"
+        ),
     )
     parser.add_argument(
         "--review-db",
         type=Path,
         default=None,
-        help="Optional review SQLite DB to merge enriched candidate fields into",
+        help=(
+            "Optional review SQLite DB to merge enriched candidate fields into "
+            "(ATLAS-only review DB input merges back automatically)"
+        ),
     )
     parser.add_argument(
         "--all-candidates",
@@ -175,6 +280,79 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="ATLAS forced-photometry token, or set MALCA_ATLAS_TOKEN/ATLAS_API_TOKEN",
     )
+    parser.add_argument(
+        "--atlas-only",
+        action="store_true",
+        help=(
+            "Run only the resumable ATLAS bulk fetcher; review-DB input defaults "
+            "to the reviewed/keep/nonduplicate Dipper, LTV, and Microlensing cohort"
+        ),
+    )
+    parser.add_argument(
+        "--review-classes",
+        nargs="+",
+        choices=tuple(REVIEW_CLASS_BUCKETS),
+        default=None,
+        help=(
+            "For review-DB input, select the reviewed/keep/nonduplicate publication "
+            "cohort in these classes"
+        ),
+    )
+    parser.add_argument(
+        "--legacy-surveys-only",
+        action="store_true",
+        help=(
+            "Run only SuperWASP, KELT, NSVS, ASAS-3, CRTS, and DASCH; "
+            "review-DB input defaults to the reviewed Dipper cohort"
+        ),
+    )
+    parser.add_argument(
+        "--atlas-task-checkpoint",
+        type=Path,
+        default=None,
+        help="Permanent per-candidate ATLAS task journal (default: <results>/external_lcs/atlas_forced_phot_tasks.parquet)",
+    )
+    parser.add_argument(
+        "--atlas-batch-size",
+        type=_atlas_batch_size,
+        default=100,
+        help="Coordinates per ATLAS list submission, at most 100 (default: 100)",
+    )
+    parser.add_argument(
+        "--atlas-poll-interval",
+        type=float,
+        default=60.0,
+        help="Seconds between ATLAS queue polls (default: 60)",
+    )
+    parser.add_argument(
+        "--atlas-mjd-min",
+        type=float,
+        default=57000.0,
+        help="Earliest ATLAS observation MJD (default: 57000)",
+    )
+    parser.add_argument("--atlas-mjd-max", type=float, default=None, help="Optional latest ATLAS observation MJD")
+    parser.add_argument(
+        "--atlas-image-type",
+        choices=("reduced", "difference"),
+        default="reduced",
+        help="ATLAS target/reduced or difference-image photometry (default: reduced)",
+    )
+    parser.add_argument(
+        "--atlas-max-wait",
+        type=float,
+        default=None,
+        help="Optional total wait limit in seconds; unfinished jobs remain resumable, never no-data",
+    )
+    parser.add_argument(
+        "--atlas-submit-only",
+        action="store_true",
+        help="Submit missing batches and exit; a later identical command polls saved task URLs",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve the cohort and print the ATLAS batch/output plan without network requests or writes",
+    )
     parser.add_argument("--no-ztf", action="store_true", help="Skip ZTF light curves")
     parser.add_argument("--no-gaia-epoch", action="store_true", help="Skip Gaia epoch light curves")
     parser.add_argument("--no-tess", action="store_true", help="Skip TESS light curves")
@@ -186,7 +364,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-allwise-mep", action="store_true", help="Skip AllWISE Multiepoch light curves")
     parser.add_argument("--no-vvvx-virac", action="store_true", help="Skip VVVX/VIRAC2 light curves")
     parser.add_argument("--no-ps1", action="store_true", help="Skip Pan-STARRS light curves")
+    parser.add_argument("--no-superwasp", action="store_true", help="Skip SuperWASP light curves")
+    parser.add_argument("--no-kelt", action="store_true", help="Skip KELT light curves")
+    parser.add_argument("--no-nsvs", action="store_true", help="Skip NSVS light curves")
+    parser.add_argument("--no-asas3", action="store_true", help="Skip ASAS-3 light curves")
     parser.add_argument("--no-crts", action="store_true", help="Skip CRTS light curves")
+    parser.add_argument("--no-dasch", action="store_true", help="Skip DASCH light curves")
     return parser
 
 
@@ -281,9 +464,27 @@ def _hydrate_review_db_input(df: pd.DataFrame, columns: tuple[str, ...]) -> pd.D
     return out
 
 
-def _read_input_candidates(input_path: Path) -> pd.DataFrame:
+def _read_input_candidates(
+    input_path: Path,
+    *,
+    review_classes: list[str] | None = None,
+) -> pd.DataFrame:
     if not _looks_like_review_db(input_path):
+        if review_classes:
+            raise ValueError("--review-classes requires a review SQLite DB input")
         return read_feature_table(input_path)
+    if review_classes:
+        from malca.review.paper_candidates import load_reviewed_cohort
+
+        buckets = [REVIEW_CLASS_BUCKETS[value] for value in review_classes]
+        cohort = load_reviewed_cohort(
+            input_path,
+            buckets=buckets,
+            only_reviewed=True,
+            publication_only=True,
+        )
+        cohort = cohort.sort_values("candidate_id", kind="stable").reset_index(drop=True)
+        return _hydrate_review_db_input(cohort, EXTERNAL_LC_INPUT_COLUMNS)
     with closing(db_connect(input_path)) as conn:
         df = pd.read_sql_query("SELECT * FROM candidates", conn)
     return _hydrate_review_db_input(df, EXTERNAL_LC_INPUT_COLUMNS)
@@ -315,8 +516,53 @@ _CACHE_ONLY_TOUCHED_ATTR = "_external_lc_cache_only_touched"
 
 
 def _source_run_flags(args: argparse.Namespace) -> dict[str, bool]:
+    if getattr(args, "legacy_surveys_only", False):
+        return {
+            "atlas": False,
+            "ztf_forced": False,
+            "ztf": False,
+            "gaia_epoch": False,
+            "tess": False,
+            "neowise": False,
+            "kepler": False,
+            "aavso": False,
+            "ogle": False,
+            "stripe82": False,
+            "allwise_mep": False,
+            "vvvx_virac": False,
+            "ps1": False,
+            "superwasp": not args.no_superwasp,
+            "kelt": not args.no_kelt,
+            "nsvs": not args.no_nsvs,
+            "asas3": not args.no_asas3,
+            "crts": not args.no_crts,
+            "dasch": not args.no_dasch,
+        }
+    if getattr(args, "atlas_only", False) or getattr(args, "ztf_forced_only", False):
+        return {
+            "atlas": bool(getattr(args, "atlas_only", False)),
+            "ztf_forced": bool(getattr(args, "ztf_forced_only", False)),
+            "ztf": False,
+            "gaia_epoch": False,
+            "tess": False,
+            "neowise": False,
+            "kepler": False,
+            "aavso": False,
+            "ogle": False,
+            "stripe82": False,
+            "allwise_mep": False,
+            "vvvx_virac": False,
+            "ps1": False,
+            "superwasp": False,
+            "kelt": False,
+            "nsvs": False,
+            "asas3": False,
+            "crts": False,
+            "dasch": False,
+        }
     return {
         "atlas": bool(args.run_atlas),
+        "ztf_forced": bool(getattr(args, "run_ztf_forced", False)),
         "ztf": not args.no_ztf,
         "gaia_epoch": not args.no_gaia_epoch,
         "tess": not args.no_tess,
@@ -328,7 +574,12 @@ def _source_run_flags(args: argparse.Namespace) -> dict[str, bool]:
         "allwise_mep": not args.no_allwise_mep,
         "vvvx_virac": not args.no_vvvx_virac,
         "ps1": not args.no_ps1,
+        "superwasp": not args.no_superwasp,
+        "kelt": not args.no_kelt,
+        "nsvs": not args.no_nsvs,
+        "asas3": not args.no_asas3,
         "crts": not args.no_crts,
+        "dasch": not args.no_dasch,
     }
 
 
@@ -339,7 +590,7 @@ def _cache_only_specs():
         "atlas": {
             "module": "ATLAS LCs",
             "prefix": "atlas_lc",
-            "summary_cols": ["atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange", "atlas_cyan_range", "atlas_orange_range"],
+            "summary_cols": list(ATLAS_SUMMARY_COLUMNS),
             "match_col": "atlas_has_phot",
             "summarize": vetting._summarize_atlas_lc,
         },
@@ -370,9 +621,12 @@ def _cache_only_specs():
         "tess": {
             "module": "TESS LCs",
             "prefix": "tess_lc",
-            "summary_cols": ["tess_n_sectors", "tess_total_points", "tess_flux_range"],
+            "summary_cols": [
+                "tess_n_sectors", "tess_total_points", "tess_flux_range",
+                "tess_identity_status", "tess_identity_sep_arcsec", "tess_target_id",
+            ],
             "match_col": "tess_n_sectors",
-            "summarize": lambda lc: vetting._summarize_flux_lc(lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"),
+            "summarize": vetting._summarize_tess_lc,
             "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
                 df,
                 idx,
@@ -383,7 +637,10 @@ def _cache_only_specs():
         "neowise": {
             "module": "NEOWISE LCs",
             "prefix": "neowise_lc",
-            "summary_cols": ["neowise_n_epochs", "neowise_w1_range", "neowise_w2_range"],
+            "summary_cols": [
+                "neowise_n_epochs", "neowise_w1_range", "neowise_w2_range",
+                "neowise_identity_status", "neowise_identity_sep_arcsec",
+            ],
             "match_col": "neowise_n_epochs",
             "summarize": vetting._summarize_neowise_lc,
         },
@@ -454,12 +711,103 @@ def _cache_only_specs():
                 "ps1_dr2",
             ),
         },
+        "superwasp": {
+            "module": "SuperWASP LCs",
+            "prefix": "superwasp_lc",
+            "summary_cols": [
+                "superwasp_lc_n_points",
+                "superwasp_lc_time_span_days",
+                "superwasp_lc_state",
+            ],
+            "match_col": "superwasp_lc_n_points",
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "superwasp_lc",
+                preferred_proc_type="raw",
+            ),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.legacy_survey_lcs.SUPERWASP_MATCH_RADIUS_ARCSEC,
+                "superwasp_lc",
+            ),
+        },
+        "kelt": {
+            "module": "KELT LCs",
+            "prefix": "kelt_lc",
+            "summary_cols": [
+                "kelt_lc_n_points",
+                "kelt_lc_time_span_days",
+                "kelt_lc_state",
+            ],
+            "match_col": "kelt_lc_n_points",
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "kelt_lc",
+                preferred_proc_type="raw",
+            ),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.legacy_survey_lcs.KELT_MATCH_RADIUS_ARCSEC,
+                "kelt_lc",
+            ),
+        },
+        "nsvs": {
+            "module": "NSVS LCs",
+            "prefix": "nsvs_lc",
+            "summary_cols": [
+                "nsvs_lc_n_points",
+                "nsvs_lc_time_span_days",
+                "nsvs_lc_state",
+            ],
+            "match_col": "nsvs_lc_n_points",
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "nsvs_lc",
+            ),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.legacy_survey_lcs.NSVS_MATCH_RADIUS_ARCSEC,
+                "nsvs_lc",
+            ),
+        },
+        "asas3": {
+            "module": "ASAS-3 LCs",
+            "prefix": "asas3_lc",
+            "summary_cols": [
+                "asas3_lc_n_points",
+                "asas3_lc_time_span_days",
+                "asas3_lc_state",
+            ],
+            "match_col": "asas3_lc_n_points",
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "asas3_lc",
+                selected_only=True,
+            ),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.legacy_survey_lcs.ASAS3_MATCH_RADIUS_ARCSEC,
+                "asas3_lc",
+            ),
+        },
         "crts": {
             "module": "CRTS LCs",
             "prefix": "crts_lc",
-            "summary_cols": ["crts_lc_n_points"],
+            "summary_cols": [
+                "crts_lc_n_points",
+                "crts_lc_time_span_days",
+                "crts_lc_state",
+            ],
             "match_col": "crts_lc_n_points",
-            "summarize": lambda lc: vetting._summarize_count_lc(lc, "crts_lc_n_points"),
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "crts_lc",
+                time_col="mjd",
+            ),
             "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
                 df,
                 idx,
@@ -467,11 +815,35 @@ def _cache_only_specs():
                 "crts",
             ),
         },
+        "dasch": {
+            "module": "DASCH LCs",
+            "prefix": "dasch_lc",
+            "summary_cols": [
+                "dasch_lc_n_points",
+                "dasch_lc_time_span_days",
+                "dasch_lc_state",
+            ],
+            "match_col": "dasch_lc_n_points",
+            "summarize": lambda lc: vetting._summarize_legacy_mag_lc(
+                lc,
+                "dasch_lc",
+            ),
+            "cache_key": lambda df, idx: vetting._coord_lookup_cache_key(
+                df,
+                idx,
+                vetting.legacy_survey_lcs.DASCH_MATCH_RADIUS_ARCSEC,
+                "dasch_lc",
+            ),
+        },
     }
 
 
 def _cache_only_default_value(col: str) -> object:
-    return 0 if col.endswith(("_n_points", "_n_epochs", "_n_det", "_n_g", "_n_cyan", "_n_orange", "_n_sectors", "_n_quarters", "_total_points")) or col.endswith("_has_phot") else pd.NA
+    if col.endswith("_has_phot"):
+        return False
+    if col in {"atlas_n_raw", "atlas_n_good", "atlas_n_rejected"}:
+        return 0
+    return 0 if col.endswith(("_n_points", "_n_epochs", "_n_det", "_n_g", "_n_cyan", "_n_orange", "_n_sectors", "_n_quarters", "_total_points")) else pd.NA
 
 
 def _cache_only_status_summary(status_df: pd.DataFrame, module: str, candidate_id: str, summary_cols: list[str]) -> dict | None:
@@ -486,9 +858,26 @@ def _cache_only_status_summary(status_df: pd.DataFrame, module: str, candidate_i
     if "updated_unix" in rows.columns:
         rows = rows.sort_values("updated_unix", kind="stable")
     row = rows.iloc[-1]
-    if str(row.get("status", "")) not in {"fetched", "no_data", "error", "failed"}:
+    if str(row.get("status", "")) not in {"fetched", "no_data", "error", "failed", "identity_unverified"}:
         return None
-    return {col: row.get(col, _cache_only_default_value(col)) for col in summary_cols}
+    summary = {
+        col: row.get(col, _cache_only_default_value(col))
+        for col in summary_cols
+    }
+    status = str(row.get("status", ""))
+    for col in summary_cols:
+        if not col.endswith("_state"):
+            continue
+        value = summary.get(col)
+        if value is not None and not pd.isna(value) and str(value).strip():
+            continue
+        if status in {"error", "failed"}:
+            summary[col] = "fetch_failed"
+        elif status == "no_data":
+            summary[col] = "no_coverage"
+        elif status == "fetched":
+            summary[col] = "matched"
+    return summary
 
 
 def _read_external_lc_statuses(vetting, output_dir: Path) -> pd.DataFrame:
@@ -524,6 +913,28 @@ def _cache_only_lc_path(vetting, output_dir: Path, manifest_paths: dict[str, str
     if path_text:
         return Path(path_text)
     return vetting._external_lc_path(output_dir, spec["prefix"], df, idx)
+
+
+def _read_cache_only_lc(vetting, source_key: str, path: Path | None) -> pd.DataFrame | None:
+    if source_key != "atlas":
+        return vetting._read_external_lc_file(path)
+    if path is None or not path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(path)
+    except Exception:
+        return None
+    if not frame.empty:
+        return frame
+    # The new fetcher deliberately writes a valid zero-row parquet for a
+    # completed header-only ATLAS result.  Require its persisted mode
+    # provenance so an arbitrary legacy empty file cannot clear review data.
+    modes = frame.attrs.get("atlas_image_types")
+    single_mode = frame.attrs.get("atlas_image_type")
+    has_mode_provenance = (
+        isinstance(modes, (list, tuple, set)) and bool(modes)
+    ) or (isinstance(single_mode, str) and bool(single_mode.strip()))
+    return frame if has_mode_provenance else None
 
 
 def _cache_only_source_merge_frames(out: pd.DataFrame, run_flags: dict[str, bool]) -> list[tuple[str, pd.DataFrame]]:
@@ -575,7 +986,24 @@ def _cache_only_status_row(vetting, spec: dict, df: pd.DataFrame, idx: object, s
         cache_key = None
     if cache_key is None:
         return None
-    status = "fetched" if _cache_only_summary_is_positive(summary, spec["match_col"]) else "no_data"
+    identity_values = [
+        str(value)
+        for key, value in summary.items()
+        if key.endswith("_identity_status") and pd.notna(value)
+    ]
+    state_values = {
+        str(value)
+        for key, value in summary.items()
+        if key.endswith("_state") and pd.notna(value)
+    }
+    positive = _cache_only_summary_is_positive(summary, spec["match_col"])
+    identity_unverified = positive and any(value != "matched" for value in identity_values)
+    if "fetch_failed" in state_values:
+        status = "error"
+    elif identity_unverified:
+        status = "identity_unverified"
+    else:
+        status = "fetched" if positive else "no_data"
     if hasattr(vetting, "_external_lc_status_row"):
         return vetting._external_lc_status_row(
             df,
@@ -595,7 +1023,13 @@ def _cache_only_status_row(vetting, spec: dict, df: pd.DataFrame, idx: object, s
     }
 
 
-def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run_flags: dict[str, bool]) -> pd.DataFrame:
+def rebuild_external_lc_table_from_cache(
+    df: pd.DataFrame,
+    output_dir: Path,
+    run_flags: dict[str, bool],
+    *,
+    results_root: Path | None = None,
+) -> pd.DataFrame:
     from malca.enrichment import vetting
 
     out = df.copy()
@@ -603,6 +1037,7 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
     status_df = _read_external_lc_statuses(vetting, output_dir)
     messages: list[str] = []
     repaired_status_rows: list[dict] = []
+    repaired_manifest_rows = 0
     touched_by_source: dict[str, set[str]] = {}
     for key, enabled in run_flags.items():
         if not enabled or key not in specs:
@@ -610,7 +1045,10 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
         spec = specs[key]
         for col in spec["summary_cols"]:
             out[col] = _cache_only_default_value(col)
-        manifest_paths = index_external_lc_paths_from_manifest(str(Path(output_dir).expanduser()), spec["prefix"])
+        manifest_paths = index_external_lc_paths_from_manifest(
+            str(Path(results_root or output_dir).expanduser()),
+            spec["prefix"],
+        )
         touched_by_source[key] = set()
         found = 0
         positive = 0
@@ -619,8 +1057,22 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
             cand_id = vetting._candidate_cache_id(out, idx)
             path = _cache_only_lc_path(vetting, output_dir, manifest_paths, spec, out, idx)
             summary = None
-            lc_df = vetting._read_external_lc_file(path)
+            summary_from_status = False
+            lc_df = _read_cache_only_lc(vetting, key, path)
             if lc_df is not None:
+                if (
+                    path is not None
+                    and str(cand_id) not in manifest_paths
+                    and upsert_external_lc_manifest_entry(
+                        results_root or output_dir,
+                        candidate_id=str(cand_id),
+                        source=key,
+                        file_prefix=spec["prefix"],
+                        path=path,
+                    )
+                ):
+                    manifest_paths[str(cand_id)] = str(path)
+                    repaired_manifest_rows += 1
                 try:
                     summary = spec["summarize"](lc_df)
                 except Exception:
@@ -633,8 +1085,26 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
                 summary = _cache_only_status_summary(status_df, spec["module"], cand_id, spec["summary_cols"])
                 if summary is not None:
                     status_hits += 1
+                    summary_from_status = True
             if summary is None:
                 continue
+            # Historical status rows predate identity provenance.  Counts can
+            # be restored in cache-only mode, but they must be labelled as
+            # unverified rather than silently appearing equivalent to a newly
+            # matched TESS/NEOWISE light curve.
+            for identity_col in (
+                col for col in spec["summary_cols"] if col.endswith("_identity_status")
+            ):
+                value = summary.get(identity_col)
+                if value is None or pd.isna(value) or not str(value).strip():
+                    summary[identity_col] = "legacy_unverified"
+            if summary_from_status:
+                # Persist normalized fields inferred from historical terminal
+                # rows (for example, ``status=no_data`` -> ``no_coverage``),
+                # rather than exposing them only in the rebuilt table.
+                row = _cache_only_status_row(vetting, spec, out, idx, summary)
+                if row is not None:
+                    repaired_status_rows.append(row)
             touched_by_source[key].add(str(cand_id))
             found += 1
             for col in spec["summary_cols"]:
@@ -645,13 +1115,20 @@ def rebuild_external_lc_table_from_cache(df: pd.DataFrame, output_dir: Path, run
     if repaired_status_rows:
         vetting._write_external_lc_status(output_dir, repaired_status_rows)
         messages.append(f"External LC status: repaired {len(repaired_status_rows)} rows from existing LC files")
+    if repaired_manifest_rows:
+        messages.append(f"External LC manifest: indexed {repaired_manifest_rows} existing LC files")
     for msg in messages:
         print(msg)
     out.attrs[_CACHE_ONLY_TOUCHED_ATTR] = {key: sorted(values) for key, values in touched_by_source.items() if values}
     return out
 
 
-def _merge_into_review_db_with_retries(review_db: Path, merge_df: pd.DataFrame) -> int:
+def _merge_into_review_db_with_retries(
+    review_db: Path,
+    merge_df: pd.DataFrame,
+    *,
+    clear_columns: tuple[str, ...] = (),
+) -> int:
     lock_path = review_db.with_suffix(review_db.suffix + ".external_lcs_merge.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a", encoding="ascii") as lock_file:
@@ -659,11 +1136,16 @@ def _merge_into_review_db_with_retries(review_db: Path, merge_df: pd.DataFrame) 
             print(f"Waiting for review DB merge lock: {lock_path}")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            ensure_review_db_schema(review_db)
             attempts = 30
             for attempt in range(1, attempts + 1):
                 try:
                     with closing(db_connect(review_db)) as conn:
-                        return merge_candidate_results(conn, merge_df)
+                        return merge_candidate_results(
+                            conn,
+                            merge_df,
+                            clear_columns=clear_columns,
+                        )
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() or attempt >= attempts:
                         raise
@@ -691,13 +1173,20 @@ def _merge_source_frames_into_review_db_with_retries(review_db: Path, source_fra
             print(f"Waiting for review DB merge lock: {lock_path}")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
+            ensure_review_db_schema(review_db)
             attempts = 30
             for attempt in range(1, attempts + 1):
                 try:
                     updates: dict[str, int] = {}
                     with closing(db_connect(review_db)) as conn:
                         for source_key, frame in source_frames:
-                            updates[source_key] = merge_candidate_results(conn, frame)
+                            updates[source_key] = merge_candidate_results(
+                                conn,
+                                frame,
+                                clear_columns=(
+                                    ATLAS_SUMMARY_COLUMNS if source_key == "atlas" else ()
+                                ),
+                            )
                     return updates
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc).lower() or attempt >= attempts:
@@ -714,52 +1203,222 @@ def _merge_source_frames_into_review_db_with_retries(review_db: Path, source_fra
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _atlas_results_root(input_path: Path, output_dir: Path | None) -> Path:
+    if output_dir is not None:
+        directory = output_dir.expanduser()
+        return directory.parent if directory.name == "external_lcs" else directory
+    if _looks_like_review_db(input_path) and input_path.parent.name == "review":
+        return input_path.parent.parent / "results"
+    return input_path.parent
+
+
+def _atlas_terminal_merge_frame(out: pd.DataFrame) -> pd.DataFrame:
+    id_cols = [column for column in ("candidate_id", "asas_sn_id") if column in out.columns]
+    value_cols = [column for column in ATLAS_SUMMARY_COLUMNS if column in out.columns]
+    if not id_cols or "atlas_has_phot" not in value_cols:
+        return pd.DataFrame(columns=[*id_cols, *value_cols])
+    terminal = out["atlas_has_phot"].notna()
+    frame = out.loc[terminal, [*id_cols, *value_cols]].copy()
+    if frame.empty:
+        return frame
+    return frame.drop_duplicates(subset=id_cols[0], keep="last")
+
+
 def run(args: argparse.Namespace) -> Path:
     input_path = args.input.expanduser()
-    output_path = (args.output or _default_output_path(input_path)).expanduser()
-    output_dir = (args.output_dir or input_path.parent).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    atlas_only = bool(getattr(args, "atlas_only", False))
+    legacy_surveys_only = bool(getattr(args, "legacy_surveys_only", False))
+    # ZFPS is an asynchronous bulk service, so even its non-"only" spelling
+    # intentionally takes the dedicated forced-photometry path.
+    ztf_forced_only = bool(getattr(args, "ztf_forced_only", False) or getattr(args, "run_ztf_forced", False))
+    if sum((atlas_only, ztf_forced_only, legacy_surveys_only)) > 1:
+        raise ValueError(
+            "--atlas-only, --ztf-forced-only, and --legacy-surveys-only "
+            "are mutually exclusive"
+        )
+    forced_only = atlas_only or ztf_forced_only
+    review_classes = getattr(args, "review_classes", None)
+    all_candidates = bool(getattr(args, "all_candidates", False))
+    if (
+        atlas_only
+        and review_classes is None
+        and not all_candidates
+        and _looks_like_review_db(input_path)
+    ):
+        review_classes = list(REVIEW_CLASS_BUCKETS)
+    if (
+        ztf_forced_only
+        and review_classes is None
+        and not all_candidates
+        and _looks_like_review_db(input_path)
+    ):
+        review_classes = ["dipper"]
+    if (
+        legacy_surveys_only
+        and review_classes is None
+        and not all_candidates
+        and _looks_like_review_db(input_path)
+    ):
+        review_classes = ["dipper"]
+    if forced_only or legacy_surveys_only:
+        results_root = _atlas_results_root(input_path, args.output_dir)
+        output_dir = (args.output_dir or results_root / "external_lcs").expanduser()
+        if atlas_only:
+            default_name = "atlas_reviewed_events_external_lcs.parquet"
+        elif ztf_forced_only:
+            default_name = "ztf_forced_reviewed_dippers_external_lcs.parquet"
+        else:
+            default_name = "legacy_surveys_reviewed_dippers_external_lcs.parquet"
+        output_path = (
+            args.output or results_root / default_name
+        ).expanduser()
+    else:
+        atlas_review_db_defaults = (
+            bool(getattr(args, "run_atlas", False))
+            and args.output_dir is None
+            and _looks_like_review_db(input_path)
+        )
+        if atlas_review_db_defaults:
+            default_results_root = _atlas_results_root(input_path, None)
+            output_dir = default_results_root / "external_lcs"
+            output_path = (
+                args.output or default_results_root / f"{input_path.stem}_external_lcs.parquet"
+            ).expanduser()
+        else:
+            output_dir = (args.output_dir or input_path.parent).expanduser()
+            output_path = (args.output or _default_output_path(input_path)).expanduser()
+        results_root = _atlas_results_root(input_path, output_dir)
+
     review_db_path = args.review_db.expanduser() if args.review_db else None
+    if (forced_only or legacy_surveys_only) and review_db_path is None and _looks_like_review_db(input_path):
+        review_db_path = input_path
 
     checkpoint_path = None
-    if not args.no_checkpoint:
+    if not args.no_checkpoint and not forced_only:
         checkpoint_path = (args.checkpoint or _default_checkpoint_path(input_path, output_dir)).expanduser()
 
     df = with_feature_columns(
-        _read_input_candidates(input_path),
+        _read_input_candidates(
+            input_path,
+            review_classes=review_classes,
+        ),
         EXTERNAL_LC_INPUT_COLUMNS,
     )
     df = _ensure_candidate_id(df)
-    if not getattr(args, "all_candidates", False):
+    if not all_candidates and not review_classes:
         df = select_passing_candidates_if_present(df, printer=print)
     input_kind = "review DB" if _looks_like_review_db(input_path) else "candidate table"
     print(f"Loaded {len(df)} candidates from {input_kind}: {input_path}")
     print(f"Writing per-candidate LC files to {output_dir}")
 
     run_flags = _source_run_flags(args)
+    if getattr(args, "dry_run", False):
+        valid_coordinates = (
+            pd.to_numeric(df.get("ra"), errors="coerce").notna()
+            & pd.to_numeric(df.get("dec"), errors="coerce").notna()
+        )
+        if "review_bucket" in df.columns:
+            counts = df["review_bucket"].value_counts().reindex(
+                [REVIEW_CLASS_BUCKETS[key] for key in (review_classes or [])],
+                fill_value=0,
+            )
+            print("Review cohort: " + ", ".join(f"{name}={int(count)}" for name, count in counts.items()))
+        n_valid = int(valid_coordinates.sum())
+        if legacy_surveys_only:
+            print(
+                "Legacy survey dry run: "
+                f"{n_valid} coordinate(s) across SuperWASP, KELT, NSVS, "
+                "ASAS-3, CRTS, and DASCH"
+            )
+        else:
+            batch_size = int(args.ztf_forced_batch_size if ztf_forced_only else args.atlas_batch_size)
+            source = "ZTF forced photometry" if ztf_forced_only else "ATLAS"
+            print(f"{source} dry run: {n_valid} coordinate(s) in {math.ceil(n_valid / batch_size) if n_valid else 0} batch(es) of at most {batch_size}")
+            journal = args.ztf_forced_task_checkpoint or output_dir / "ztf_forced_phot_tasks.parquet" if ztf_forced_only else args.atlas_task_checkpoint or output_dir / "atlas_forced_phot_tasks.parquet"
+            print(f"Task journal: {journal}")
+        print(f"Manifest: {results_root / 'external_lc_manifest.parquet'}")
+        print(f"Summary table: {output_path}")
+        return output_path
+
+    output_dir.mkdir(parents=True, exist_ok=True)
     if args.cache_only:
         print("Cache-only mode: rebuilding external-LC fields from existing parquet/status files; no remote lookups")
-        out = rebuild_external_lc_table_from_cache(df, output_dir, run_flags)
+        out = rebuild_external_lc_table_from_cache(
+            df,
+            output_dir,
+            run_flags,
+            results_root=results_root,
+        )
+    elif atlas_only:
+        from malca.enrichment.atlas_forced_photometry import query_atlas_forced_phot
+
+        out = query_atlas_forced_phot(
+            df,
+            token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
+            output_dir=output_dir,
+            results_root=results_root,
+            refresh_cache=args.refresh_cache,
+            task_checkpoint=args.atlas_task_checkpoint,
+            batch_size=args.atlas_batch_size,
+            poll_interval=args.atlas_poll_interval,
+            mjd_min=args.atlas_mjd_min,
+            mjd_max=args.atlas_mjd_max,
+            image_type=args.atlas_image_type,
+            max_wait_seconds=args.atlas_max_wait,
+            submit_only=args.atlas_submit_only,
+            progress=print,
+        )
+    elif ztf_forced_only:
+        from malca.enrichment.ztf_forced_photometry import query_ztf_forced_phot
+
+        out = query_ztf_forced_phot(
+            df,
+            email=args.ztf_forced_email,
+            userpass=args.ztf_forced_userpass,
+            output_dir=output_dir,
+            results_root=results_root,
+            task_checkpoint=args.ztf_forced_task_checkpoint,
+            batch_size=args.ztf_forced_batch_size,
+            jd_start=args.ztf_forced_jd_start,
+            jd_end=args.ztf_forced_jd_end,
+            submit_only=args.ztf_forced_submit_only,
+            refresh_cache=args.refresh_cache,
+            progress=print,
+        )
     else:
         from malca.enrichment.vetting import fetch_external_lcs
 
         out = fetch_external_lcs(
             df,
             output_dir=output_dir,
-            run_atlas=args.run_atlas,
-            run_ztf=not args.no_ztf,
-            run_gaia_epoch=not args.no_gaia_epoch,
-            run_tess=not args.no_tess,
-            run_neowise=not args.no_neowise,
-            run_kepler=not args.no_kepler,
-            run_aavso=not args.no_aavso,
-            run_ogle=not args.no_ogle,
-            run_stripe82=not args.no_stripe82,
-            run_allwise_mep=not args.no_allwise_mep,
-            run_vvvx_virac=not args.no_vvvx_virac,
-            run_ps1=not args.no_ps1,
-            run_crts=not args.no_crts,
+            run_atlas=run_flags["atlas"],
+            run_ztf=run_flags["ztf"],
+            run_gaia_epoch=run_flags["gaia_epoch"],
+            run_tess=run_flags["tess"],
+            run_neowise=run_flags["neowise"],
+            run_kepler=run_flags["kepler"],
+            run_aavso=run_flags["aavso"],
+            run_ogle=run_flags["ogle"],
+            run_stripe82=run_flags["stripe82"],
+            run_allwise_mep=run_flags["allwise_mep"],
+            run_vvvx_virac=run_flags["vvvx_virac"],
+            run_ps1=run_flags["ps1"],
+            run_superwasp=run_flags["superwasp"],
+            run_kelt=run_flags["kelt"],
+            run_nsvs=run_flags["nsvs"],
+            run_asas3=run_flags["asas3"],
+            run_crts=run_flags["crts"],
+            run_dasch=run_flags["dasch"],
             atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN"),
+            atlas_results_root=results_root,
+            atlas_task_checkpoint=args.atlas_task_checkpoint,
+            atlas_batch_size=args.atlas_batch_size,
+            atlas_poll_interval=args.atlas_poll_interval,
+            atlas_mjd_min=args.atlas_mjd_min,
+            atlas_mjd_max=args.atlas_mjd_max,
+            atlas_image_type=args.atlas_image_type,
+            atlas_max_wait_seconds=args.atlas_max_wait,
+            atlas_submit_only=args.atlas_submit_only,
             workers=args.workers,
             checkpoint_path=checkpoint_path,
             refresh_cache=args.refresh_cache,
@@ -770,7 +1429,27 @@ def run(args: argparse.Namespace) -> Path:
 
     if review_db_path:
         review_db = review_db_path
-        if args.cache_only:
+        if atlas_only:
+            if args.cache_only:
+                source_frames = dict(_cache_only_source_merge_frames(out, run_flags))
+                merge_df = source_frames.get("atlas", pd.DataFrame())
+            else:
+                merge_df = _atlas_terminal_merge_frame(out)
+            updated = _merge_into_review_db_with_retries(
+                review_db,
+                merge_df,
+                clear_columns=ATLAS_SUMMARY_COLUMNS,
+            )
+            print(
+                f"Merged terminal ATLAS fields into {review_db} "
+                f"({updated} candidates updated; queued jobs left untouched)"
+            )
+        elif ztf_forced_only:
+            value_cols = [column for column in ZTF_FORCED_SUMMARY_COLUMNS if column in out.columns]
+            terminal = out.loc[out.get("ztf_forced_lc_n_epochs", pd.Series(index=out.index)).notna(), [*(["candidate_id"] if "candidate_id" in out else []), *value_cols]]
+            updated = _merge_into_review_db_with_retries(review_db, terminal, clear_columns=ZTF_FORCED_SUMMARY_COLUMNS)
+            print(f"Merged downloaded ZTF forced-photometry fields into {review_db} ({updated} candidates updated; pending jobs left untouched)")
+        elif args.cache_only:
             source_frames = _cache_only_source_merge_frames(out, run_flags)
             updates = _merge_source_frames_into_review_db_with_retries(review_db, source_frames)
             updated = sum(updates.values())
@@ -778,8 +1457,25 @@ def run(args: argparse.Namespace) -> Path:
             print(f"Merged cache-only external-LC fields into {review_db} ({updated} source-candidate updates across {source_count} sources)")
         else:
             merge_df = _merge_frame(out)
-            updated = _merge_into_review_db_with_retries(review_db, merge_df)
-            print(f"Merged external-LC fields into {review_db} ({updated} candidates updated)")
+            if run_flags.get("atlas"):
+                other_df = merge_df.drop(
+                    columns=[column for column in ATLAS_SUMMARY_COLUMNS if column in merge_df.columns]
+                )
+                other_updated = _merge_into_review_db_with_retries(review_db, other_df)
+                atlas_df = _atlas_terminal_merge_frame(out)
+                atlas_updated = _merge_into_review_db_with_retries(
+                    review_db,
+                    atlas_df,
+                    clear_columns=ATLAS_SUMMARY_COLUMNS,
+                )
+                print(
+                    f"Merged external-LC fields into {review_db} "
+                    f"({other_updated} general candidate updates; "
+                    f"{atlas_updated} terminal ATLAS updates)"
+                )
+            else:
+                updated = _merge_into_review_db_with_retries(review_db, merge_df)
+                print(f"Merged external-LC fields into {review_db} ({updated} candidates updated)")
 
     if checkpoint_path and checkpoint_path.exists():
         checkpoint_path.unlink()

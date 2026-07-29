@@ -17,6 +17,7 @@ from malca.review.store import (
     _CANDIDATE_COLUMNS,
     db_connect,
     get_distinct_values,
+    get_distinct_values_bulk,
     get_numeric_bounds,
     query_queue,
     save_review,
@@ -50,7 +51,7 @@ def test_sidebar_schema_includes_review_taxonomy_filters() -> None:
     review_cols = {col for _kind, col in groups["Review Taxonomy"]}
     assert {
         "workflow_status",
-        "interest_score",
+        "classification_confidence",
         "review_pass",
         "disposition",
         "morphology_primary",
@@ -66,6 +67,18 @@ def test_sidebar_schema_includes_review_taxonomy_filters() -> None:
         "known_object_source",
         "taxonomy_version",
     }.issubset(review_cols)
+
+
+def test_sidebar_schema_includes_hierarchical_rejection_score() -> None:
+    groups = {name: items for name, items in SIDEBAR_GROUPS}
+
+    assert ("num", "prob_hierarchical_artifact_or_nonvariable") in groups["Event Scoring"]
+    assert {
+        ("num", "prob_recurrent_given_dipper"),
+        ("num", "prob_single_given_dipper"),
+        ("num", "prob_recurrent_dipper_hierarchical"),
+        ("num", "prob_single_dipper_hierarchical"),
+    }.issubset(set(groups["Dip Recurrence"]))
 
 
 def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
@@ -84,14 +97,13 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
         save_review(
             conn,
             candidate_id="C1",
-            interest_score=4,
+            classification_confidence=4,
             review_pass=2,
             notes="one",
             workflow_status="reviewed",
             disposition="keep",
             morphology_primary="dimming_event",
             physical_primary="young_stellar_object_or_pms",
-            classification_confidence="secure",
             known_object_id="VSX J0001",
             known_object_source="VSX",
             reviewer="alice",
@@ -99,14 +111,13 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
         save_review(
             conn,
             candidate_id="C2",
-            interest_score=2,
+            classification_confidence=2,
             review_pass=1,
             notes="two",
             workflow_status="needs_followup",
             disposition="ambiguous",
             morphology_primary="brightening_event",
             physical_primary="microlensing",
-            classification_confidence="possible",
             reviewer="bob",
         )
 
@@ -120,12 +131,20 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
             "dimming_event",
         ]
         assert get_distinct_values(conn, "known_object_id") == ["VSX J0001"]
+        assert get_distinct_values_bulk(
+            conn,
+            ["workflow_status", "morphology_primary", "known_object_id"],
+        ) == {
+            "workflow_status": ["needs_followup", "reviewed", "unreviewed"],
+            "morphology_primary": ["brightening_event", "dimming_event"],
+            "known_object_id": ["VSX J0001"],
+        }
 
         bounds = get_numeric_bounds(
             conn,
-            columns=["interest_score", "review_pass", "taxonomy_version"],
+            columns=["classification_confidence", "review_pass", "taxonomy_version"],
         )
-        assert bounds["interest_score"] == {"min": 2.0, "max": 4.0}
+        assert bounds["classification_confidence"] == {"min": 2.0, "max": 4.0}
         assert bounds["review_pass"] == {"min": 1.0, "max": 2.0}
         assert bounds["taxonomy_version"] == {"min": 1.0, "max": 1.0}
 
@@ -139,6 +158,30 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
         )["candidate_id"].tolist()
         assert reviewed_ids == ["C1"]
 
+        and_ids = query_queue(
+            conn,
+            filters={
+                "select_filter_mode": "include",
+                "select_filter_logic": "and",
+                "exclude_morphology_primary": ["dimming_event"],
+                "exclude_physical_primary": ["microlensing"],
+            },
+            ids_only=True,
+        )["candidate_id"].tolist()
+        assert and_ids == []
+
+        or_ids = query_queue(
+            conn,
+            filters={
+                "select_filter_mode": "include",
+                "select_filter_logic": "or",
+                "exclude_morphology_primary": ["dimming_event"],
+                "exclude_physical_primary": ["microlensing"],
+            },
+            ids_only=True,
+        )["candidate_id"].tolist()
+        assert or_ids == ["C1", "C2"]
+
         unreviewed_ids = query_queue(
             conn,
             filters={"select_filter_mode": "include", "exclude_workflow_status": ["unreviewed"]},
@@ -151,10 +194,33 @@ def test_queue_filters_review_taxonomy_columns(tmp_path: Path) -> None:
         ].tolist()
         assert reviewer_ids == ["C2"]
 
-        score_ids = query_queue(conn, filters={"min_interest_score": 3}, ids_only=True)[
+        score_ids = query_queue(conn, filters={"min_classification_confidence": 3}, ids_only=True)[
             "candidate_id"
         ].tolist()
         assert score_ids == ["C1"]
+
+
+def test_queue_sorts_by_dipper_probability(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {"candidate_id": "low", "prob_dipper_like": 0.1},
+                    {"candidate_id": "high", "prob_dipper_like": 0.9},
+                    {"candidate_id": "mid", "prob_dipper_like": 0.5},
+                ]
+            ),
+        )
+
+        ids = query_queue(
+            conn,
+            filters={"sort_cols": ["prob_dipper_like"], "sort_desc": True},
+            ids_only=True,
+        )["candidate_id"].tolist()
+
+    assert ids == ["high", "mid", "low"]
 
 
 def test_microlens_false_filter_keeps_unset_rows(tmp_path: Path) -> None:

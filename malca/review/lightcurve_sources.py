@@ -9,6 +9,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from malca.catalogs.neowise_epochs import combine_neowise_epochs
+from malca.enrichment.atlas_forced_photometry import (
+    ATLAS_PREPROCESS_VERSION,
+    atlas_science_view,
+)
 from malca.config import (
     GAIA_TCB_EPOCH_JD,
     JD_OFFSET,
@@ -202,6 +207,48 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
         "mag_col": "mag",
         "err_col": "mag_err",
     },
+    "superwasp": {
+        "time_col": "hjd",
+        "jd_system": "jd",
+        "bands": {
+            "raw": {"color": "#4fa3ff", "marker": "circle-open", "label": "SuperWASP raw"},
+            "sysrem": {"color": "#ff9f43", "marker": "circle", "label": "SuperWASP SysRem"},
+        },
+        "filter_col": "proc_type",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "kelt": {
+        "time_col": "hjd",
+        "jd_system": "jd",
+        "bands": {
+            "raw": {"color": "#55c667", "marker": "triangle-up-open", "label": "KELT raw"},
+            "tfa": {"color": "#d45087", "marker": "triangle-up", "label": "KELT TFA"},
+        },
+        "filter_col": "proc_type",
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "nsvs": {
+        "time_col": "hjd",
+        "jd_system": "jd",
+        "bands": {
+            "NSVS": {"color": "#9e9e9e", "marker": "square-open", "label": "NSVS"},
+        },
+        "filter_col": None,
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
+    "asas3": {
+        "time_col": "hjd",
+        "jd_system": "jd",
+        "bands": {
+            "V": {"color": "#2ca02c", "marker": "diamond-open", "label": "ASAS-3 V"},
+        },
+        "filter_col": None,
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
     "crts": {
         "time_col": "mjd",
         "jd_system": "mjd",
@@ -212,12 +259,22 @@ EXTERNAL_LC_SPECS: dict[str, dict] = {
         "mag_col": "mag",
         "err_col": "mag_err",
     },
+    "dasch": {
+        "time_col": "hjd",
+        "jd_system": "jd",
+        "bands": {
+            "B": {"color": "#5b7db1", "marker": "cross-open", "label": "DASCH"},
+        },
+        "filter_col": None,
+        "mag_col": "mag",
+        "err_col": "mag_err",
+    },
 }
 
 EXTERNAL_SOURCE_ORDER = (
     "asassn", "atlas", "ztf", "gaia_epoch", "tess", "neowise", "neowise_w1", "neowise_w2", "neowise_color",
     "kepler", "aavso", "ogle", "stripe82", "allwise_mep", "vvvx_virac",
-    "ps1", "crts",
+    "ps1", "superwasp", "kelt", "nsvs", "asas3", "crts", "dasch",
 )
 EXTERNAL_SOURCE_LABELS = {
     "asassn": "ASAS-SN",
@@ -236,7 +293,12 @@ EXTERNAL_SOURCE_LABELS = {
     "allwise_mep": "AllWISE MEP",
     "vvvx_virac": "VVVX/VIRAC2",
     "ps1": "PS1",
+    "superwasp": "SuperWASP",
+    "kelt": "KELT",
+    "nsvs": "NSVS",
+    "asas3": "ASAS-3",
     "crts": "CRTS",
+    "dasch": "DASCH",
 }
 EXTERNAL_SOURCE_VALUES = set(EXTERNAL_SOURCE_ORDER)
 
@@ -336,7 +398,6 @@ def resolve_run_dir_from_plot_dir(plot_dir: str | Path | None) -> Path | None:
     return Path(cached) if cached else None
 
 
-@lru_cache(maxsize=64)
 def _resolve_run_dir_from_plot_dir_cached(plot_dir_text: str) -> str | None:
     if not plot_dir_text:
         return None
@@ -456,10 +517,9 @@ def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> p
     df = df_ext.copy()
 
     if source == "atlas":
+        df = atlas_science_view(df)
         df = _rename_first_present(df, "mjd", ("MJD", "mjd", "JD"))
         df = _rename_first_present(df, "filter", ("F", "filter"))
-        df = _rename_first_present(df, "mag", ("m", "mag"))
-        df = _rename_first_present(df, "mag_err", ("dm", "mag_err", "magerr"))
         _normalize_mjd_column(df)
         if "filter" in df.columns:
             df["filter"] = df["filter"].astype(str).str.strip().str.lower()
@@ -613,6 +673,32 @@ def normalize_external_lc_dataframe(source_name: str, df_ext: pd.DataFrame) -> p
         df = _rename_first_present(df, "mag", ("mag", "Mag"))
         df = _rename_first_present(df, "mag_err", ("mag_err", "magerr", "e_Mag"))
         _normalize_mjd_column(df)
+    elif source in {"superwasp", "kelt", "nsvs", "asas3", "dasch"}:
+        df = _rename_first_present(df, "hjd", ("hjd", "HJD", "JD", "date_jd", "time"))
+        df = _rename_first_present(df, "mag", ("mag", "Mag", "magnitude"))
+        df = _rename_first_present(df, "mag_err", ("mag_err", "magerr", "error"))
+        _coerce_numeric_column(df, "hjd")
+        if "proc_type" in df.columns:
+            df["proc_type"] = df["proc_type"].astype(str).str.strip().str.lower()
+        if source == "asas3":
+            # ASAS-3's five ERR/MER values describe average frame quality;
+            # they are not uncertainties on the individual source magnitude.
+            # Older MALCA caches stored them under ``mag_err``. Preserve those
+            # values as frame metadata while preventing viewers and cadence
+            # binning from treating them as inverse-variance weights.
+            if "frame_error" not in df.columns and "mag_err" in df.columns:
+                df["frame_error"] = pd.to_numeric(
+                    df["mag_err"], errors="coerce"
+                )
+            df["mag_err"] = np.nan
+            if "selected" in df.columns:
+                selected = df["selected"]
+                if selected.dtype != bool:
+                    selected = selected.astype(str).str.strip().str.lower().isin(
+                        {"1", "true", "yes", "y"}
+                    )
+                if bool(selected.any()):
+                    df = df[selected].copy()
 
     return df
 
@@ -622,7 +708,15 @@ def load_external_lc_frame(source_name: str, lc_path: Path) -> pd.DataFrame:
     try:
         lc_path = Path(lc_path)
         stat = lc_path.stat()
-        key = (str(source_name), str(lc_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+        source = str(source_name).strip().lower()
+        preprocess_version = ATLAS_PREPROCESS_VERSION if source == "atlas" else ""
+        key = (
+            source,
+            str(lc_path.resolve()),
+            int(stat.st_mtime_ns),
+            int(stat.st_size),
+            preprocess_version,
+        )
     except Exception:
         return pd.DataFrame()
 
@@ -632,6 +726,15 @@ def load_external_lc_frame(source_name: str, lc_path: Path) -> pd.DataFrame:
 
     try:
         df = normalize_external_lc_dataframe(source_name, pd.read_parquet(lc_path))
+        if str(source_name).strip().lower() in {
+            "neowise",
+            "neowise_w1",
+            "neowise_w2",
+            "neowise_color",
+            "wise",
+            "wise_w1_w2",
+        }:
+            df = combine_neowise_epochs(df)
     except Exception:
         return pd.DataFrame()
 
@@ -697,6 +800,8 @@ def build_external_traces(
         elif jd_sys == "bkjd":
             jd = times + KEPLER_BKJD_OFFSET
             x_plot = jd - plot_jd_offset
+        elif jd_sys == "jd":
+            x_plot = times - plot_jd_offset
         else:
             x_plot = times - jd_offset
 

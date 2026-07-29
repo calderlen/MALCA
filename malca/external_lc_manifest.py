@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from contextlib import contextmanager
+import os
 import time
 
 import pandas as pd
@@ -71,7 +73,47 @@ def _canonical_manifest(df: pd.DataFrame | None) -> pd.DataFrame:
     out["path_relative"] = out["path_relative"].fillna("").astype(str)
     out = out[out["candidate_id"].astype(str).str.len() > 0]
     out = out[out["file_prefix"].astype(str).str.len() > 0]
+    out["updated_unix"] = pd.to_numeric(out["updated_unix"], errors="coerce")
+    out = out.sort_values(
+        ["candidate_id", "source", "file_prefix", "updated_unix"],
+        na_position="first",
+        kind="mergesort",
+    ).drop_duplicates(
+        subset=["candidate_id", "source", "file_prefix"], keep="last"
+    )
     return out.reset_index(drop=True)
+
+
+@contextmanager
+def _locked_manifest(manifest_path: Path):
+    lock_path = manifest_path.with_suffix(manifest_path.suffix + ".lock")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a", encoding="ascii") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _write_manifest_atomic_unlocked(manifest_path: Path, manifest: pd.DataFrame) -> None:
+    temporary_path = manifest_path.with_name(
+        f".{manifest_path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        _canonical_manifest(manifest).to_parquet(
+            temporary_path,
+            index=False,
+            compression=PARQUET_CACHE_COMPRESSION,
+        )
+        os.replace(temporary_path, manifest_path)
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @lru_cache(maxsize=64)
@@ -98,6 +140,64 @@ def read_external_lc_manifest(results_root: Path | str | None) -> pd.DataFrame:
     mtime_ns, size = _file_signature(manifest_path)
     root_text = str(Path(results_root).expanduser())
     return _read_external_lc_manifest_cached(root_text, mtime_ns, size).copy()
+
+
+def lookup_external_lc_paths_from_manifest(
+    results_root: Path | str | None,
+    file_prefixes: tuple[str, ...] | list[str] | set[str],
+    candidate_ids: tuple[str, ...] | list[str] | set[str],
+) -> dict[str, dict[str, str]]:
+    """Resolve only the requested candidate files without a global tree scan.
+
+    Interactive Review panels need at most a handful of files for the active
+    candidate.  Building and validating an all-candidate index for every survey
+    made that panel block the server for many seconds.  The persistent manifest
+    is already the index, so filter it directly and check only matching paths.
+    A conventional ``results/external_lcs`` path is used as a cheap fallback for
+    manifests that have not yet recorded a newly written file.
+    """
+    prefixes = tuple(dict.fromkeys(
+        normalize_external_lc_file_prefix(value)
+        for value in file_prefixes
+        if str(value or "").strip()
+    ))
+    ids = tuple(dict.fromkeys(
+        str(value).strip()
+        for value in candidate_ids
+        if str(value or "").strip()
+    ))
+    resolved: dict[str, dict[str, str]] = {prefix: {} for prefix in prefixes}
+    if results_root is None or not prefixes or not ids:
+        return resolved
+
+    root = Path(results_root).expanduser()
+    if not root.exists():
+        return resolved
+
+    manifest = read_external_lc_manifest(root)
+    if not manifest.empty:
+        rows = manifest[
+            manifest["file_prefix"].isin(prefixes)
+            & manifest["candidate_id"].isin(ids)
+        ]
+        for _, row in rows.iterrows():
+            prefix = normalize_external_lc_file_prefix(row.get("file_prefix"))
+            candidate_id = str(row.get("candidate_id") or "").strip()
+            path = _manifest_row_path(root, row)
+            if prefix in resolved and candidate_id and path.exists():
+                resolved[prefix][candidate_id] = str(path)
+
+    for prefix in prefixes:
+        for candidate_id in ids:
+            if candidate_id in resolved[prefix]:
+                continue
+            filename = f"{prefix}_lc_{candidate_id}.parquet"
+            for candidate_path in (root / "external_lcs" / filename, root / filename):
+                if candidate_path.exists():
+                    resolved[prefix][candidate_id] = str(candidate_path)
+                    break
+
+    return resolved
 
 
 def _row_for_external_lc(
@@ -156,20 +256,8 @@ def write_external_lc_manifest(results_root: Path | str | None, manifest: pd.Dat
     if manifest_path is None:
         return False
     try:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = manifest_path.with_suffix(manifest_path.suffix + ".lock")
-        with open(lock_path, "a", encoding="ascii") as lock_file:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                _canonical_manifest(manifest).to_parquet(
-                    manifest_path,
-                    index=False,
-                    compression=PARQUET_CACHE_COMPRESSION,
-                )
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with _locked_manifest(manifest_path):
+            _write_manifest_atomic_unlocked(manifest_path, manifest)
     except Exception:
         return False
     clear_external_lc_manifest_caches()
@@ -179,12 +267,24 @@ def write_external_lc_manifest(results_root: Path | str | None, manifest: pd.Dat
 def upsert_external_lc_manifest_rows(results_root: Path | str | None, rows: list[dict[str, object]]) -> bool:
     if results_root is None or not rows:
         return False
-    existing = read_external_lc_manifest(results_root)
+    manifest_path = external_lc_manifest_path(results_root)
+    if manifest_path is None:
+        return False
     new = _canonical_manifest(pd.DataFrame(rows))
-    combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
-    combined = _canonical_manifest(combined)
-    combined = combined.drop_duplicates(subset=["candidate_id", "source", "file_prefix"], keep="last")
-    return write_external_lc_manifest(results_root, combined)
+    if new.empty:
+        return False
+    try:
+        with _locked_manifest(manifest_path):
+            try:
+                existing = _canonical_manifest(pd.read_parquet(manifest_path)) if manifest_path.exists() else _canonical_manifest(None)
+            except Exception:
+                existing = _canonical_manifest(None)
+            combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
+            _write_manifest_atomic_unlocked(manifest_path, combined)
+    except Exception:
+        return False
+    clear_external_lc_manifest_caches()
+    return True
 
 
 def upsert_external_lc_manifest_entry(

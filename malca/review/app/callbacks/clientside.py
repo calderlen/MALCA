@@ -368,7 +368,7 @@ app.clientside_callback(
         var scope = String(reviewScope || 'default');
         var storageKey = 'malca.review.sidebar.plot.v3::' + scope;
         var legacyKey = 'malca.review.sidebar.plot.v2::' + scope;
-        var allowedSources = ['asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'neowise', 'kepler', 'aavso', 'ogle', 'stripe82', 'allwise_mep', 'vvvx_virac', 'ps1', 'crts'];
+        var allowedSources = ['asassn', 'atlas', 'ztf', 'gaia_epoch', 'tess', 'neowise', 'kepler', 'aavso', 'ogle', 'stripe82', 'allwise_mep', 'vvvx_virac', 'ps1', 'superwasp', 'kelt', 'nsvs', 'asas3', 'crts', 'dasch'];
         function normalizeSources(value) {
             var raw = Array.isArray(value) ? value : (value ? [value] : []);
             var out = [];

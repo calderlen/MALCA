@@ -3,7 +3,9 @@ from __future__ import annotations
 from malca.review.metadata import (
     REVIEW_METADATA_FIELDS,
     bracket_unit_label,
+    extract_review_metadata_grouped,
     extract_review_metadata_feature_rows,
+    has_catalog_vetting_context,
     markdown_literal_unit_label,
 )
 
@@ -55,3 +57,47 @@ def test_feature_rows_omit_empty_values() -> None:
     })
 
     assert {row["key"] for row in rows} == {"dipper_score"}
+
+
+def test_browser_metadata_exposes_hierarchical_rejection_score() -> None:
+    grouped = dict(
+        extract_review_metadata_grouped(
+            {
+                "prob_hierarchical_artifact_or_nonvariable": 0.8,
+            }
+        )
+    )
+
+    assert grouped["Event Scoring"] == [
+        ("ML P(reject)", "0.8"),
+    ]
+
+
+def test_browser_metadata_exposes_both_dipper_recurrence_probabilities() -> None:
+    grouped = dict(
+        extract_review_metadata_grouped(
+            {
+                "prob_recurrent_given_dipper": 0.3,
+                "prob_single_given_dipper": 0.7,
+                "prob_recurrent_dipper_hierarchical": 0.15,
+                "prob_single_dipper_hierarchical": 0.35,
+            }
+        )
+    )
+
+    assert grouped["Dip Recurrence"] == [
+        ("ML P(recurrent | dipper)", "0.3"),
+        ("ML P(single | dipper)", "0.7"),
+        ("ML P(recurrent dipper), hierarchy", "0.15"),
+        ("ML P(single dipper), hierarchy", "0.35"),
+    ]
+
+
+def test_sfr_evidence_counts_as_completed_vetting_context() -> None:
+    assert has_catalog_vetting_context(
+        {
+            "sfr_membership_class": "environmental_candidate",
+            "sfr_environment_consistent": True,
+            "banyan_sfr_prob": 0.2,
+        }
+    )

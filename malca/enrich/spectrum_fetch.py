@@ -404,27 +404,112 @@ def _fetch_mast(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
     return SpectrumFetchResult(FetchStatus.LINK_ONLY, link="https://archive.stsci.edu/prepds/3d-hst/", message="MAST 3D-HST: use archive link")
 
 
+def _sparcl_record_value(record: Any, key: str) -> Any:
+    return record.get(key) if isinstance(record, dict) else getattr(record, key, None)
+
+
+def _find_desi_sparcl_record(
+    client: Any,
+    row: pd.Series,
+    target_id: Any,
+    *,
+    radius_arcsec: float = 2.0,
+) -> Any | None:
+    """Find a DESI SPARCL record by target ID, then by sky position.
+
+    Some VizieR/XMatch products coerce DESI's 64-bit integer TARGETID into a
+    float while merging heterogeneous catalogues.  Values near 2.3e18 cannot
+    be represented exactly as float64, so an apparently valid ID can be off by
+    one or more.  The coordinate fallback preserves a strict small-radius match
+    and selects the nearest returned record.
+    """
+
+    if target_id is not None and not pd.isna(target_id):
+        try:
+            found = client.find(
+                outfields=["sparcl_id", "ra", "dec", "targetid", "datasetgroup"],
+                constraints={"targetid": [int(target_id)]},
+                limit=5,
+            )
+            if found.records:
+                return found.records[0]
+        except Exception:
+            pass
+
+    ra = next(
+        (
+            float(row.get(column))
+            for column in ("ra", "RA", "RA_ICRS", "RAJ2000")
+            if row.get(column) is not None
+            and not pd.isna(row.get(column))
+            and np.isfinite(float(row.get(column)))
+        ),
+        None,
+    )
+    dec = next(
+        (
+            float(row.get(column))
+            for column in ("dec", "DEC", "DE_ICRS", "DEJ2000")
+            if row.get(column) is not None
+            and not pd.isna(row.get(column))
+            and np.isfinite(float(row.get(column)))
+        ),
+        None,
+    )
+    if ra is None or dec is None:
+        return None
+
+    radius_deg = float(radius_arcsec) / 3600.0
+    found = client.find(
+        outfields=["sparcl_id", "ra", "dec", "targetid", "datasetgroup"],
+        constraints={
+            "ra": [ra - radius_deg, ra + radius_deg],
+            "dec": [dec - radius_deg, dec + radius_deg],
+        },
+        limit=10,
+    )
+    if not found.records:
+        return None
+
+    cos_dec = max(float(np.cos(np.deg2rad(dec))), 1e-6)
+
+    def separation_sq(record: Any) -> float:
+        record_ra = _sparcl_record_value(record, "ra")
+        record_dec = _sparcl_record_value(record, "dec")
+        try:
+            return ((float(record_ra) - ra) * cos_dec) ** 2 + (float(record_dec) - dec) ** 2
+        except (TypeError, ValueError):
+            return np.inf
+
+    nearest = min(found.records, key=separation_sq)
+    if separation_sq(nearest) > radius_deg**2:
+        return None
+    return nearest
+
+
 def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
     target_id = row.get("TARGETID") or row.get("TargetID") or row.get("targetid") or row.get("TARGET_ID")
-    if not target_id:
-        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No DESI TARGETID")
+    has_coordinates = any(
+        row.get(column) is not None and not pd.isna(row.get(column))
+        for column in ("ra", "RA", "RA_ICRS", "RAJ2000")
+    ) and any(
+        row.get(column) is not None and not pd.isna(row.get(column))
+        for column in ("dec", "DEC", "DE_ICRS", "DEJ2000")
+    )
+    if not target_id and not has_coordinates:
+        return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="No DESI TARGETID or coordinates")
         
     try:
         from sparcl.client import SparclClient
-        client = SparclClient(connect_timeout=10)
+        client = SparclClient(announcement=False, connect_timeout=10)
         
-        # 1. Search for the target ID to get the sparcl_id
-        found = client.find(
-            outfields=['sparcl_id'], 
-            constraints={'targetid': [int(target_id)]},
-            limit=1
-        )
-        if not found.records:
-            return SpectrumFetchResult(FetchStatus.NOT_FOUND, message=f"No SPARCL records for TARGETID {target_id}")
-            
-        # Handle both dict-like and object-like return types
-        record = found.records[0]
-        sparcl_id = record.get('sparcl_id') if isinstance(record, dict) else getattr(record, 'sparcl_id', None)
+        record = _find_desi_sparcl_record(client, row, target_id)
+        if record is None:
+            return SpectrumFetchResult(
+                FetchStatus.NOT_FOUND,
+                message=f"No SPARCL record within 2 arcsec (TARGETID {target_id})",
+            )
+        sparcl_id = _sparcl_record_value(record, "sparcl_id")
         
         if not sparcl_id:
             return SpectrumFetchResult(FetchStatus.NOT_FOUND, message="Could not extract sparcl_id from record")
@@ -437,7 +522,7 @@ def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
         spec_data = res.records[0]
         
         def _get_arr(obj: Any, key: str) -> Any:
-            return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+            return _sparcl_record_value(obj, key)
             
         wave = _get_arr(spec_data, 'wavelength')
         flux = _get_arr(spec_data, 'flux')
@@ -455,7 +540,14 @@ def _fetch_desi(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
             with np.errstate(divide="ignore", invalid="ignore"):
                 flux_err = np.where(ivar_arr > 0, 1.0 / np.sqrt(ivar_arr), 0.0)
                 
-        return SpectrumFetchResult(FetchStatus.OK, data=SpectrumData(wavelength, flux_arr, flux_err))
+        return SpectrumFetchResult(
+            FetchStatus.OK,
+            data=SpectrumData(wavelength, flux_arr, flux_err),
+            metadata={
+                "sparcl_id": str(sparcl_id),
+                "targetid": _sparcl_record_value(record, "targetid"),
+            },
+        )
         
     except ImportError:
         return SpectrumFetchResult(
@@ -517,8 +609,32 @@ def _fetch_apogee(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
 
 _GALAH_LOOKUP = None
 
+
+def _fetch_direct_fits_url(url: str, *, label: str) -> SpectrumFetchResult:
+    try:
+        from tempfile import NamedTemporaryFile
+        from urllib.request import Request, urlopen
+
+        req = Request(url, headers={"User-Agent": "malca-spectrum-fetch/1.0"})
+        with urlopen(req, timeout=30) as resp:
+            with NamedTemporaryFile(suffix=".fits") as tmp:
+                tmp.write(resp.read())
+                tmp.flush()
+                return _parse_fits_spectrum(Path(tmp.name))
+    except Exception as exc:
+        return SpectrumFetchResult(
+            FetchStatus.ERROR,
+            link=url,
+            message=f"Failed to download {label} FITS: {exc}",
+        )
+
+
 def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
     global _GALAH_LOOKUP
+    direct_link = str(row.get("link") or "").strip()
+    if direct_link.lower().split("?", 1)[0].endswith((".fits", ".fit", ".fits.gz")):
+        return _fetch_direct_fits_url(direct_link, label="GALAH")
+
     if _GALAH_LOOKUP is None:
         lookup_path = Path(__file__).parent.parent / "data" / "galah_lookup.parquet"
         if not lookup_path.exists():
@@ -553,17 +669,7 @@ def _fetch_galah(row: pd.Series, **kwargs: Any) -> SpectrumFetchResult:
             
     if "url" in meta and pd.notna(meta["url"]):
         url = str(meta["url"])
-        try:
-            from urllib.request import Request, urlopen
-            from tempfile import NamedTemporaryFile
-            req = Request(url, headers={"User-Agent": "malca-spectrum-fetch/1.0"})
-            with urlopen(req, timeout=30) as resp:
-                with NamedTemporaryFile(suffix=".fits") as tmp:
-                    tmp.write(resp.read())
-                    tmp.flush()
-                    return _parse_fits_spectrum(Path(tmp.name))
-        except Exception as e:
-            return SpectrumFetchResult(FetchStatus.ERROR, message=f"Failed to download GALAH FITS: {e}")
+        return _fetch_direct_fits_url(url, label="GALAH")
             
     return SpectrumFetchResult(FetchStatus.LINK_ONLY, message="GALAH lookup row missing file_path and url")
 

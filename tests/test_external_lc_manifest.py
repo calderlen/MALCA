@@ -9,6 +9,7 @@ from malca.external_lc_manifest import (
     EXTERNAL_LC_MANIFEST_FILE,
     clear_external_lc_manifest_caches,
     index_external_lc_paths_from_manifest,
+    lookup_external_lc_paths_from_manifest,
     read_external_lc_manifest,
     upsert_external_lc_manifest_entry,
     write_external_lc_manifest,
@@ -48,6 +49,32 @@ def test_manifest_lookup_avoids_rglob_when_manifest_exists(tmp_path: Path, monke
     mapping = index_external_lc_paths_from_manifest(str(root), "neowise")
 
     assert mapping == {"123": str(lc_path)}
+
+
+def test_targeted_manifest_lookup_never_scans_unrelated_files(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "results"
+    lc_path = _write_lc(root / "external_lcs" / "tess_lc_C1.parquet")
+    assert upsert_external_lc_manifest_entry(
+        root,
+        candidate_id="C1",
+        source="tess",
+        file_prefix="tess",
+        path=lc_path,
+    )
+    clear_external_lc_manifest_caches()
+
+    def fail_rglob(*_args, **_kwargs):
+        raise AssertionError("targeted review lookup must not scan the results tree")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+
+    mapping = lookup_external_lc_paths_from_manifest(
+        root,
+        ["tess", "atlas"],
+        ["C1", "missing"],
+    )
+
+    assert mapping == {"tess": {"C1": str(lc_path)}, "atlas": {}}
 
 
 def test_missing_manifest_falls_back_to_scan_and_writes_manifest(tmp_path: Path) -> None:

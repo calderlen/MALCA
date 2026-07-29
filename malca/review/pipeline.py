@@ -25,6 +25,16 @@ from malca.review.stats_merge import merge_stats_summary_into_payload as _merge_
 from malca.review.store import get_candidate_payload, replace_candidate_payload_fields, _to_float
 
 
+class ReviewStageExecutionError(RuntimeError):
+    """An on-demand stage failed and was persisted as retryable error state."""
+
+    def __init__(self, candidate_id: str, stage: str, cause: Exception) -> None:
+        self.candidate_id = str(candidate_id)
+        self.stage = str(stage)
+        self.cause = cause
+        super().__init__(f"{stage} failed for {candidate_id}: {cause}")
+
+
 class _ProgressCaptureStream(io.TextIOBase):
     """Stream that forwards stdout/stderr lines to a progress callback."""
 
@@ -163,6 +173,21 @@ def detect_pipeline_status(payload: dict) -> dict[str, str]:
             return True
 
     for stage, sig_cols in STAGE_SIGNATURES.items():
+        explicit_status = str(
+            feature_mapping_get(payload, f"review_stage_{stage}_status") or ""
+        ).strip().lower()
+        if explicit_status in {"success", "ok", "no_data"}:
+            result[stage] = "complete"
+            continue
+        if explicit_status.startswith("skipped"):
+            result[stage] = "skipped"
+            continue
+        if explicit_status == "error":
+            result[stage] = "error"
+            continue
+        if explicit_status == "partial":
+            result[stage] = "partial"
+            continue
         if stage == "multi_survey_features":
             status_value = str(feature_mapping_get(payload, "ms_feature_status") or "").strip().lower()
             event_type = str(feature_mapping_get(payload, "ms_event_type") or "").strip()
@@ -204,15 +229,21 @@ def detect_sed_photometry_status(conn: sqlite3.Connection, candidate_id: str, pa
 
 def detect_sed_model_status(conn: sqlite3.Connection, candidate_id: str, payload: dict | None = None) -> str:
     """Return completion status for the SED model sidecar tables."""
+    from malca.enrichment.sed_model import SED_MODEL_FIT_VERSION
+
     try:
         rows = conn.execute(
-            "SELECT status FROM sed_model_fits WHERE candidate_id = ?",
+            "SELECT status, fit_version FROM sed_model_fits WHERE candidate_id = ?",
             (str(candidate_id),),
         ).fetchall()
     except sqlite3.OperationalError:
         return "missing"
     statuses = [str(row[0] or "").strip().lower() for row in rows]
-    if any(status == "ok" for status in statuses):
+    if any(
+        str(row[0] or "").strip().lower() == "ok"
+        and str(row[1] or "").strip() == SED_MODEL_FIT_VERSION
+        for row in rows
+    ):
         return "complete"
     if statuses:
         return "partial"
@@ -261,60 +292,100 @@ def run_missing_stages(
         if stage_complete_callback:
             stage_complete_callback(stage_name)
 
+    def execute_stage(stage_name: str, func: Callable[[], object]) -> object:
+        """Run one stage and persist success/error independently of UI state."""
+        try:
+            value = func()
+        except Exception as exc:
+            payload[f"review_stage_{stage_name}_status"] = "error"
+            payload[f"review_stage_{stage_name}_error"] = str(exc)
+            update_candidate_payload(conn, candidate_id, payload)
+            p(f"{stage_name} failed: {exc}")
+            raise ReviewStageExecutionError(candidate_id, stage_name, exc) from exc
+        payload[f"review_stage_{stage_name}_status"] = "success"
+        payload[f"review_stage_{stage_name}_error"] = ""
+        return value
+
     # 3. Run missing stages in order
     force = set(force_stages or [])
 
     def should_run(stage_name: str) -> bool:
         if only_force:
             return stage_name in force
-        return (status.get(stage_name) in ("missing", "partial")) or (stage_name in force)
+        current = str(status.get(stage_name) or "missing")
+        retryable = current in {"missing", "partial", "error", "skipped"} or current.startswith(
+            ("error_", "skipped_", "blocked_")
+        )
+        return retryable or (stage_name in force)
 
     if should_run("stats"):
         if lc_path and Path(lc_path).exists():
             p("Computing LC stats...")
-            _run_stats_stage(payload, lc_path, p)
+            execute_stage("stats", lambda: _run_stats_stage(payload, lc_path, p))
             stages_run.append("stats")
             mark_stage_complete("stats")
+        else:
+            payload["review_stage_stats_status"] = "blocked_missing_lightcurve"
+            payload["review_stage_stats_error"] = f"Light curve unavailable: {lc_path or '<missing path>'}"
+            update_candidate_payload(conn, candidate_id, payload)
+            p("Stats blocked: light curve path is missing or unavailable")
 
     if should_run("events"):
         if lc_path and Path(lc_path).exists():
             p("Running event detection...")
-            _run_events_stage(payload, lc_path, p)
+            execute_stage("events", lambda: _run_events_stage(payload, lc_path, p))
             stages_run.append("events")
             mark_stage_complete("events")
+        else:
+            payload["review_stage_events_status"] = "blocked_missing_lightcurve"
+            payload["review_stage_events_error"] = f"Light curve unavailable: {lc_path or '<missing path>'}"
+            update_candidate_payload(conn, candidate_id, payload)
+            p("Events blocked: light curve path is missing or unavailable")
 
     if should_run("characterize"):
         if _has_coordinates(payload):
             p("Characterizing...")
-            _run_characterize_stage(payload, p)
+            execute_stage("characterize", lambda: _run_characterize_stage(payload, p))
             stages_run.append("characterize")
             mark_stage_complete("characterize")
         else:
+            payload["review_stage_characterize_status"] = "skipped_missing_coordinates"
+            update_candidate_payload(conn, candidate_id, payload)
             p("Characterize skipped: missing coordinates")
 
     if should_run("sed_photometry"):
         p("Fetching SED photometry...")
-        n_sed_rows = _run_sed_photometry_stage(
-            conn,
-            candidate_id,
-            payload,
-            p,
-            replace=("sed_photometry" in force),
+        n_sed_rows = execute_stage(
+            "sed_photometry",
+            lambda: _run_sed_photometry_stage(
+                conn,
+                candidate_id,
+                payload,
+                p,
+                replace=("sed_photometry" in force),
+            ),
         )
+        n_sed_rows = int(n_sed_rows)
         payload["sed_photometry_checked"] = True
         payload["sed_photometry_n_rows"] = int(n_sed_rows)
+        if n_sed_rows == 0:
+            payload["review_stage_sed_photometry_status"] = "no_data"
         stages_run.append("sed_photometry")
         mark_stage_complete("sed_photometry")
 
     if should_run("sed_model_fit"):
         p("Fitting SED atmosphere model...")
-        n_fit_rows, n_curve_rows = _run_sed_model_fit_stage(
-            conn,
-            candidate_id,
-            payload,
-            p,
-            replace=("sed_model_fit" in force),
+        fit_counts = execute_stage(
+            "sed_model_fit",
+            lambda: _run_sed_model_fit_stage(
+                conn,
+                candidate_id,
+                payload,
+                p,
+                replace=("sed_model_fit" in force),
+            ),
         )
+        n_fit_rows, n_curve_rows = fit_counts
         sed_model_status = detect_sed_model_status(conn, candidate_id, payload)
         if sed_model_status == "complete":
             payload["sed_model_fit_checked"] = True
@@ -323,6 +394,7 @@ def run_missing_stages(
             stages_run.append("sed_model_fit")
             mark_stage_complete("sed_model_fit")
         else:
+            payload["review_stage_sed_model_fit_status"] = "partial"
             payload["sed_model_fit_checked"] = False
             payload["sed_model_fit_n_rows"] = 0
             payload["sed_model_curve_n_rows"] = int(n_curve_rows)
@@ -332,33 +404,48 @@ def run_missing_stages(
     if should_run("vetting"):
         if _has_coordinates(payload):
             p("Vetting crossmatches...")
-            _run_vetting_stage(payload, p)
+            execute_stage("vetting", lambda: _run_vetting_stage(payload, p))
             stages_run.append("vetting")
             mark_stage_complete("vetting")
         else:
+            payload["review_stage_vetting_status"] = "skipped_missing_coordinates"
+            update_candidate_payload(conn, candidate_id, payload)
             p("Vetting skipped: missing coordinates")
 
     if should_run("external_lcs"):
         if _has_coordinates(payload):
             p("Fetching external LCs...")
-            external_lcs_ok = _run_external_lcs_stage(
-                payload,
-                output_dir=_resolve_output_dir(conn, candidate_id),
-                p=p,
-                refresh_cache=("external_lcs" in force),
-            )
+            external_lcs_ok = bool(execute_stage(
+                "external_lcs",
+                lambda: _run_external_lcs_stage(
+                    payload,
+                    output_dir=_resolve_output_dir(conn, candidate_id),
+                    p=p,
+                    refresh_cache=("external_lcs" in force),
+                ),
+            ))
             stages_run.append("external_lcs")
             if external_lcs_ok:
                 mark_stage_complete("external_lcs")
             else:
+                payload["review_stage_external_lcs_status"] = "partial"
                 update_candidate_payload(conn, candidate_id, payload)
                 p("External LCs finished with failures; status may remain partial")
         else:
+            payload["review_stage_external_lcs_status"] = "skipped_missing_coordinates"
+            update_candidate_payload(conn, candidate_id, payload)
             p("External LCs skipped: missing coordinates")
 
     if should_run("multi_survey_features"):
         p("Computing multi-survey features...")
-        _run_multi_survey_features_stage(payload, output_dir=_resolve_output_dir(conn, candidate_id), p=p)
+        execute_stage(
+            "multi_survey_features",
+            lambda: _run_multi_survey_features_stage(
+                payload,
+                output_dir=_resolve_output_dir(conn, candidate_id),
+                p=p,
+            ),
+        )
         stages_run.append("multi_survey_features")
         mark_stage_complete("multi_survey_features")
 
@@ -391,6 +478,7 @@ def _run_stats_stage(payload: dict, lc_path: str, p: Callable | None = None) -> 
     except Exception as e:
         if p: p(f"Stats stage failed: {e}")
         else: print(f"[pipeline] Stats stage failed: {e}")
+        raise
 
 
 def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) -> None:
@@ -422,6 +510,7 @@ def _run_events_stage(payload: dict, lc_path: str, p: Callable | None = None) ->
     except Exception as e:
         if p: p(f"Events stage failed: {e}")
         else: print(f"[pipeline] Events stage failed: {e}")
+        raise
 
 
 def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
@@ -439,6 +528,7 @@ def _run_characterize_stage(payload: dict, p: Callable | None = None) -> None:
     except Exception as e:
         if p: p(f"Characterize stage failed: {e}")
         else: print(f"[pipeline] Characterize stage failed: {e}")
+        raise
 
 
 def _run_sed_photometry_stage(
@@ -452,7 +542,12 @@ def _run_sed_photometry_stage(
 ) -> int:
     """Run SED photometry fetch/normalization for a 1-row candidate payload."""
     try:
-        from malca.review.sed import fetch_sed_photometry, upsert_sed_rows
+        from malca.review.sed import (
+            SED_FETCH_MANIFEST_ATTR,
+            fetch_sed_photometry,
+            upsert_sed_rows,
+            validate_sed_fetch_manifest,
+        )
 
         df = pd.DataFrame([payload])
         if "candidate_id" not in df.columns:
@@ -461,17 +556,25 @@ def _run_sed_photometry_stage(
             lambda: fetch_sed_photometry(df, sources=sources, progress_callback=p),
             p,
         )
+        fetch_manifest = sed_rows.attrs.get(SED_FETCH_MANIFEST_ATTR)
         if replace:
             conn.execute("DELETE FROM sed_photometry WHERE candidate_id = ?", (str(candidate_id),))
             conn.commit()
         n_rows = upsert_sed_rows(conn, sed_rows) if isinstance(sed_rows, pd.DataFrame) else 0
+        fetch_complete, manifest_errors = validate_sed_fetch_manifest(
+            fetch_manifest if isinstance(fetch_manifest, pd.DataFrame) else None,
+            df,
+            sources=sources,
+        )
+        if not fetch_complete:
+            raise RuntimeError("SED photometry incomplete: " + "; ".join(manifest_errors))
         if p:
             p(f"SED photometry: {n_rows} rows")
         return int(n_rows)
     except Exception as e:
         if p: p(f"SED photometry stage failed: {e}")
         else: print(f"[pipeline] SED photometry stage failed: {e}")
-        return 0
+        raise
 
 
 def _run_sed_model_fit_stage(
@@ -503,15 +606,17 @@ def _run_sed_model_fit_stage(
         df = pd.DataFrame([payload])
         if "candidate_id" not in df.columns:
             df["candidate_id"] = str(candidate_id)
-        fits, curves = _run_with_progress_capture(
-            lambda: fit_sed_models(df, model_rows, progress_callback=p),
+        fits, curves, points = _run_with_progress_capture(
+            lambda: fit_sed_models(df, model_rows, progress_callback=p, return_points=True),
             p,
         )
         n_fit_rows, n_curve_rows = upsert_sed_model_results(
             conn,
             fits,
             curves,
+            points,
             replace_candidate_ids=[str(candidate_id)] if replace else None,
+            measurement_rows=model_rows,
         )
         if p:
             ok = 0
@@ -522,7 +627,7 @@ def _run_sed_model_fit_stage(
     except Exception as e:
         if p: p(f"SED model fit stage failed: {e}")
         else: print(f"[pipeline] SED model fit stage failed: {e}")
-        return 0, 0
+        raise
 
 
 def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
@@ -547,6 +652,7 @@ def _run_vetting_stage(payload: dict, p: Callable | None = None) -> None:
     except Exception as e:
         if p: p(f"Vetting stage failed: {e}")
         else: print(f"[pipeline] Vetting stage failed: {e}")
+        raise
 
 
 def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
@@ -556,16 +662,20 @@ def _resolve_output_dir(conn: sqlite3.Connection, candidate_id: str) -> Path:
         (candidate_id,),
     ).fetchone()
     if row and row[0]:
-        src = Path(str(row[0]))
-        # If source_path is under a run directory, use its results/ dir
-        if src.parent.name == "results":
-            return src.parent
-        if (src.parent / "results").is_dir():
-            return src.parent / "results"
-    # Fallback: use the default output directory
-    default = Path(__file__).resolve().parents[2] / DEFAULT_OUTPUT_DIR / "results"
-    default.mkdir(parents=True, exist_ok=True)
-    return default
+        src = Path(str(row[0])).expanduser()
+        candidates = [src if src.is_dir() else src.parent]
+        candidates.extend([candidates[0].parent, candidates[0].parent.parent])
+        for candidate in candidates:
+            if candidate.name == "results":
+                return candidate.resolve()
+            results = candidate / "results"
+            if results.is_dir() or (candidate / "run_params.json").exists():
+                results.mkdir(parents=True, exist_ok=True)
+                return results.resolve()
+    raise ValueError(
+        f"Cannot resolve a run-local results directory for candidate {candidate_id}; "
+        "refusing to write on-demand products into a global/default run"
+    )
 
 
 def _run_external_lcs_stage(

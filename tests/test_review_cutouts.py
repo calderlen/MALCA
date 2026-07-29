@@ -100,8 +100,8 @@ def test_cutout_payload_uses_nested_payload_json_coordinates() -> None:
     )
 
     assert cutout["has_coordinates"] is True
-    assert "PanSTARRS DR1 color" in str(cutout["message"])
-    assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in str(cutout["image_url"])
+    assert "DECaPS DR2" in str(cutout["message"])
+    assert "CDS%2FP%2FDECaPS%2FDR2%2Fcolor" in str(cutout["image_url"])
 
 
 def test_cutout_payload_includes_asassn_fwhm_overlay_metadata() -> None:
@@ -124,11 +124,11 @@ def test_missing_or_invalid_coordinates_return_empty_cutout_payload() -> None:
     assert invalid["image_url"] == ""
 
 
-def test_southern_coordinates_default_to_dss2() -> None:
+def test_decaps_dr2_is_default_for_southern_coordinates() -> None:
     payload = {"ra": 240.48595227, "dec": -55.342371}
 
-    assert resolve_cutout_survey_key(payload, None) == "dss2"
-    assert resolve_cutout_survey_key(payload, "vtss-ha") == "dss2"
+    assert resolve_cutout_survey_key(payload, None) == "decaps-dr2"
+    assert resolve_cutout_survey_key(payload, "vtss-ha") == "decaps-dr2"
 
 
 def test_explicit_incompatible_survey_can_be_kept_with_warning() -> None:

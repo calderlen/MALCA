@@ -549,6 +549,30 @@ def test_fetch_gaia_epoch_lcs_expands_array_valued_tap_rows(
     assert int(status.loc[0, "gaia_epoch_lc_n_g"]) == 3
 
 
+def test_fetch_gaia_epoch_lcs_does_not_promote_false_text_availability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "candidate_id": "C1",
+                "gaia_id": "2192699590525791232",
+                "gaia_epoch_available": "False",
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        vetting,
+        "_connect_gaia_taps_until_available",
+        lambda *args, **kwargs: pytest.fail("false availability must not trigger a Gaia query"),
+    )
+
+    out = vetting.fetch_gaia_epoch_lcs(df, output_dir=tmp_path)
+
+    assert int(out.loc[0, "gaia_epoch_lc_n_g"]) == 0
+
+
 def test_fetch_gaia_epoch_lcs_accepts_scalar_tap_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

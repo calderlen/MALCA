@@ -31,6 +31,10 @@ def _select_filter_mode_checklist_value(raw_value: object) -> list[str]:
     return ['include'] if _coerce_select_filter_mode_value(raw_value) == 'include' else []
 
 
+def _coerce_select_filter_logic_value(raw_value: object) -> str:
+    return 'or' if 'or' in _coerce_string_list(raw_value) else 'and'
+
+
 def _coerce_bool_mode_value(raw_value: object) -> str:
     valid = {'Any', 'True', 'False', 'Unset'}
     text = str(raw_value).strip() if raw_value is not None else ''
@@ -289,6 +293,7 @@ def _queue_filter_ui_state_from_values(*state_values: object) -> dict[str, objec
         'filter_unreviewed': _coerce_yes_checklist_value(next(it)),
         'filter_failed': _coerce_yes_checklist_value(next(it)),
         'select_filter_mode': _coerce_select_filter_mode_value(next(it)),
+        'select_filter_logic': _coerce_select_filter_logic_value(next(it)),
         'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(next(it)),
     }
     for _, fkey in _VETTING_POLICY_STATES:
@@ -318,6 +323,7 @@ def _normalize_saved_queue_filter_ui_state(raw_state: object) -> dict[str, objec
             raw_state.get('filter_failed', ['yes'] if _coerce_bool(raw_state.get('require_failed_any_false')) else [])
         ),
         'select_filter_mode': _coerce_select_filter_mode_value(raw_state.get('select_filter_mode')),
+        'select_filter_logic': _coerce_select_filter_logic_value(raw_state.get('select_filter_logic')),
         'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(
             raw_state.get('catalog_neighbor_radius_arcsec')
         ),
@@ -349,6 +355,7 @@ def _queue_filter_ui_values_from_state(raw_state: object) -> tuple[object, ...] 
         state['filter_unreviewed'],
         state['filter_failed'],
         _select_filter_mode_checklist_value(state['select_filter_mode']),
+        state['select_filter_logic'],
         state['catalog_neighbor_radius_arcsec'],
     ]
     for _, fkey in _VETTING_POLICY_STATES:
@@ -410,6 +417,149 @@ def reset_numeric_filters(n_clicks):
     if not n_clicks:
         raise dash.exceptions.PreventUpdate
     return (*([None] * len(_NUM_INPUT_STATES)), "Reset numeric filters to the current queue bounds.")
+
+
+def _select_filter_mode_button_state(raw_value: object) -> tuple[str, str, str]:
+    """Return the visible label, class, and click hint for the shared select mode."""
+    mode = _coerce_select_filter_mode_value(raw_value)
+    if mode == 'include':
+        return (
+            'All categorical filters: Include selected',
+            'compact-btn select-filter-mode-btn is-include',
+            'Click to exclude selected values from every categorical filter.',
+        )
+    return (
+        'All categorical filters: Exclude selected',
+        'compact-btn select-filter-mode-btn is-exclude',
+        'Click to include selected values in every categorical filter.',
+    )
+
+
+@app.callback(
+    [Output('select-filter-mode', 'value', allow_duplicate=True),
+     Output('refresh-btn', 'n_clicks', allow_duplicate=True),
+     Output('sidebar-status', 'children', allow_duplicate=True)],
+    Input('toggle-select-filter-mode-btn', 'n_clicks'),
+    [State('select-filter-mode', 'value'),
+     State('refresh-btn', 'n_clicks')],
+    prevent_initial_call=True,
+)
+def toggle_select_filter_mode(n_clicks, current_value, refresh_clicks):
+    """Flip all categorical multi-select filters between include and exclude."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    current_mode = _coerce_select_filter_mode_value(current_value)
+    next_mode = 'exclude' if current_mode == 'include' else 'include'
+    try:
+        next_refresh = int(refresh_clicks or 0) + 1
+    except (TypeError, ValueError):
+        next_refresh = 1
+    status = f"Categorical filters now {next_mode} their selected values."
+    return _select_filter_mode_checklist_value(next_mode), next_refresh, status
+
+
+@app.callback(
+    [Output('toggle-select-filter-mode-btn', 'children'),
+     Output('toggle-select-filter-mode-btn', 'className'),
+     Output('toggle-select-filter-mode-btn', 'title')],
+    Input('select-filter-mode', 'value'),
+    prevent_initial_call=False,
+)
+def sync_select_filter_mode_button(raw_value):
+    """Keep the button in sync with restored, reset, and toggled filter state."""
+    return _select_filter_mode_button_state(raw_value)
+
+
+def _set_select_filter_logic(requested_logic, current_logic, refresh_clicks):
+    """Return the persisted logic value and a queue refresh for a logic button."""
+    requested = _coerce_select_filter_logic_value(requested_logic)
+    current = _coerce_select_filter_logic_value(current_logic)
+    if requested == current:
+        raise dash.exceptions.PreventUpdate
+    try:
+        next_refresh = int(refresh_clicks or 0) + 1
+    except (TypeError, ValueError):
+        next_refresh = 1
+    return requested, next_refresh, f"Categorical filters now combine with {requested.upper()}."
+
+
+@app.callback(
+    [Output('select-filter-logic', 'value', allow_duplicate=True),
+     Output('refresh-btn', 'n_clicks', allow_duplicate=True),
+     Output('sidebar-status', 'children', allow_duplicate=True)],
+    Input('select-filter-logic-and-btn', 'n_clicks'),
+    [State('select-filter-logic', 'value'),
+     State('refresh-btn', 'n_clicks')],
+    prevent_initial_call=True,
+)
+def set_select_filter_logic_and(n_clicks, current_logic, refresh_clicks):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    return _set_select_filter_logic('and', current_logic, refresh_clicks)
+
+
+@app.callback(
+    [Output('select-filter-logic', 'value', allow_duplicate=True),
+     Output('refresh-btn', 'n_clicks', allow_duplicate=True),
+     Output('sidebar-status', 'children', allow_duplicate=True)],
+    Input('select-filter-logic-or-btn', 'n_clicks'),
+    [State('select-filter-logic', 'value'),
+     State('refresh-btn', 'n_clicks')],
+    prevent_initial_call=True,
+)
+def set_select_filter_logic_or(n_clicks, current_logic, refresh_clicks):
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+    return _set_select_filter_logic('or', current_logic, refresh_clicks)
+
+
+@app.callback(
+    [Output('select-filter-logic-and-btn', 'className'),
+     Output('select-filter-logic-or-btn', 'className')],
+    Input('select-filter-logic', 'value'),
+    prevent_initial_call=False,
+)
+def sync_select_filter_logic_buttons(raw_value):
+    """Highlight the active AND/OR button after changes and state restoration."""
+    logic = _coerce_select_filter_logic_value(raw_value)
+    base = 'compact-btn select-filter-logic-btn'
+    if logic == 'or':
+        return base, f'{base} is-active'
+    return f'{base} is-active', base
+
+
+@app.callback(
+    [*_FILTER_VALUE_OUTPUTS,
+     Output('refresh-btn', 'n_clicks', allow_duplicate=True),
+     Output('sidebar-status', 'children', allow_duplicate=True)],
+    Input('reset-all-filters-btn', 'n_clicks'),
+    State('refresh-btn', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def reset_all_filters(n_clicks, refresh_clicks):
+    """Restore every queue-filter control and queue sort to its default value."""
+    if not n_clicks:
+        raise dash.exceptions.PreventUpdate
+
+    values: list[object] = [
+        [],
+        [],
+        [],
+        'and',
+        DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC,
+    ]
+    values.extend([[] for _cid, _fkey in _VETTING_POLICY_STATES])
+    values.extend(['Any' for _cid, _fkey in _BOOL_MODE_STATES])
+    values.extend([None for _cid, _fkey in _NUM_INPUT_STATES])
+    values.extend(['Any' for _cid, _fkey in _TEXT_STATES])
+    values.extend([[] for _cid, _fkey in _SELECT_STATES])
+    values.extend([['candidate_id'], []])
+    try:
+        next_refresh = int(refresh_clicks or 0) + 1
+    except (TypeError, ValueError):
+        next_refresh = 1
+    return (*values, next_refresh, "Reset all queue filters and sorting.")
 
 
 _SIDEBAR_FILTER_OUTPUTS = (
@@ -609,6 +759,7 @@ def _queue_filter_params_from_ui_state(
         'only_unreviewed': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_unreviewed')),
         'require_failed_any_false': 'yes' in _coerce_yes_checklist_value(ui_state.get('filter_failed')),
         'select_filter_mode': _coerce_select_filter_mode_value(ui_state.get('select_filter_mode')),
+        'select_filter_logic': _coerce_select_filter_logic_value(ui_state.get('select_filter_logic')),
         'catalog_neighbor_radius_arcsec': _coerce_catalog_neighbor_radius_value(
             ui_state.get('catalog_neighbor_radius_arcsec')
         ),
@@ -674,9 +825,19 @@ def _load_sidebar_filter_payload(sidebar_open, queue_source_scope):
 
     scope_kwargs = _queue_scope_filter_kwargs(queue_source_scope)
     with closing(db_connect(Path(DB_PATH))) as conn:
+        requested_columns = [col for _cid, col in _TEXT_STATES]
+        requested_columns.extend(
+            filter_key.replace('exclude_', '', 1)
+            for _cid, filter_key in _SELECT_STATES
+        )
+        distinct_by_column = get_distinct_values_bulk(
+            conn,
+            requested_columns,
+            **scope_kwargs,
+        )
         text_options = []
         for _cid, col in _TEXT_STATES:
-            values = get_distinct_values(conn, col, **scope_kwargs)
+            values = distinct_by_column.get(col, [])
             text_options.append(
                 [{'label': 'Any', 'value': 'Any'}]
                 + [
@@ -689,7 +850,7 @@ def _load_sidebar_filter_payload(sidebar_open, queue_source_scope):
         select_options = []
         for _cid, filter_key in _SELECT_STATES:
             col = filter_key.replace('exclude_', '', 1)
-            values = get_distinct_values(conn, col, **scope_kwargs)
+            values = distinct_by_column.get(col, [])
             select_options.append(
                 [
                     {'label': format_catalog_class_label(col, v), 'value': str(v)}

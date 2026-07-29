@@ -144,6 +144,16 @@ PIPELINE_DETECTED_COLUMNS: dict[str, str] = {
     "phase_folded_only": "phase_folded_detected",
     "bifurcated_gate": "bifurcated_detected",
 }
+PIPELINE_STATUS_COLUMNS: dict[str, str] = {
+    "standard_only": "standard_status",
+    "phase_folded_only": "phase_folded_status",
+    "bifurcated_gate": "bifurcated_status",
+}
+PIPELINE_OVERLAP_COLUMNS: dict[str, str] = {
+    "standard_only": "standard_dip_injected_overlap",
+    "phase_folded_only": "phase_folded_dip_injected_overlap",
+    "bifurcated_gate": "bifurcated_injected_overlap",
+}
 
 POST_FILTER_FIELD_COLUMNS: tuple[str, ...] = (
     "dip_significant",
@@ -539,7 +549,14 @@ def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str
     row = dict(trial)
     df = base_df.copy()
     if df.empty:
-        return df, {"injected_event_count": 0, "injected_max_delta_mag": np.nan}
+        return df, {
+            "injected_event_count": 0,
+            "injected_sampled_event_count": 0,
+            "injected_support_points": 0,
+            "injected_peak_snr": np.nan,
+            "injection_observable": False,
+            "injected_max_delta_mag": np.nan,
+        }
 
     rng = np.random.default_rng(int(row["trial_seed"]))
     class_name = str(row["class_name"])
@@ -553,6 +570,7 @@ def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str
     amplitude = float(row.get("amplitude", 0.0) or 0.0)
     duration = float(row.get("duration", 0.0) or 0.0)
     injected_event_count = 0
+    sampled_event_depths: list[float] = []
 
     if class_name == "smooth_periodic_contaminant":
         period = float(row.get("period_days", np.nan))
@@ -587,15 +605,45 @@ def generate_trial_lightcurve(base_df: pd.DataFrame, trial: pd.Series | dict[str
             depth = amplitude
             if scatter > 0:
                 depth *= float(np.clip(rng.lognormal(mean=-0.5 * scatter**2, sigma=scatter), 0.2, 2.5))
-            signal += _gaussian_dip_profile(t, center, duration, depth)
+            event_profile = _gaussian_dip_profile(t, center, duration, depth)
+            signal += event_profile
             injected_event_count += 1
+            sampled_depth = float(np.nanmax(event_profile)) if np.isfinite(event_profile).any() else 0.0
+            if sampled_depth >= max(0.25 * depth, 0.01):
+                sampled_event_depths.append(sampled_depth)
 
     out = df.copy()
     out["mag"] = pd.to_numeric(out["mag"], errors="coerce").to_numpy(dtype=float) + signal
     out["benchmark_trial_id"] = int(row["trial_id"])
     out["benchmark_class"] = class_name
+    out["benchmark_injected_signal_mag"] = signal
+    error_values = pd.to_numeric(out.get("error", pd.Series(np.nan, index=out.index)), errors="coerce").to_numpy(float)
+    finite_error = error_values[np.isfinite(error_values) & (error_values > 0)]
+    fallback_error = float(np.nanmedian(finite_error)) if finite_error.size else np.nan
+    effective_error = np.where(np.isfinite(error_values) & (error_values > 0), error_values, fallback_error)
+    support_threshold = max(0.25 * amplitude, 0.01) if amplitude > 0 else np.inf
+    support_mask = np.isfinite(signal) & (signal >= support_threshold)
+    signal_snr = np.full(signal.shape, np.nan, dtype=float)
+    valid_error = np.isfinite(effective_error) & (effective_error > 0)
+    signal_snr[valid_error] = signal[valid_error] / effective_error[valid_error]
+    peak_snr = float(np.nanmax(signal_snr)) if np.isfinite(signal_snr).any() else np.nan
+    sampled_event_count = len(sampled_event_depths)
+    target_dip = bool(row.get("target_dip", False))
+    observable = bool(
+        target_dip
+        and sampled_event_count > 0
+        and int(support_mask.sum()) >= RUN_MIN_POINTS
+        and np.isfinite(peak_snr)
+        and peak_snr >= 2.5
+    )
     return out, {
         "injected_event_count": int(injected_event_count),
+        "injected_sampled_event_count": int(sampled_event_count),
+        "injected_support_points": int(support_mask.sum()),
+        "injected_peak_snr": peak_snr,
+        "injection_observable": observable,
+        "injected_sampled_depth_min_mag": float(min(sampled_event_depths)) if sampled_event_depths else np.nan,
+        "injected_sampled_depth_max_mag": float(max(sampled_event_depths)) if sampled_event_depths else np.nan,
         "injected_max_delta_mag": float(np.nanmax(signal)) if signal.size else np.nan,
     }
 
@@ -918,6 +966,17 @@ def _score_filter_fields(res: dict[str, Any]) -> dict[str, Any]:
 
     dip_morph = _best_morph_info(dip.get("run_summaries", []))
     jump_morph = _best_morph_info(jump.get("run_summaries", []))
+    dip_indices = np.asarray(dip.get("event_indices", []), dtype=int)
+    injected_overlap_points = 0
+    injected_overlap = False
+    if isinstance(df, pd.DataFrame) and "benchmark_injected_signal_mag" in df.columns:
+        injected_signal = pd.to_numeric(df["benchmark_injected_signal_mag"], errors="coerce").to_numpy(float)
+        finite_signal = injected_signal[np.isfinite(injected_signal)]
+        threshold = max(0.25 * float(np.nanmax(finite_signal)), 0.01) if finite_signal.size else np.inf
+        truth_mask = np.isfinite(injected_signal) & (injected_signal >= threshold)
+        valid_indices = dip_indices[(dip_indices >= 0) & (dip_indices < len(truth_mask))]
+        injected_overlap_points = int(np.count_nonzero(truth_mask[valid_indices]))
+        injected_overlap = bool(injected_overlap_points > 0)
     return {
         "dip_count": int(len(dip.get("event_indices", []))),
         "jump_count": int(len(jump.get("event_indices", []))),
@@ -933,11 +992,14 @@ def _score_filter_fields(res: dict[str, Any]) -> dict[str, Any]:
         "jump_best_delta_bic": float(jump_morph["delta_bic"]),
         "dipper_score": dipper_score,
         "jumper_score": jumper_score,
+        "dip_injected_overlap": injected_overlap,
+        "dip_injected_overlap_points": injected_overlap_points,
     }
 
 
 def _empty_score_result(baseline_name: str, error: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {
+        "status": "error" if error else "not_run",
         "detected": False,
         "dip_significant": False,
         "jump_significant": False,
@@ -950,6 +1012,8 @@ def _empty_score_result(baseline_name: str, error: str | None = None) -> dict[st
         "baseline_mag": np.nan,
         "dip_best_mag_event": np.nan,
         "jump_best_mag_event": np.nan,
+        "dip_best_delta_mag": np.nan,
+        "jump_best_delta_mag": np.nan,
         "baseline_source": str(baseline_name),
         "error": error,
     }
@@ -969,6 +1033,8 @@ def _empty_score_result(baseline_name: str, error: str | None = None) -> dict[st
             "jump_best_delta_bic": 0.0,
             "dipper_score": 0.0,
             "jumper_score": 0.0,
+            "dip_injected_overlap": False,
+            "dip_injected_overlap_points": 0,
         }
     )
     return out
@@ -996,15 +1062,17 @@ def score_detection(
         baseline_mag = float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan)))
         dip_best_mag_event = float(dip.get("best_mag_event", np.nan))
         jump_best_mag_event = float(jump.get("best_mag_event", np.nan))
+        dip_best_delta_mag = float(dip.get("best_delta_mag", dip_best_mag_event))
+        jump_best_delta_mag = float(jump.get("best_delta_mag", jump_best_mag_event))
         dip_significant = bool(dip.get("significant", False))
         jump_significant = bool(jump.get("significant", False))
 
-        if config.min_mag_offset > 0 and np.isfinite(baseline_mag):
-            dip_diff = abs(dip_best_mag_event - baseline_mag) if np.isfinite(dip_best_mag_event) else 0.0
-            jump_diff = abs(jump_best_mag_event - baseline_mag) if np.isfinite(jump_best_mag_event) else 0.0
-            if dip_diff <= float(config.min_mag_offset):
+        if config.min_mag_offset > 0:
+            dip_diff = abs(dip_best_delta_mag) if np.isfinite(dip_best_delta_mag) else np.nan
+            jump_diff = abs(jump_best_delta_mag) if np.isfinite(jump_best_delta_mag) else np.nan
+            if not np.isfinite(dip_diff) or dip_diff < float(config.min_mag_offset):
                 dip_significant = False
-            if jump_diff <= float(config.min_mag_offset):
+            if not np.isfinite(jump_diff) or jump_diff < float(config.min_mag_offset):
                 jump_significant = False
 
         df_base = res.get("df_base")
@@ -1014,6 +1082,7 @@ def score_detection(
             baseline_source = str(baseline_name)
 
         out = {
+            "status": "ok",
             "detected": bool(dip_significant),
             "dip_significant": bool(dip_significant),
             "jump_significant": bool(jump_significant),
@@ -1026,6 +1095,8 @@ def score_detection(
             "baseline_mag": baseline_mag,
             "dip_best_mag_event": dip_best_mag_event,
             "jump_best_mag_event": jump_best_mag_event,
+            "dip_best_delta_mag": dip_best_delta_mag,
+            "jump_best_delta_mag": jump_best_delta_mag,
             "baseline_source": baseline_source,
             "error": None,
         }
@@ -1092,7 +1163,11 @@ def _evaluate_trial_record(
     selected_period = float(gate.get("pre_periodicity_selected_period", np.nan))
     standard = score_detection(df_trial, config, baseline_name=config.baseline_func)
     phase = score_detection(df_trial, config, baseline_name="phase_template", period_days=selected_period)
-    bifurcated_detected = bool(phase["detected"] if bool(gate.get("pre_periodic_flag", False)) else standard["detected"])
+    use_phase = bool(gate.get("pre_periodic_flag", False))
+    selected_score = phase if use_phase else standard
+    bifurcated_detected = bool(selected_score["detected"])
+    bifurcated_status = str(selected_score.get("status") or "error")
+    bifurcated_overlap = bool(selected_score.get("dip_injected_overlap", False))
 
     period_usable, period_rel_error, period_harmonic_factor = period_match_quality(
         selected_period,
@@ -1105,6 +1180,14 @@ def _evaluate_trial_record(
         **_prefix_dict("standard", standard),
         **_prefix_dict("phase_folded", phase),
         "bifurcated_detected": bifurcated_detected,
+        "bifurcated_status": bifurcated_status,
+        "bifurcated_injected_overlap": bifurcated_overlap,
+        "bifurcated_target_recovered": bool(
+            trial_dict.get("target_dip", False)
+            and bifurcated_status == "ok"
+            and bifurcated_detected
+            and bifurcated_overlap
+        ),
         "period_usable": bool(period_usable),
         "period_rel_error": period_rel_error,
         "period_match_harmonic_factor": period_harmonic_factor,
@@ -1240,6 +1323,16 @@ def _mean_bool(series: pd.Series) -> float:
     return float(series.fillna(False).astype(bool).mean())
 
 
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    if trials <= 0:
+        return np.nan, np.nan
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denominator
+    half_width = z * np.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half_width)), float(min(1.0, center + half_width))
+
+
 def _route_confusion_metrics(df: pd.DataFrame, route_periodic: pd.Series) -> dict[str, Any]:
     hard = df["target_gate_label"].isin(["periodic", "non_periodic"])
     if not hard.any():
@@ -1286,7 +1379,7 @@ def _pipeline_post_filter_input(results: pd.DataFrame, pipeline: str) -> pd.Data
     route_phase = results["pre_periodic_flag"].fillna(False).astype(bool)
     out = pd.DataFrame(
         {
-            "path": [f"synthetic://{pipeline}/trial_{int(tid)}" for tid in results["trial_id"]],
+            "lc_path": [f"synthetic://{pipeline}/trial_{int(tid)}" for tid in results["trial_id"]],
             "trial_id": results["trial_id"].astype(int).to_numpy(),
             "class_name": results["class_name"].astype(str).to_numpy(),
             "source_id": results["source_id"].astype(str).to_numpy(),
@@ -1294,6 +1387,9 @@ def _pipeline_post_filter_input(results: pd.DataFrame, pipeline: str) -> pd.Data
             "target_dip": results["target_dip"].fillna(False).astype(bool).to_numpy(),
             "target_gate_label": results["target_gate_label"].astype(str).to_numpy(),
             "raw_detected": results[PIPELINE_DETECTED_COLUMNS[pipeline]].fillna(False).astype(bool).to_numpy(),
+            "pipeline_status": results[PIPELINE_STATUS_COLUMNS[pipeline]].astype("string").to_numpy(),
+            "injection_observable": results.get("injection_observable", pd.Series(False, index=results.index)).fillna(False).astype(bool).to_numpy(),
+            "injected_overlap": results[PIPELINE_OVERLAP_COLUMNS[pipeline]].fillna(False).astype(bool).to_numpy(),
             "gaia_id": "",
             "pmra": np.nan,
             "pmdec": np.nan,
@@ -1332,7 +1428,8 @@ def _summarize_post_filter_rejections(post_filter_results: pd.DataFrame) -> pd.D
             for class_name, group in pipe_group.groupby("class_name", sort=False)
         )
         for scope, class_name, group in groups:
-            raw = group["raw_detected"].fillna(False).astype(bool)
+            evaluated = group.get("post_filter_evaluated", pd.Series(True, index=group.index)).fillna(False).astype(bool)
+            raw = group["raw_detected"].fillna(False).astype(bool) & evaluated
             post_pass = group["post_filter_passed"].fillna(False).astype(bool)
             failed_any = group.get("failed_any", pd.Series(False, index=group.index)).fillna(False).astype(bool)
             rows.append(
@@ -1342,6 +1439,8 @@ def _summarize_post_filter_rejections(post_filter_results: pd.DataFrame) -> pd.D
                     "pipeline": pipeline,
                     "filter": "failed_any",
                     "n": int(len(group)),
+                    "n_evaluated": int(evaluated.sum()),
+                    "n_error": int((~evaluated).sum()),
                     "raw_detected_n": int(raw.sum()),
                     "post_filter_passed_n": int(post_pass.sum()),
                     "rejected_raw_detected_n": int((raw & failed_any).sum()),
@@ -1357,6 +1456,8 @@ def _summarize_post_filter_rejections(post_filter_results: pd.DataFrame) -> pd.D
                         "pipeline": pipeline,
                         "filter": failed_col.removeprefix("failed_"),
                         "n": int(len(group)),
+                        "n_evaluated": int(evaluated.sum()),
+                        "n_error": int((~evaluated).sum()),
                         "raw_detected_n": int(raw.sum()),
                         "post_filter_passed_n": int(post_pass.sum()),
                         "rejected_raw_detected_n": int((raw & failed).sum()),
@@ -1384,8 +1485,10 @@ def run_post_filter_analysis(
         )
         raw = filtered["raw_detected"].fillna(False).astype(bool)
         failed_any = filtered.get("failed_any", pd.Series(False, index=filtered.index)).fillna(False).astype(bool)
+        evaluated = filtered["pipeline_status"].astype(str).eq("ok")
         filtered["pipeline"] = pipeline
-        filtered["post_filter_passed"] = raw & ~failed_any
+        filtered["post_filter_evaluated"] = evaluated
+        filtered["post_filter_passed"] = evaluated & raw & ~failed_any
         frames.append(filtered)
 
     post_filter_results = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1400,8 +1503,13 @@ def _post_filter_metrics_for_trials(
 ) -> dict[str, Any]:
     empty = {
         "post_filter_passed_n": np.nan,
+        "post_filter_evaluated_n": np.nan,
+        "post_filter_error_n": np.nan,
         "post_filter_pass_rate": np.nan,
         "post_filter_target_recovery": np.nan,
+        "post_filter_observable_target_recovery": np.nan,
+        "post_filter_target_recovered_n": np.nan,
+        "post_filter_target_n": np.nan,
         "final_false_positive_rate": np.nan,
         "post_filter_detection_rate": np.nan,
     }
@@ -1414,14 +1522,26 @@ def _post_filter_metrics_for_trials(
     ]
     if group.empty:
         return empty
+    evaluated = group.get("post_filter_evaluated", pd.Series(True, index=group.index)).fillna(False).astype(bool)
     target = group["target_dip"].fillna(False).astype(bool)
     passed = group["post_filter_passed"].fillna(False).astype(bool)
+    overlap = group.get("injected_overlap", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+    observable = group.get("injection_observable", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+    recovered = evaluated & target & passed & overlap
+    evaluated_target = evaluated & target
+    observable_target = evaluated_target & observable
+    evaluated_control = evaluated & ~target
     return {
         "post_filter_passed_n": int(passed.sum()),
-        "post_filter_pass_rate": _mean_bool(passed),
-        "post_filter_target_recovery": _mean_bool(passed[target]) if bool(target.any()) else np.nan,
-        "final_false_positive_rate": _mean_bool(passed[~target]) if bool((~target).any()) else np.nan,
-        "post_filter_detection_rate": _mean_bool(passed),
+        "post_filter_evaluated_n": int(evaluated.sum()),
+        "post_filter_error_n": int((~evaluated).sum()),
+        "post_filter_pass_rate": _mean_bool(passed[evaluated]) if bool(evaluated.any()) else np.nan,
+        "post_filter_target_recovery": float(recovered.sum() / evaluated_target.sum()) if bool(evaluated_target.any()) else np.nan,
+        "post_filter_observable_target_recovery": float(recovered[observable_target].sum() / observable_target.sum()) if bool(observable_target.any()) else np.nan,
+        "post_filter_target_recovered_n": int(recovered.sum()),
+        "post_filter_target_n": int(evaluated_target.sum()),
+        "final_false_positive_rate": _mean_bool(passed[evaluated_control]) if bool(evaluated_control.any()) else np.nan,
+        "post_filter_detection_rate": _mean_bool(passed[evaluated]) if bool(evaluated.any()) else np.nan,
     }
 
 
@@ -1429,23 +1549,65 @@ def summarize_results(
     results: pd.DataFrame,
     post_filter_results: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
+    def metric_row(group: pd.DataFrame, pipeline: str) -> dict[str, Any]:
+        detected = group[PIPELINE_DETECTED_COLUMNS[pipeline]].fillna(False).astype(bool)
+        status = group[PIPELINE_STATUS_COLUMNS[pipeline]].astype("string")
+        evaluated = status.eq("ok")
+        target = group["target_dip"].fillna(False).astype(bool)
+        observable = group.get("injection_observable", pd.Series(False, index=group.index)).fillna(False).astype(bool)
+        overlap = group[PIPELINE_OVERLAP_COLUMNS[pipeline]].fillna(False).astype(bool)
+        recovered = evaluated & target & detected & overlap
+        evaluated_target = evaluated & target
+        observable_target = evaluated_target & observable
+        evaluated_control = evaluated & ~target
+        evaluated_detected = evaluated & detected
+        target_n = int(target.sum())
+        evaluated_target_n = int(evaluated_target.sum())
+        observable_target_n = int(observable_target.sum())
+        control_n = int(evaluated_control.sum())
+        detection_n = int(evaluated_detected.sum())
+        recovered_n = int(recovered.sum())
+        false_positive_n = int((evaluated_control & detected).sum())
+        precision_numerator = int((recovered & evaluated_detected).sum())
+        recovery_ci = _wilson_interval(recovered_n, evaluated_target_n)
+        observable_ci = _wilson_interval(int(recovered[observable_target].sum()), observable_target_n)
+        fp_ci = _wilson_interval(false_positive_n, control_n)
+        precision_ci = _wilson_interval(precision_numerator, detection_n)
+        return {
+            "n": int(len(group)),
+            "evaluated_n": int(evaluated.sum()),
+            "error_n": int((~evaluated).sum()),
+            "raw_detected_n": detection_n,
+            "target_n": target_n,
+            "evaluated_target_n": evaluated_target_n,
+            "observable_target_n": observable_target_n,
+            "target_recovered_n": recovered_n,
+            "target_recovery": float(recovered_n / evaluated_target_n) if evaluated_target_n else np.nan,
+            "target_recovery_ci95_low": recovery_ci[0],
+            "target_recovery_ci95_high": recovery_ci[1],
+            "observable_target_recovery": float(recovered[observable_target].sum() / observable_target_n) if observable_target_n else np.nan,
+            "observable_target_recovery_ci95_low": observable_ci[0],
+            "observable_target_recovery_ci95_high": observable_ci[1],
+            "end_to_end_target_recovery": float(recovered_n / target_n) if target_n else np.nan,
+            "false_positive_n": false_positive_n,
+            "control_n": control_n,
+            "false_positive_rate": float(false_positive_n / control_n) if control_n else np.nan,
+            "false_positive_rate_ci95_low": fp_ci[0],
+            "false_positive_rate_ci95_high": fp_ci[1],
+            "detection_rate": float(detection_n / evaluated.sum()) if bool(evaluated.any()) else np.nan,
+            "precision_by_trial": float(precision_numerator / detection_n) if detection_n else np.nan,
+            "precision_by_trial_ci95_low": precision_ci[0],
+            "precision_by_trial_ci95_high": precision_ci[1],
+        }
+
     rows: list[dict[str, Any]] = []
-    pipelines = {
-        pipeline: results[column].fillna(False).astype(bool)
-        for pipeline, column in PIPELINE_DETECTED_COLUMNS.items()
-    }
-    for pipeline, detected in pipelines.items():
-        target = results["target_dip"].fillna(False).astype(bool)
+    for pipeline in PIPELINE_DETECTED_COLUMNS:
         rows.append(
             {
                 "scope": "all",
                 "class_name": "ALL",
                 "pipeline": pipeline,
-                "n": int(len(results)),
-                "raw_detected_n": int(detected.sum()),
-                "target_recovery": _mean_bool(detected[target]),
-                "false_positive_rate": _mean_bool(detected[~target]),
-                "detection_rate": _mean_bool(detected),
+                **metric_row(results, pipeline),
                 **_post_filter_metrics_for_trials(
                     post_filter_results,
                     pipeline=pipeline,
@@ -1457,18 +1619,12 @@ def summarize_results(
             }
         )
         for class_name, group in results.groupby("class_name", sort=False):
-            gdet = detected.loc[group.index]
-            gtarget = group["target_dip"].fillna(False).astype(bool)
             rows.append(
                 {
                     "scope": "class",
                     "class_name": str(class_name),
                     "pipeline": pipeline,
-                    "n": int(len(group)),
-                    "raw_detected_n": int(gdet.sum()),
-                    "target_recovery": _mean_bool(gdet[gtarget]) if bool(gtarget.any()) else np.nan,
-                    "false_positive_rate": _mean_bool(gdet[~gtarget]) if bool((~gtarget).any()) else np.nan,
-                    "detection_rate": _mean_bool(gdet),
+                    **metric_row(group, pipeline),
                     **_post_filter_metrics_for_trials(
                         post_filter_results,
                         pipeline=pipeline,

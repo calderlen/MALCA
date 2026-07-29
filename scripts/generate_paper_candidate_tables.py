@@ -37,6 +37,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from malca.ltv.cmd import dustmaps_cmd_from_fields  # noqa: E402
 from malca.review.coordinate_labels import format_j_designation, payload_ra_dec  # noqa: E402
+from malca.review.paper_candidates import build_publication_cohort  # noqa: E402
 from malca.review.store import get_candidate_payload  # noqa: E402
 
 
@@ -62,7 +63,7 @@ LATEX_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("ra_deg", r"R.A.", r"[deg]"),
     ("dec_deg", r"Decl.", r"[deg]"),
     ("search_method", "Search method", ""),
-    ("mean_g_mag", r"Mean $g$", r"[mag]"),
+    ("aligned_asassn_mean_mag", r"$\langle m_{\rm ASAS\text{-}SN}\rangle$", r"[mag]"),
     ("absolute_g_mag", r"$M_G$", r"[mag]"),
     ("bp_rp_mag", r"$G_{\rm BP}-G_{\rm RP}$", r"[mag]"),
     ("rv_amplitude_kms", r"$RV_{\rm amp}$", r"[km s$^{-1}$]"),
@@ -105,9 +106,10 @@ def clean_identifier(value: object) -> str | None:
 def select_distance(payload: Mapping[str, object]) -> tuple[float | None, str | None]:
     """Choose a paper distance without making a network query.
 
-    Existing Bailer-Jones values take precedence, followed by Gaia GSP-Phot and
-    the distance used by the dust calculation.  A positive parallax is the
-    final fallback.
+    Existing posterior distance products take precedence, followed by the
+    distance used by the dust calculation.  A naive inverse-parallax estimate
+    is deliberately not manufactured here: it is biased/unstable at modest
+    signal-to-noise and has no faithful uncertainty in this table.
     """
     choices = (
         ("bj_r_med_photogeo", "Bailer-Jones photogeometric"),
@@ -122,10 +124,39 @@ def select_distance(payload: Mapping[str, object]) -> tuple[float | None, str | 
         if distance is not None and distance > 0:
             return distance, label
 
-    parallax = finite_number(payload.get("parallax"))
-    if parallax is not None and parallax > 0:
-        return 1000.0 / parallax, "inverse positive parallax"
     return None, None
+
+
+def select_distance_with_uncertainty(payload: Mapping[str, object]) -> dict[str, object]:
+    """Select a distance and carry its matching interval/provenance fields."""
+    distance, source = select_distance(payload)
+    lower = upper = None
+    uncertainty_source = None
+    if source == "Bailer-Jones photogeometric":
+        lower = first_finite(payload, ("bj_r_lo_photogeo", "r_lo_photogeo"))
+        upper = first_finite(payload, ("bj_r_hi_photogeo", "r_hi_photogeo"))
+        uncertainty_source = "Bailer-Jones photogeometric interval" if lower is not None or upper is not None else None
+    elif source == "Bailer-Jones geometric":
+        lower = first_finite(payload, ("bj_r_lo_geo", "r_lo_geo"))
+        upper = first_finite(payload, ("bj_r_hi_geo", "r_hi_geo"))
+        uncertainty_source = "Bailer-Jones geometric interval" if lower is not None or upper is not None else None
+    elif source == "Gaia GSP-Phot":
+        lower = first_finite(payload, ("distance_gspphot_lower", "distance_gspphot_lo"))
+        upper = first_finite(payload, ("distance_gspphot_upper", "distance_gspphot_hi"))
+        uncertainty_source = "Gaia GSP-Phot interval" if lower is not None or upper is not None else None
+    elif source in {"dust-distance input", "stored distance"}:
+        error = first_finite(payload, ("distance_error", "distance_error_pc", "dist_error"))
+        if distance is not None and error is not None and error >= 0:
+            lower = max(0.0, distance - error)
+            upper = distance + error
+            uncertainty_source = "stored symmetric distance error"
+    return {
+        "distance_pc": distance,
+        "distance_source": source,
+        "distance_lower_pc": lower,
+        "distance_upper_pc": upper,
+        "distance_uncertainty_source": uncertainty_source,
+    }
 
 
 def observed_bp_rp(payload: Mapping[str, object]) -> float | None:
@@ -152,7 +183,8 @@ def build_source_row(
         ra_deg, dec_deg = coords
         source = format_j_designation(ra_deg, dec_deg)
 
-    distance_pc, distance_source = select_distance(payload)
+    distance_info = select_distance_with_uncertainty(payload)
+    distance_pc = finite_number(distance_info["distance_pc"])
     bp_rp = observed_bp_rp(payload)
     gaia_g = finite_number(payload.get("phot_g_mean_mag"))
     cmd = dustmaps_cmd_from_fields(
@@ -183,13 +215,12 @@ def build_source_row(
         "ra_deg": ra_deg,
         "dec_deg": dec_deg,
         "search_method": search_method,
-        "mean_g_mag": first_finite(
+        "aligned_asassn_mean_mag": first_finite(
             payload,
             (
                 "stats_photometry_mean_mag",
                 "ltv_median",
                 "baseline_mag",
-                "phot_g_mean_mag",
             ),
         ),
         "gaia_g_mag": gaia_g,
@@ -201,9 +232,9 @@ def build_source_row(
         ),
         "ruwe": finite_number(payload.get("ruwe")),
         "distance_pc": distance_pc,
-        "distance_source": distance_source,
+        **distance_info,
         "cmd_coordinate_source": clean_identifier(cmd.get("cmd_coordinate_source")),
-        "review_interest_score": finite_number(payload.get("interest_score")),
+        "review_classification_confidence": finite_number(payload.get("classification_confidence")),
         "review_updated_at": clean_identifier(payload.get("review_updated_at")),
     }
 
@@ -235,31 +266,57 @@ def load_review_candidate_payloads(
     path = Path(db_path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    placeholders = ", ".join("?" for _ in selected)
-    query = f"""
-        SELECT
-            r.candidate_id,
-            lower(trim(r.event_class)) AS event_class,
-            r.interest_score,
-            r.updated_at
-        FROM reviews AS r
-        JOIN candidates AS c USING (candidate_id)
-        WHERE lower(trim(r.event_class)) IN ({placeholders})
-          {_reviewed_sql(include_nonreviewed)}
-        ORDER BY r.updated_at, r.candidate_id
-    """
-
     uri = f"file:{path.as_posix()}?mode=ro"
     with sqlite3.connect(uri, uri=True, timeout=30.0) as conn:
         conn.execute("PRAGMA query_only = ON")
-        review_rows = conn.execute(query, selected).fetchall()
+        review_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+        }
+        optional = {
+            "workflow_status": "status",
+            "status": None,
+            "disposition": None,
+            "duplicate_of": None,
+            "classification_confidence": None,
+            "updated_at": None,
+        }
+        select_parts = ["r.candidate_id", "lower(trim(r.event_class)) AS event_class"]
+        for column, fallback in optional.items():
+            if column in review_columns:
+                select_parts.append(f"r.{column} AS {column}")
+            elif fallback and fallback in review_columns:
+                select_parts.append(f"r.{fallback} AS {column}")
+            else:
+                select_parts.append(f"NULL AS {column}")
+        review_frame = pd.read_sql_query(
+            "SELECT " + ", ".join(select_parts) + " FROM reviews AS r JOIN candidates AS c USING (candidate_id)",
+            conn,
+        )
+        review_frame = review_frame.loc[
+            review_frame["event_class"].astype("string").str.lower().isin(selected)
+        ].copy()
+        if not include_nonreviewed:
+            bucket_map = {
+                "dipper": "Dipper",
+                "ltv": "LTV",
+                "microlensing": "Microlensing",
+            }
+            review_frame = build_publication_cohort(
+                review_frame,
+                buckets=[bucket_map[value] for value in selected],
+            )
+            review_frame = review_frame.loc[review_frame["publication_selected"]].copy()
+        review_frame = review_frame.sort_values(["updated_at", "candidate_id"], na_position="last")
         payloads: list[dict[str, object]] = []
-        for candidate_id, event_class, interest_score, updated_at in review_rows:
+        for row in review_frame.to_dict(orient="records"):
+            candidate_id = row["candidate_id"]
             payload = get_candidate_payload(conn, str(candidate_id))
             payload["candidate_id"] = str(candidate_id)
-            payload["event_class"] = str(event_class)
-            payload["interest_score"] = interest_score
-            payload["review_updated_at"] = updated_at
+            payload["event_class"] = str(row["event_class"])
+            payload["classification_confidence"] = row.get("classification_confidence")
+            payload["review_updated_at"] = row.get("updated_at")
+            if not include_nonreviewed:
+                payload["publication_cohort_version"] = row.get("publication_cohort_version")
             payloads.append(payload)
     return payloads
 
@@ -314,7 +371,7 @@ def format_latex_value(column: str, value: object) -> str:
     precision = {
         "ra_deg": 5,
         "dec_deg": 5,
-        "mean_g_mag": 2,
+        "aligned_asassn_mean_mag": 2,
         "absolute_g_mag": 2,
         "bp_rp_mag": 2,
         "rv_amplitude_kms": 2,
@@ -505,7 +562,7 @@ def export_tables(table: pd.DataFrame, output_dir: Path | str) -> list[Path]:
 
 
 def completeness_summary(table: pd.DataFrame) -> pd.DataFrame:
-    fields = ("ra_deg", "mean_g_mag", "absolute_g_mag", "bp_rp_mag", "distance_pc")
+    fields = ("ra_deg", "aligned_asassn_mean_mag", "absolute_g_mag", "bp_rp_mag", "distance_pc")
     rows: list[dict[str, object]] = []
     for candidate_class in CLASS_ORDER:
         subset = table.loc[table["candidate_class"].eq(candidate_class)]

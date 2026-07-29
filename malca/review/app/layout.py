@@ -94,6 +94,7 @@ def create_layout():
             html.Div([
                 html.Button('Refresh Slider Bounds', id='refresh-filter-bounds-btn', n_clicks=0, className='compact-btn'),
                 html.Button('Reset Numeric Filters', id='reset-numeric-filters-btn', n_clicks=0, className='compact-btn'),
+                html.Button('Reset All Filters', id='reset-all-filters-btn', n_clicks=0, className='compact-btn'),
                 html.Span('Sliders load on startup; use refresh to rebuild bounds.', id='numeric-bounds-status', style={'fontSize': '10px', 'color': '#7d91a6'}),
             ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px', 'marginBottom': '6px'}),
             html.Div('Dropdown options load when the sidebar opens.', id='filter-load-status', style={'fontSize': '10px', 'color': '#7d91a6', 'marginBottom': '6px'}),
@@ -114,8 +115,45 @@ def create_layout():
                 id='select-filter-mode',
                 options=[{'label': ' Include selected categorical values', 'value': 'include'}],
                 value=[],
-                style={'margin-bottom': '6px'},
+                style={'display': 'none'},
             ),
+            html.Button(
+                'All categorical filters: Exclude selected',
+                id='toggle-select-filter-mode-btn',
+                n_clicks=0,
+                className='compact-btn select-filter-mode-btn is-exclude',
+                title='Click to include selected values in every categorical filter.',
+                style={'width': '100%', 'marginBottom': '6px'},
+            ),
+            dcc.RadioItems(
+                id='select-filter-logic',
+                options=[
+                    {'label': 'AND', 'value': 'and'},
+                    {'label': 'OR', 'value': 'or'},
+                ],
+                value='and',
+                style={'display': 'none'},
+            ),
+            html.Div([
+                html.Span(
+                    'Combine categorical filters:',
+                    className='select-filter-logic-label',
+                ),
+                html.Button(
+                    'AND',
+                    id='select-filter-logic-and-btn',
+                    n_clicks=0,
+                    className='compact-btn select-filter-logic-btn is-active',
+                    title='Require every active categorical filter to match.',
+                ),
+                html.Button(
+                    'OR',
+                    id='select-filter-logic-or-btn',
+                    n_clicks=0,
+                    className='compact-btn select-filter-logic-btn',
+                    title='Keep candidates matching any active categorical filter.',
+                ),
+            ], className='select-filter-logic-row'),
             html.Div([
                 dcc.Input(
                     id='review-filter-search-query',
@@ -147,8 +185,8 @@ def create_layout():
                     + [{'label': col, 'value': col}
                        for _, items in _SIDEBAR_GROUPS
                        for ftype, col in items
-                       if ftype == 'num' and col not in {'interest_score', 'review_pass'}]
-                     + [{'label': 'Confidence', 'value': 'interest_score'},
+                       if ftype == 'num' and col not in {'classification_confidence', 'review_pass'}]
+                     + [{'label': 'Label confidence', 'value': 'classification_confidence'},
                         {'label': 'Review Pass', 'value': 'review_pass'},
                         {'label': 'Updated At', 'value': 'updated_at'}]
                 ),
@@ -651,6 +689,15 @@ def create_layout():
                                         persistence_type='local',
                                     ),
                                     html.Span('[d]', className='plot-control-label'),
+                                    dcc.Checklist(
+                                        id='period-long-p-toggle',
+                                        options=[{'label': ' long-P', 'value': 'long'}],
+                                        value=[],
+                                        inline=True,
+                                        persistence=_review_persistence_token(),
+                                        persistence_type='local',
+                                        style={'font-size': '10px', 'marginLeft': '4px'},
+                                    ),
                                     html.Button('Find Period', id='pdm-run-btn', n_clicks=0, className='compact-btn'),
                                     dcc.Input(
                                         id='pdm-manual-period',
@@ -1123,9 +1170,9 @@ def create_layout():
 
             # Control bar
             html.Div([
-                # Score row
+                # Label-confidence row
                 html.Div([
-                    html.Span('Confidence: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
+                    html.Span('Label confidence: ', style={'color': '#aaa', 'margin-right': '8px', 'font-size': '11px'}),
                 ] + [
                     html.Button(str(i), id=f'score-{i}', n_clicks=0, className='score-btn')
                     for i in range(1, 5)

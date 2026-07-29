@@ -10,6 +10,7 @@ import pytest
 from malca.review.eda_data import (
     add_eda_columns,
     available_metric_columns,
+    contains_periodic_label,
     infer_plot_dir_from_source,
     infer_source_kind,
     load_candidate_source,
@@ -59,6 +60,7 @@ def test_add_eda_columns_builds_proxy_fields(tmp_path: Path) -> None:
                 "dip_is_single_event": True,
                 "dipper_n_valid_dips": 8,
                 "vetting_likely_known": False,
+                "vsx_class": "none",
                 "dipper_score": 15,
             },
         ],
@@ -68,10 +70,78 @@ def test_add_eda_columns_builds_proxy_fields(tmp_path: Path) -> None:
 
     row1 = frame.loc[frame["candidate_id"] == "C1"].iloc[0]
     row2 = frame.loc[frame["candidate_id"] == "C2"].iloc[0]
-    assert bool(row1["known_periodic_catalog"]) is True
+    assert pd.isna(row1["known_periodic_catalog"])
     assert bool(row1["strong_catalog_period"]) is True
     assert bool(row2["proxy_oneoff_dipper"]) is True
     assert frame.attrs["default_target_col"] == "proxy_oneoff_dipper"
+
+
+def test_periodic_catalog_detection_uses_class_tokens_not_substrings() -> None:
+    labels = pd.Series(["IRREGULAR", "PROTOSTAR", "RRAB", "ROT", "EA/DM"])
+
+    assert contains_periodic_label(labels).tolist() == [False, False, True, True, True]
+
+
+def test_eda_does_not_treat_general_known_objects_or_zero_events_as_periodic_or_oneoff() -> None:
+    result = add_eda_columns(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "known_agn",
+                    "vetting_likely_known": True,
+                    "simbad_otype": "AGN",
+                    "dip_run_count": 0,
+                },
+                {
+                    "candidate_id": "canonical_alias",
+                    "periodicity_is_significant": True,
+                    "periodicity_alias_flag": True,
+                    "lsp_is_alias": False,
+                    "phase_quality_score": 0.9,
+                },
+                {
+                    "candidate_id": "blank_review",
+                    "workflow_status": "reviewed",
+                    "event_class": "",
+                },
+            ]
+        )
+    )
+
+    known = result.loc[result["candidate_id"].eq("known_agn")].iloc[0]
+    alias = result.loc[result["candidate_id"].eq("canonical_alias")].iloc[0]
+    blank = result.loc[result["candidate_id"].eq("blank_review")].iloc[0]
+    assert bool(known["known_periodic_catalog"]) is False
+    assert bool(known["oneoff_like"]) is False
+    assert bool(alias["strong_native_period"]) is False
+    assert pd.isna(blank["is_reviewed_non_dipper"])
+
+
+def test_add_eda_columns_preserves_unknown_evidence_and_uses_workflow_status() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "reviewed",
+                "workflow_status": "reviewed",
+                "event_class": "dipper",
+                "vetting_likely_known": None,
+            },
+            {
+                "candidate_id": "label_only",
+                "event_class": "dipper",
+                "vetting_likely_known": "not-a-boolean",
+            },
+        ]
+    )
+
+    result = add_eda_columns(frame)
+
+    reviewed = result.loc[result["candidate_id"].eq("reviewed")].iloc[0]
+    label_only = result.loc[result["candidate_id"].eq("label_only")].iloc[0]
+    assert bool(reviewed["is_reviewed"]) is True
+    assert pd.isna(label_only["is_reviewed"])
+    assert pd.isna(label_only["known_periodic_catalog"])
+    assert label_only["periodic_evidence_bucket"] == "unknown"
 
 
 def test_add_eda_columns_fills_catalog_type_aliases(tmp_path: Path) -> None:
@@ -115,7 +185,7 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
             """
             CREATE TABLE reviews (
                 candidate_id TEXT,
-                interest_score INTEGER,
+                classification_confidence INTEGER,
                 event_class TEXT,
                 review_pass INTEGER,
                 notes TEXT,
@@ -123,7 +193,6 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
                 workflow_status TEXT,
                 morphology_primary TEXT,
                 physical_primary TEXT,
-                classification_confidence TEXT,
                 known_object_id TEXT,
                 taxonomy_version INTEGER,
                 reviewer TEXT,
@@ -136,7 +205,7 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
             ("C4", "/tmp/run", json.dumps({"candidate_id": "C4", "dipper_score": 8.0})),
         )
         conn.execute(
-            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "C4",
                 3,
@@ -147,7 +216,6 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
                 "reviewed",
                 "dimming_event",
                 "young_stellar_object_or_pms",
-                "secure",
                 "VSX J0004",
                 1,
                 "tester",
@@ -158,12 +226,11 @@ def test_load_review_db_merges_review_columns(tmp_path: Path) -> None:
 
     df = load_review_db(db)
 
-    assert df.loc[0, "interest_score"] == 3
+    assert df.loc[0, "classification_confidence"] == 3
     assert df.loc[0, "event_class"] == "dipper"
     assert df.loc[0, "status"] == "reviewed"
     assert df.loc[0, "morphology_primary"] == "dimming_event"
     assert df.loc[0, "physical_primary"] == "young_stellar_object_or_pms"
-    assert df.loc[0, "classification_confidence"] == "secure"
     assert df.loc[0, "known_object_id"] == "VSX J0004"
 
 

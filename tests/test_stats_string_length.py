@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import sys
 import types
 
@@ -120,3 +121,70 @@ def test_enrich_row_worker_passes_file_extension(monkeypatch: pytest.MonkeyPatch
 
     assert seen["kwargs"]["file_ext"] == "dat2"
     assert row["stats_n_points_total"] == 5
+
+
+def test_enrich_row_worker_prefers_exact_lc_path_and_its_suffix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_path = tmp_path / "ASASSN-source-with-hyphens.dat7"
+    exact_path.write_text("placeholder", encoding="ascii")
+    seen: dict[str, object] = {}
+
+    def fake_compute_stats(asassn_id, path, **kwargs):
+        seen.update(
+            {
+                "asassn_id": asassn_id,
+                "path": path,
+                "file_ext": kwargs.get("file_ext"),
+            }
+        )
+        return pd.DataFrame(), {"n_points_total": 5}
+
+    monkeypatch.setattr(stats, "compute_stats", fake_compute_stats)
+
+    row = stats._enrich_row_worker(
+        (
+            {"lc_path": str(exact_path), "candidate_id": "stv-not-the-file-stem"},
+            "truncated",
+            str(tmp_path),
+            False,
+            "dat3",
+        )
+    )
+
+    assert seen == {
+        "asassn_id": "ASASSN-source-with-hyphens",
+        "path": str(exact_path),
+        "file_ext": "dat7",
+    }
+    assert row["stats_n_points_total"] == 5
+
+
+def test_compute_stats_reads_exact_mixed_suffix_path_without_reconstructing_id(
+    tmp_path: Path,
+) -> None:
+    exact_path = tmp_path / "ASASSN-source-with-hyphens.dat7"
+    exact_path.write_text(
+        "\n".join(
+            [
+                "1000.0 14.0 0.05 1 1 0 0 cam1/field1",
+                "1010.0 14.1 0.05 1 1 0 0 cam1/field1",
+                "1020.0 14.2 0.05 1 1 0 0 cam1/field1",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+
+    _frame, summary = stats.compute_stats(
+        "incorrect-truncated-id",
+        exact_path,
+        compute_ls=False,
+        file_ext="dat3",
+    )
+
+    assert summary["compute_status"] == "ok"
+    assert summary["file_points_total"] == 3
+    assert summary["time_span_days"] == pytest.approx(20.0)
+    assert summary["variability_sokolovsky_v"] == pytest.approx(0.1 / 28.2)

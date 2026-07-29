@@ -7,15 +7,23 @@ import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
-from malca.io.lightcurve_io import load_lightcurve_df, normalize_asassn_lightcurve
+from malca.io.lightcurve_io import (
+    load_lightcurve_df,
+    normalize_asassn_lightcurve,
+    stable_camera_color,
+)
+from malca.plotting.notebook_display import show_figure
 
-
+# Publication x-axis offset for JD.  Held locally so a change to the pipeline
+# ``malca.config.JD_OFFSET`` cannot silently break axis labels or downstream
+# figures that hard-code ``JD - 2450000``.
 JD_OFFSET = 2450000.0
+
 DIP_EVENT_COLOR = "#ff6b6b"
 JUMP_EVENT_COLOR = "#0096FF"
 
@@ -33,14 +41,49 @@ BAND_COLORS = {
 
 MARKERS = ("o", "s", "D", "^", "v", "P", "X", "<", ">", "h")
 
-# LaTeX Computer Modern–style serif (STIXGeneral + cm mathtext in matplotlib).
-PUBLICATION_SERIF_FONTS = ["STIXGeneral", "Nimbus Roman", "DejaVu Serif"]
-PUBLICATION_PLOTLY_FONT = ", ".join(PUBLICATION_SERIF_FONTS)
+# Computer Modern Bright for publication figures. Matplotlib uses the LaTeX
+# package for exact text and math rendering; Plotly uses the matching installed
+# font names before falling back to a generic sans-serif face.
+COMPUTER_MODERN_BRIGHT_FONTS = [
+    "CMU Bright",
+    "Computer Modern Bright",
+    "Computer Modern Sans Serif",
+    "DejaVu Sans",
+]
+COMPUTER_MODERN_SERIF_FONTS = [
+    "Computer Modern",
+    "CMU Serif",
+    "Latin Modern Roman",
+    "DejaVu Serif",
+]
+COMPUTER_MODERN_BRIGHT_LATEX_PREAMBLE = "\n".join(
+    (
+        r"\usepackage{cmbright}",
+        r"\usepackage{amssymb}",
+        r"\DeclareUnicodeCharacter{0394}{\ensuremath{\Delta}}",
+        r"\DeclareUnicodeCharacter{03A3}{\ensuremath{\Sigma}}",
+        r"\DeclareUnicodeCharacter{03A9}{\ensuremath{\Omega}}",
+        r"\DeclareUnicodeCharacter{03B1}{\ensuremath{\alpha}}",
+        r"\DeclareUnicodeCharacter{03B2}{\ensuremath{\beta}}",
+        r"\DeclareUnicodeCharacter{03B3}{\ensuremath{\gamma}}",
+        r"\DeclareUnicodeCharacter{03B4}{\ensuremath{\delta}}",
+        r"\DeclareUnicodeCharacter{03BB}{\ensuremath{\lambda}}",
+        r"\DeclareUnicodeCharacter{03BC}{\ensuremath{\mu}}",
+        r"\DeclareUnicodeCharacter{03C0}{\ensuremath{\pi}}",
+        r"\DeclareUnicodeCharacter{03C3}{\ensuremath{\sigma}}",
+        r"\DeclareUnicodeCharacter{03C4}{\ensuremath{\tau}}",
+        r"\DeclareUnicodeCharacter{03C6}{\ensuremath{\phi}}",
+        r"\DeclareUnicodeCharacter{25C6}{\ensuremath{\blacklozenge}}",
+    )
+)
+PUBLICATION_PLOTLY_FONT = ", ".join([*COMPUTER_MODERN_BRIGHT_FONTS, "sans-serif"])
 
 PUBLICATION_STYLE = {
-    "font.family": "serif",
-    "font.serif": PUBLICATION_SERIF_FONTS,
-    "mathtext.fontset": "cm",
+    "font.family": "sans-serif",
+    "font.sans-serif": COMPUTER_MODERN_BRIGHT_FONTS,
+    "text.usetex": True,
+    "text.latex.preamble": COMPUTER_MODERN_BRIGHT_LATEX_PREAMBLE,
+    "axes.unicode_minus": False,
     "axes.linewidth": 0.8,
     "axes.labelsize": 11,
     "axes.titlesize": 12,
@@ -52,6 +95,37 @@ PUBLICATION_STYLE = {
     "savefig.bbox": None,
     "pdf.fonttype": 42,
     "ps.fonttype": 42,
+}
+
+# Review figures share the paper's Computer Modern Bright typography.  The
+# interactive TUI overrides the LaTeX renderer with native CMU Bright OpenType
+# faces, while publication/export callers retain exact LaTeX ``cmbright``.
+REVIEW_LIGHTCURVE_STYLE = {
+    **PUBLICATION_STYLE,
+    "text.usetex": True,
+    "axes.labelsize": 12,
+    "axes.titlesize": 12,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 9,
+    "xtick.major.size": 6.0,
+    "ytick.major.size": 6.0,
+    "xtick.major.width": 1.0,
+    "ytick.major.width": 1.0,
+    "xtick.minor.size": 3.0,
+    "ytick.minor.size": 3.0,
+}
+
+REVIEW_BAND_MARKERS = {
+    "g": "o",
+    "V": "^",
+    "B": "s",
+    "u": "s",
+    "r": "s",
+    "i": "s",
+    "z": "s",
+    "all": "o",
+    "unknown": "s",
 }
 
 # Publication figure widths (inches). ApJ-style single column = 3.5; two-column span = 7.0.
@@ -679,6 +753,21 @@ def _group_color(label: str, group_by: str) -> str:
     return BAND_COLORS.get(label, _stable_color(label))
 
 
+def _group_style_key(part: pd.DataFrame, style_by: str | None, label: object) -> str:
+    """Resolve an independent color/marker key for one plotted group."""
+
+    if style_by is None:
+        return str(label)
+    normalized = str(style_by).strip().lower()
+    if normalized == "group":
+        return str(label)
+    if normalized not in {"band", "camera"}:
+        raise ValueError("color_by and marker_by must be band, camera, group, or None")
+    if normalized not in part.columns or part.empty:
+        return str(label)
+    return str(part[normalized].iloc[0])
+
+
 def publication_style_context():
     """Return a matplotlib rc_context for MALCA publication-style figures."""
     plt, _ = _load_matplotlib()
@@ -694,12 +783,16 @@ def style_publication_axis(
     right: bool = True,
 ) -> Any:
     """Apply publication tick/grid styling to an existing matplotlib axis."""
-    _, auto_minor_locator = _load_matplotlib()
+    # Importing the ticker directly avoids mutating rcParams.  Callers such as
+    # the review TUI can therefore use REVIEW_LIGHTCURVE_STYLE around a figure
+    # while publication exports retain PUBLICATION_STYLE.
+    from matplotlib.ticker import AutoMinorLocator
+
     if grid:
         ax.grid(True, which="major", linewidth=0.4, alpha=0.28)
     if minor_ticks:
-        ax.xaxis.set_minor_locator(auto_minor_locator())
-        ax.yaxis.set_minor_locator(auto_minor_locator())
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
     ax.tick_params(which="both", direction="in", top=top, right=right)
     ax.tick_params(which="major", length=4.0, width=0.8)
     ax.tick_params(which="minor", length=2.0, width=0.6)
@@ -920,6 +1013,102 @@ def _plot_vertical_spans(
             ax.axvspan(float(vals.iloc[0]), float(vals.iloc[1]), **kwargs)
 
 
+def _plot_vertical_annotations(
+    ax,
+    annotations: Sequence[dict[str, object]] | None,
+    *,
+    source_column: str,
+    time_offset: str,
+) -> None:
+    """Draw compact labels at time coordinates without leaking axis math to callers."""
+
+    if not annotations:
+        return
+    for item in annotations:
+        x_raw = item.get("x", item.get("time", item.get("jd")))
+        text = item.get("text", item.get("label"))
+        if x_raw is None or text in (None, ""):
+            continue
+        x_plot, _ = resolve_time_axis(
+            pd.Series([x_raw]), source_column=source_column, offset=time_offset
+        )
+        x_value = pd.to_numeric(x_plot, errors="coerce").iloc[0]
+        if pd.isna(x_value) or not np.isfinite(float(x_value)):
+            continue
+        style = {
+            "ha": "center",
+            "va": "top",
+            "fontsize": 6.5,
+            "color": "0.35",
+        }
+        style.update(
+            {
+                key: value
+                for key, value in item.items()
+                if key not in {"x", "time", "jd", "text", "label"}
+            }
+        )
+        ax.text(
+            float(x_value),
+            0.985,
+            str(text),
+            transform=ax.get_xaxis_transform(),
+            **style,
+        )
+
+
+def _plot_annotated_events(
+    ax,
+    events: Sequence[dict[str, object]] | None,
+    *,
+    source_column: str,
+    time_offset: str,
+) -> None:
+    """Render review event centers, widths, and compact labels on an axis."""
+
+    if not events:
+        return
+    for event in events:
+        center_raw = event.get("t0", event.get("center", event.get("x")))
+        if center_raw is None:
+            continue
+        center_series, _ = resolve_time_axis(
+            pd.Series([center_raw]),
+            source_column=source_column,
+            offset=time_offset,
+        )
+        center = pd.to_numeric(center_series, errors="coerce").iloc[0]
+        if pd.isna(center) or not np.isfinite(float(center)):
+            continue
+        center = float(center)
+        try:
+            half_width = abs(float(event.get("half_width") or 0.0))
+        except (TypeError, ValueError):
+            half_width = 0.0
+        color = str(event.get("base_color") or event.get("color") or "#d62728")
+        if np.isfinite(half_width) and half_width > 0:
+            ax.axvspan(
+                center - half_width,
+                center + half_width,
+                color=color,
+                alpha=0.08,
+                linewidth=0,
+            )
+        ax.axvline(center, color=color, alpha=0.78, linewidth=1.1)
+        label = str(event.get("kind") or event.get("label") or "").strip()
+        if label:
+            ax.text(
+                center,
+                0.985,
+                label,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="top",
+                fontsize=6.5,
+                color=color,
+            )
+
+
 def _event_overlay_specs(event_runs: Sequence[dict[str, object]], event_kind: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     color = DIP_EVENT_COLOR if event_kind == "dip" else JUMP_EVENT_COLOR if event_kind == "jump" else "0.35"
     lines: list[dict[str, object]] = []
@@ -1001,11 +1190,22 @@ def plot_lightcurve_panel(
     title: str | None = None,
     group_by: str = "band",
     group_col: str | None = None,
+    color_by: str | None = None,
+    marker_by: str | None = None,
+    color_map: Mapping[str, str] | None = None,
+    marker_map: Mapping[str, str] | None = None,
     show_errorbars: bool = True,
+    error_color: str | None = None,
     invert_y: bool | None = None,
     time_offset: str = "auto",
     legend: str = "auto",
     marker_size: float = 3.5,
+    marker_alpha: float = 0.82,
+    marker_edgecolor: str | None = "0.15",
+    marker_edgewidth: float = 0.35,
+    rasterized: bool = False,
+    legend_max_groups: int | None = None,
+    dense_group_note: str | None = None,
     xlim: Sequence[float] | None = None,
     ylim: Sequence[float] | None = None,
     xlabel: str | None = None,
@@ -1025,11 +1225,16 @@ def plot_lightcurve_panel(
     baseline_style: dict[str, object] | None = None,
     vertical_lines: Sequence[object] | None = None,
     vertical_spans: Sequence[object] | None = None,
+    vertical_annotations: Sequence[dict[str, object]] | None = None,
+    annotated_events: Sequence[dict[str, object]] | None = None,
     event_runs: Sequence[dict[str, object]] | None = None,
     event_kind: str = "dip",
     highlight_mask: Sequence[bool] | pd.Series | np.ndarray | None = None,
     highlight_label: str | None = None,
     highlight_style: dict[str, object] | None = None,
+    title_loc: str = "center",
+    title_fontsize: float | None = None,
+    margins: Sequence[float] | None = None,
 ) -> PanelPlotResult:
     prepared = _prepare_panel_frame(
         data,
@@ -1065,21 +1270,44 @@ def plot_lightcurve_panel(
     plot_df.loc[~err_valid, "value_error"] = np.nan
 
     groups = sorted(plot_df["plot_group"].dropna().unique(), key=_band_sort_key)
-    color_map: dict[str, str] = {}
+    requested_color_map = color_map
+    resolved_color_map: dict[str, str] = {}
     for label in groups:
         part = plot_df[plot_df["plot_group"] == label]
         if part.empty:
             continue
-        color = _group_color(str(label), group_by)
-        color_map[str(label)] = color
+        color_key = _group_style_key(part, color_by, label)
+        color_grouping = color_by or group_by
+        color = (
+            requested_color_map.get(
+                color_key, _group_color(color_key, color_grouping)
+            )
+            if requested_color_map is not None
+            else (
+                stable_camera_color(color_key)
+                if color_grouping == "camera"
+                else _group_color(color_key, color_grouping)
+            )
+        )
+        resolved_color_map[str(label)] = color
+        marker_key = _group_style_key(part, marker_by, label)
         marker = (
-            _stable_marker(str(label))
-            if group_by != "band"
-            else _stable_marker(str(part["band"].iloc[0]))
+            marker_map.get(marker_key, _stable_marker(marker_key))
+            if marker_map is not None
+            else (
+                REVIEW_BAND_MARKERS.get(_format_band(marker_key), "s")
+                if marker_by == "band"
+                else _stable_marker(
+                    marker_key
+                    if marker_by is not None or group_by != "band"
+                    else str(part["band"].iloc[0])
+                )
+            )
         )
         plot_label = None if str(label) == "all" else str(label)
         yerr = part["value_error"].to_numpy()
         has_yerr = show_errorbars and np.isfinite(yerr).any()
+        bar_color = error_color if error_color is not None else color
 
         if has_yerr:
             ax.errorbar(
@@ -1089,14 +1317,15 @@ def plot_lightcurve_panel(
                 fmt=marker,
                 linestyle="none",
                 markersize=marker_size,
-                markeredgecolor="0.15",
-                markeredgewidth=0.35,
+                markeredgecolor=marker_edgecolor or "none",
+                markeredgewidth=marker_edgewidth,
                 color=color,
-                ecolor=color,
+                ecolor=bar_color,
                 elinewidth=0.55,
                 capsize=1.2,
-                alpha=0.82,
+                alpha=marker_alpha,
                 label=plot_label,
+                rasterized=rasterized,
             )
         else:
             ax.scatter(
@@ -1104,11 +1333,12 @@ def plot_lightcurve_panel(
                 part["value"],
                 s=marker_size**2,
                 marker=marker,
-                linewidths=0.35,
-                edgecolors="0.15",
+                linewidths=marker_edgewidth,
+                edgecolors=marker_edgecolor or "none",
                 color=color,
-                alpha=0.82,
+                alpha=marker_alpha,
                 label=plot_label,
+                rasterized=rasterized,
             )
 
     if highlight_mask is not None:
@@ -1145,7 +1375,7 @@ def plot_lightcurve_panel(
             time_col=baseline_time_col,
             value_col=baseline_col,
             group_col=resolved_group_col,
-            color_map=color_map,
+            color_map=resolved_color_map,
             label=baseline_label,
             style=baseline_style,
         )
@@ -1168,9 +1398,24 @@ def plot_lightcurve_panel(
         source_column=prepared.source_column,
         time_offset=time_offset,
     )
+    _plot_vertical_annotations(
+        ax,
+        vertical_annotations,
+        source_column=prepared.source_column,
+        time_offset=time_offset,
+    )
+    _plot_annotated_events(
+        ax,
+        annotated_events,
+        source_column=prepared.source_column,
+        time_offset=time_offset,
+    )
 
     if title:
-        ax.set_title(title, pad=8)
+        title_kwargs: dict[str, object] = {"pad": 8, "loc": title_loc}
+        if title_fontsize is not None:
+            title_kwargs["fontsize"] = float(title_fontsize)
+        ax.set_title(title, **title_kwargs)
 
     ax.set_xlabel(xlabel or x_label)
     ax.set_ylabel(ylabel or prepared.y_label)
@@ -1182,11 +1427,20 @@ def plot_lightcurve_panel(
         ax.set_xlim(float(xlim[0]), float(xlim[1]))
     if ylim is not None:
         ax.set_ylim(float(ylim[0]), float(ylim[1]))
+    if margins is not None:
+        if len(margins) != 2:
+            raise ValueError("margins must contain x and y values")
+        ax.margins(x=float(margins[0]), y=float(margins[1]))
 
     style_publication_axis(ax)
 
     handles, labels = ax.get_legend_handles_labels()
-    if legend != "none" and handles:
+    show_legend = (
+        legend != "none"
+        and handles
+        and (legend_max_groups is None or len(groups) <= int(legend_max_groups))
+    )
+    if show_legend:
         if legend == "outside":
             ax.legend(
                 handles,
@@ -1197,6 +1451,17 @@ def plot_lightcurve_panel(
             )
         else:
             ax.legend(handles, labels, loc="best", frameon=False, ncol=_legend_ncol(labels))
+    elif dense_group_note and handles:
+        ax.text(
+            0.995,
+            0.015,
+            dense_group_note,
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color="0.35",
+        )
 
     return PanelPlotResult(ax=ax, frame=plot_df)
 
@@ -1278,6 +1543,39 @@ def _phase_input_frame(
     return raw
 
 
+def prepare_median_centered_phase_source(
+    data: PublicationLightCurve | pd.DataFrame,
+    *,
+    time_col: str | None = None,
+    value_col: str | None = None,
+    error_col: str | None = None,
+    band_col: str | None = None,
+    camera_col: str | None = None,
+    residual_col: str = "resid",
+) -> pd.DataFrame:
+    """Build a robust residual source for review phase folds.
+
+    This is the deliberately cheap fallback for cases where a science baseline
+    cannot be evaluated.  Centering is independent for each camera and band;
+    :func:`plot_phase_panel` still owns the actual phase-fold generation.
+    """
+
+    raw = _phase_input_frame(
+        data,
+        time_col=time_col,
+        value_col=value_col,
+        error_col=error_col,
+        band_col=band_col,
+        camera_col=camera_col,
+        residual_col=residual_col,
+    )
+    raw["mag"] = pd.to_numeric(raw["mag"], errors="coerce")
+    raw[residual_col] = raw["mag"] - raw.groupby(
+        ["camera#", "v_g_band"], dropna=False, sort=False
+    )["mag"].transform("median")
+    return raw
+
+
 def plot_phase_panel(
     ax,
     data: PublicationLightCurve | pd.DataFrame,
@@ -1294,12 +1592,29 @@ def plot_phase_panel(
     camera_col: str | None = None,
     residual_col: str = "resid",
     group_by: str = "band",
+    color_by: str | None = None,
+    marker_by: str | None = None,
+    color_map: Mapping[str, str] | None = None,
+    marker_map: Mapping[str, str] | None = None,
     title: str | None = None,
     show_errorbars: bool = True,
+    error_color: str | None = None,
     legend: str = "auto",
     marker_size: float = 3.5,
+    marker_alpha: float = 0.82,
+    marker_edgecolor: str | None = "0.15",
+    marker_edgewidth: float = 0.35,
+    rasterized: bool = False,
+    legend_max_groups: int | None = None,
     xlim: Sequence[float] | None = (0.0, 2.0),
+    xlabel: str = "Phase",
     ylabel: str | None = None,
+    title_loc: str = "center",
+    title_fontsize: float | None = None,
+    margins: Sequence[float] | None = None,
+    zero_line: bool | None = None,
+    notice: str | None = None,
+    notice_color: str = "#8a5a00",
 ) -> PanelPlotResult:
     if period_days <= 0 or not np.isfinite(float(period_days)):
         raise ValueError("period_days must be positive and finite")
@@ -1340,18 +1655,84 @@ def plot_phase_panel(
         band_col="v_g_band",
         camera_col="camera_label",
         group_by=group_by,
+        color_by=color_by,
+        marker_by=marker_by,
+        color_map=color_map,
+        marker_map=marker_map,
         show_errorbars=show_errorbars,
+        error_color=error_color,
         legend=legend,
         marker_size=marker_size,
+        marker_alpha=marker_alpha,
+        marker_edgecolor=marker_edgecolor,
+        marker_edgewidth=marker_edgewidth,
+        rasterized=rasterized,
+        legend_max_groups=legend_max_groups,
         time_offset="none",
-        xlabel="Phase",
+        xlabel=xlabel,
         ylabel=ylabel or ("Residual magnitude [mag]" if value_mode == "resid" else "Magnitude [mag]"),
         title=title,
         xlim=xlim,
+        title_loc=title_loc,
+        title_fontsize=title_fontsize,
+        margins=margins,
     )
     for x in (0.0, 1.0, 2.0):
         ax.axvline(x, color="0.45", linestyle="--", linewidth=0.8, alpha=0.55)
+    should_draw_zero = value_mode == "resid" if zero_line is None else bool(zero_line)
+    if should_draw_zero:
+        ax.axhline(0.0, color="0.45", linewidth=0.7, alpha=0.4)
+    if notice:
+        ax.text(
+            0.995,
+            0.02,
+            str(notice),
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=6.5,
+            color=notice_color,
+            wrap=True,
+        )
     return PanelPlotResult(ax=ax, frame=result.frame, diagnostics=diagnostics)
+
+
+def plot_phase_placeholder(
+    ax,
+    message: str,
+    *,
+    title: str = "Best phase fold",
+    xlabel: str = "Phase (two cycles)",
+    ylabel: str = "Residual magnitude",
+    xlim: Sequence[float] = (-0.02, 2.02),
+    title_loc: str = "left",
+    title_fontsize: float | None = 10,
+) -> PanelPlotResult:
+    """Render a publication-styled empty phase panel for review failures."""
+
+    title_kwargs: dict[str, object] = {"loc": title_loc, "pad": 8}
+    if title_fontsize is not None:
+        title_kwargs["fontsize"] = float(title_fontsize)
+    ax.set_title(title, **title_kwargs)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    for x in (0.0, 1.0, 2.0):
+        ax.axvline(x, color="0.45", linestyle="--", linewidth=0.8, alpha=0.55)
+    ax.text(
+        0.5,
+        0.5,
+        str(message),
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=9,
+        color="0.4",
+        wrap=True,
+    )
+    ax.set_yticks([])
+    style_publication_axis(ax, minor_ticks=False)
+    return PanelPlotResult(ax=ax, frame=pd.DataFrame())
 
 
 def plot_lightcurve(

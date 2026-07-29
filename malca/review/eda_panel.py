@@ -15,6 +15,7 @@ from malca.review.eda_data import (
     DEFAULT_MAIN_X,
     DEFAULT_MAIN_Y,
     DEFAULT_SYMBOL,
+    EDA_REQUIRED_FIELDS,
     add_eda_columns,
     available_metric_columns,
     load_review_db,
@@ -28,7 +29,8 @@ EDA_TABLE_COLUMNS = [
     {"name": "gaia_id", "id": "gaia_id"},
     {"name": "status", "id": "status"},
     {"name": "event_class", "id": "event_class"},
-    {"name": "interest_score", "id": "interest_score"},
+    {"name": "classification_confidence", "id": "classification_confidence"},
+    {"name": "prob_dipper_like", "id": "prob_dipper_like"},
     {"name": "dipper_score", "id": "dipper_score"},
     {"name": "period_n_sources", "id": "period_n_sources"},
     {"name": "period_consensus_days", "id": "period_consensus_days"},
@@ -74,7 +76,7 @@ def _source_label_for_db(path: Path) -> str:
 def _load_review_eda_frame_cached(db_path_text: str, db_signature: str) -> pd.DataFrame:
     _ = db_signature
     path = Path(db_path_text).expanduser().resolve()
-    frame = load_review_db(path)
+    frame = load_review_db(path, columns=EDA_REQUIRED_FIELDS)
     if "candidate_id" not in frame.columns:
         frame["candidate_id"] = pd.Series(dtype="object")
     frame["candidate_id"] = frame["candidate_id"].astype(str)

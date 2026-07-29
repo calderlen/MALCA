@@ -62,7 +62,12 @@ EXTERNAL_SOURCE_VIEW_OPTIONS = [
     {"label": "AllWISE MEP", "value": "allwise_mep"},
     {"label": "VVVX/VIRAC2", "value": "vvvx_virac"},
     {"label": "PS1", "value": "ps1"},
+    {"label": "SuperWASP", "value": "superwasp"},
+    {"label": "KELT", "value": "kelt"},
+    {"label": "NSVS", "value": "nsvs"},
+    {"label": "ASAS-3", "value": "asas3"},
     {"label": "CRTS", "value": "crts"},
+    {"label": "DASCH", "value": "dasch"},
 ]
 EXTERNAL_SOURCE_VALUES = tuple(str(option["value"]) for option in EXTERNAL_SOURCE_VIEW_OPTIONS)
 EXTERNAL_SOURCE_VALUE_SET = set(EXTERNAL_SOURCE_VALUES)

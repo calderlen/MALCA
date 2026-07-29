@@ -42,16 +42,33 @@ def period_alias_matches(
     *,
     alias_periods: Iterable[float] = LS_ALIAS_PERIODS,
     alias_tolerance: float = LS_ALIAS_TOLERANCE,
+    time_span_days: float | None = None,
+    frequency_resolution_factor: float = 2.0,
 ) -> list[float]:
+    """Return known aliases that are unresolved from ``period``.
+
+    When the light-curve span is available, matching is done in frequency
+    space using a multiple of the natural ``1 / time_span`` resolution.  The
+    legacy fixed tolerance in days is retained only for callers that do not
+    have timing information.
+    """
     period_value = finite_float(period)
     if period_value is None or period_value <= 0:
         return []
-    return [
-        float(alias_period)
-        for alias_period in alias_periods
-        if np.isfinite(alias_period)
-        and abs(float(period_value) - float(alias_period)) <= float(alias_tolerance)
-    ]
+    span = finite_float(time_span_days)
+    matches: list[float] = []
+    for alias_period in alias_periods:
+        alias = finite_float(alias_period)
+        if alias is None or alias <= 0:
+            continue
+        if span is not None and span > 0:
+            resolution = max(float(frequency_resolution_factor), 0.0) / span
+            matched = abs((1.0 / period_value) - (1.0 / alias)) <= resolution
+        else:
+            matched = abs(period_value - alias) <= float(alias_tolerance)
+        if matched:
+            matches.append(float(alias))
+    return matches
 
 
 def native_harmonic_period_candidates(

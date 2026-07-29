@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
 from malca.config import (
+    ADAPTIVE_BOUNDS_ENABLED,
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
@@ -31,6 +34,7 @@ from malca.core.period_arbitration import (
     native_harmonic_period_candidates,
     period_alias_matches,
 )
+from malca.core.period_bounds import STAGE_PREGATE, bounds_from_jd
 from malca.core.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
 from malca.core.stats import compute_ce_stats
 from malca.core.utils import clean_lc, compute_n_cameras
@@ -39,8 +43,8 @@ from malca.core.utils import clean_lc, compute_n_cameras
 PREGATE_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_WITH_MULTIPLES_FACTORS
 PREGATE_HARMONIC_MIN_REL_IMPROVEMENT = 0.02
 PREGATE_HARMONIC_UPWARD_MIN_REL_IMPROVEMENT = NATIVE_PERIOD_UPWARD_MIN_REL_IMPROVEMENT
-PREGATE_ROUTER_MODE = "ce_folded_scatter_phase_shape_v5"
-PREGATE_CHECKPOINT_VERSION = "v8_ce_folded_scatter_phase_shape_lag"
+PREGATE_ROUTER_MODE = "ce_frequency_grid_folded_scatter_phase_shape_v6"
+PREGATE_CHECKPOINT_VERSION = "v10_ce_adaptive_bounds"
 PREGATE_RESULT_COLUMNS: list[str] = [
     "pre_periodicity_checkpoint_key",
     "pre_periodicity_path",
@@ -127,9 +131,56 @@ def _excluded_camera_set(value: object) -> set[int]:
     return set()
 
 
-def _checkpoint_key(path: str, excluded_cameras: object) -> str:
+def prepare_periodicity_lightcurve(
+    df_lc: pd.DataFrame,
+    *,
+    excluded_cameras: object = None,
+    max_error_absolute: float = CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    max_error_sigma: float = CLEAN_LC_MAX_ERROR_SIGMA,
+) -> pd.DataFrame:
+    """Apply the canonical STV cleaning contract used by both period gates."""
+    if df_lc is None or df_lc.empty:
+        return pd.DataFrame() if df_lc is None else df_lc.copy()
+    out = df_lc.copy()
+    # Older dat2 fixtures lack these canonical columns. Missing saturation is
+    # treated as unknown/not-saturated for backwards-compatible ingestion.
+    if "saturated" not in out.columns:
+        out["saturated"] = 0
+    excluded = _excluded_camera_set(excluded_cameras)
+    if excluded and "camera#" in out.columns:
+        cameras = pd.to_numeric(out["camera#"], errors="coerce")
+        out = out.loc[~cameras.isin(excluded)].copy()
+    return clean_lc(
+        out,
+        max_error_absolute=float(max_error_absolute),
+        max_error_sigma=float(max_error_sigma),
+    )
+
+
+def _checkpoint_key(
+    path: str,
+    excluded_cameras: object,
+    *,
+    config: dict[str, object] | None = None,
+) -> str:
     token = ",".join(str(item) for item in sorted(_excluded_camera_set(excluded_cameras)))
-    return f"{PREGATE_CHECKPOINT_VERSION}::{path}::{token}"
+    path_obj = Path(path).expanduser()
+    try:
+        stat = path_obj.stat()
+        input_fingerprint = {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
+    except OSError:
+        input_fingerprint = {"size": -1, "mtime_ns": -1}
+    payload = {
+        "version": PREGATE_CHECKPOINT_VERSION,
+        "path": str(path_obj),
+        "excluded_cameras": token,
+        "input": input_fingerprint,
+        "config": dict(config or {}),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"{PREGATE_CHECKPOINT_VERSION}::{digest}"
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -180,6 +231,7 @@ def _score_period_harmonic_candidate(
             "alias_matches": [],
         }
     jd0 = float(min(np.min(jd) for jd in all_jd))
+    jd_max = float(max(np.max(jd) for jd in all_jd))
 
     bin_options = tuple(
         dict.fromkeys(
@@ -266,7 +318,7 @@ def _score_period_harmonic_candidate(
     if 0 in templates and 1 in templates:
         phase_lag = template_phase_lag(templates[0], templates[1], signed=True)
     phase_lag_abs = abs(float(phase_lag)) if np.isfinite(phase_lag) else np.nan
-    alias_matches = period_alias_matches(period)
+    alias_matches = period_alias_matches(period, time_span_days=jd_max - jd0)
     alias_flag = bool(alias_matches)
     return {
         "objective": scatter_ratio,
@@ -516,12 +568,9 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         if df_lc.empty:
             return _empty_result(path_str, checkpoint_key, reason="empty_lc")
 
-        excluded = _excluded_camera_set(excluded_cameras)
-        if excluded and "camera#" in df_lc.columns:
-            df_lc = df_lc[~df_lc["camera#"].isin(excluded)].reset_index(drop=True)
-
-        df_lc = clean_lc(
+        df_lc = prepare_periodicity_lightcurve(
             df_lc,
+            excluded_cameras=excluded_cameras,
             max_error_absolute=float(clean_max_error_absolute),
             max_error_sigma=float(clean_max_error_sigma),
         )
@@ -541,6 +590,18 @@ def _evaluate_periodicity_worker(args: tuple[object, ...]) -> dict[str, object]:
         jd = df_lc_aligned["JD"].to_numpy(dtype=float)
         mag = df_lc_aligned["mag"].to_numpy(dtype=float)
         err = df_lc_aligned["error"].to_numpy(dtype=float)
+
+        # Per-candidate adaptive bounds when enabled and the caller left the
+        # classic pre-gate defaults in place. Explicit overrides (tests, tuned
+        # runs) are honored verbatim.
+        if (
+            ADAPTIVE_BOUNDS_ENABLED
+            and np.isclose(float(min_period), float(PRE_PERIODICITY_MIN_PERIOD))
+            and np.isclose(float(max_period), float(PRE_PERIODICITY_MAX_PERIOD))
+        ):
+            bounds = bounds_from_jd(jd, stage=STAGE_PREGATE)
+            min_period = float(bounds.min_period_days)
+            max_period = float(bounds.max_period_days)
 
         ce_result = compute_ce_stats(
             jd,
@@ -772,10 +833,24 @@ def apply_pre_periodicity_gate(
             raise ValueError("Need 'dat_path' or 'path' column for pre-periodicity gate")
 
     df_out[path_col] = df_out[path_col].astype(str)
+    checkpoint_config = {
+        "bad_camera_scatter_ratio": float(bad_camera_scatter_ratio),
+        "clean_max_error_absolute": float(clean_max_error_absolute),
+        "clean_max_error_sigma": float(clean_max_error_sigma),
+        "min_period": float(min_period),
+        "max_period": float(max_period),
+        "adaptive_bounds_enabled": bool(ADAPTIVE_BOUNDS_ENABLED),
+        "n_periods": int(n_periods),
+        "ce_snr_threshold": float(ce_snr_threshold),
+        "min_points": int(min_points),
+        "scatter_ratio_max": float(scatter_ratio_max),
+        "checkpoint_version": PREGATE_CHECKPOINT_VERSION,
+    }
     checkpoint_keys = [
         _checkpoint_key(
             path_value,
             row.get(excluded_cameras_col) if excluded_cameras_col else None,
+            config=checkpoint_config,
         )
         for path_value, (_, row) in zip(df_out[path_col].tolist(), df_out.iterrows())
     ]

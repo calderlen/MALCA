@@ -47,11 +47,47 @@ _install_review_app_import_stubs()
 
 from malca.review import app as review_app
 from malca.review.app import EXTERNAL_SOURCE_VIEW_OPTIONS, _render_external_followup, app
-from malca.review.store import count_queue, db_connect, upsert_candidates_frame
+from malca.review.store import count_queue, db_connect, get_review, save_review, upsert_candidates_frame
 from malca.review.cutouts import CUTOUT_SURVEYS, DEFAULT_CUTOUT_SURVEY_KEY
 
 
 _APP_SOURCE_DIR = Path(review_app.__file__).resolve().parent
+
+
+def test_visible_confidence_control_writes_classification_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "review.db"
+    with db_connect(db_path) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame([{"candidate_id": "legacy"}, {"candidate_id": "new"}]),
+        )
+        save_review(
+            conn,
+            candidate_id="legacy",
+            classification_confidence=2,
+            review_pass=1,
+            notes="",
+            workflow_status="reviewed",
+        )
+
+    monkeypatch.setattr(review_app, "DB_PATH", str(db_path))
+    review_app._do_save("legacy", 4, {}, False, "", "test")
+    review_app._do_save("new", 3, {}, False, "", "test")
+
+    with db_connect(db_path) as conn:
+        legacy = get_review(conn, "legacy")
+        new = get_review(conn, "new")
+
+    assert legacy["classification_confidence"] == 4
+    assert new["classification_confidence"] == 3
+    with db_connect(db_path) as conn:
+        review_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+        }
+    assert "interest_score" not in review_columns
 
 
 def _component_ids_in_order(node: object) -> list[object]:
@@ -92,6 +128,34 @@ def _component_text_in_order(node: object) -> list[str]:
     layout = node() if callable(node) else node
     walk(layout)
     return texts
+
+
+def test_vetting_banner_separates_cloud_environment_from_association_evidence() -> None:
+    environmental = review_app._render_vetting_banner(
+        {
+            "sfr_environment_matches": "Perseus",
+            "sfr_environment_consistent": True,
+            "sfr_membership_class": "environmental_candidate",
+            "sfr_membership_name": "Perseus",
+            "banyan_sfr_name": "Perseus",
+            "banyan_sfr_prob": 0.2,
+            "sfr_membership_threshold": 0.9,
+        }
+    )
+    environmental_text = _component_text_in_order(environmental)
+
+    assert "Cloud environment" in environmental_text
+    assert "BANYAN mapped SFR" in environmental_text
+    assert "Association evidence" not in environmental_text
+
+    kinematic = review_app._render_vetting_banner(
+        {
+            "sfr_membership_class": "kinematically_consistent_member",
+            "sfr_membership_name": "Perseus",
+        }
+    )
+
+    assert "Association evidence" in _component_text_in_order(kinematic)
 
 
 def _graph_configs_in_order(node: object) -> list[dict]:
@@ -414,7 +478,7 @@ def test_external_followup_renders_static_cutout_panel() -> None:
     assert select_props["value"] == DEFAULT_CUTOUT_SURVEY_KEY
     assert select_props["disabled"] is False
     assert [option["label"] for option in select_props["options"]] == [survey.label for survey in CUTOUT_SURVEYS]
-    assert "CDS%2FP%2FPanSTARRS%2FDR1%2Fcolor-i-r-g" in image_props["src"]
+    assert "CDS%2FP%2FDECaPS%2FDR2%2Fcolor" in image_props["src"]
     assert "fov=0.03333333333" in image_props["src"]
     assert "title" not in overlay_props
     assert "aria-label" not in overlay_props
@@ -422,10 +486,10 @@ def test_external_followup_renders_static_cutout_panel() -> None:
     assert overlay_props["style"]["height"] == "13.33%"
     assert "display" not in overlay_props["style"]
     assert link_props["href"] == image_props["src"]
-    assert "PanSTARRS DR1 color" in str(_props(status).get("children"))
+    assert "DECaPS DR2" in str(_props(status).get("children"))
 
 
-def test_external_followup_uses_dss2_default_for_southern_cutout() -> None:
+def test_external_followup_uses_decaps_default_for_southern_cutout() -> None:
     cards = _render_external_followup(
         {"candidate_id": "C1", "ra": 240.48595227, "dec": -55.342371},
         "C1",
@@ -436,9 +500,9 @@ def test_external_followup_uses_dss2_default_for_southern_cutout() -> None:
     image = _component_by_id(cards, "cutout-image")
     status = _component_by_id(cards, "cutout-status")
 
-    assert _props(survey_select)["value"] == "dss2"
-    assert "CDS%2FP%2FDSS2%2Fcolor" in _props(image)["src"]
-    assert "DSS2" in str(_props(status).get("children"))
+    assert _props(survey_select)["value"] == "decaps-dr2"
+    assert "CDS%2FP%2FDECaPS%2FDR2%2Fcolor" in _props(image)["src"]
+    assert "DECaPS DR2" in str(_props(status).get("children"))
 
 
 def test_external_followup_cutout_handles_missing_coordinates() -> None:
@@ -811,6 +875,7 @@ def test_auto_period_on_navigate_queues_harmonic_check_with_stored_period(monkey
         "cand-1",
         0.1,
         10.0,
+        [],
         {},
         {"nonce": 4},
     )
@@ -839,6 +904,7 @@ def test_auto_period_on_navigate_queues_fallback_pdm_without_stored_period(monke
         "cand-1",
         0.1,
         10.0,
+        [],
         {},
         {"nonce": 4},
     )
@@ -873,6 +939,7 @@ def test_auto_period_on_navigate_ignores_stats_lomb_scargle_seed(monkeypatch) ->
         "cand-1",
         0.1,
         10.0,
+        [],
         {},
         {"nonce": 4},
     )
@@ -922,6 +989,7 @@ def test_auto_period_cache_reuses_only_matching_bounds(monkeypatch) -> None:
         "cand-1",
         0.1,
         10.0,
+        [],
         cache,
         {"nonce": 1},
     )
@@ -934,6 +1002,7 @@ def test_auto_period_cache_reuses_only_matching_bounds(monkeypatch) -> None:
         "cand-1",
         0.1,
         12.0,
+        [],
         cache,
         {"nonce": 1},
     )
@@ -977,6 +1046,7 @@ def test_auto_period_cache_reuses_only_matching_base_period(monkeypatch) -> None
         "cand-1",
         0.1,
         10.0,
+        [],
         cache,
         {"nonce": 1},
     )
@@ -1284,7 +1354,7 @@ def test_hidden_eda_metric_sync_preserves_restored_values(monkeypatch) -> None:
         "collapsed",
         1,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         "review_score",
         "event_class",
     )
@@ -1333,7 +1403,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
         {
             "candidate_id": ["A", "B", "C"],
             "dipper_score": [1.0, 2.0, 3.0],
-            "interest_score": [4.0, 5.0, 6.0],
+            "classification_confidence": [4.0, 3.0, 2.0],
         }
     )
     queue_data = {"candidate_ids": ["A", "B", "C"], "queue_size": 3}
@@ -1342,7 +1412,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     _status, fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         None,
         None,
         [],
@@ -1367,7 +1437,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     graph_fig = review_app.eda_scatter_figure(
         frame,
         x_metric="dipper_score",
-        y_metric="interest_score",
+        y_metric="classification_confidence",
         selected_candidate_id="A",
     )
     selected_ids = review_app.capture_eda_selection(
@@ -1381,7 +1451,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     status, fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         None,
         None,
         [],
@@ -1407,7 +1477,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         None,
         None,
         [],
@@ -1432,7 +1502,7 @@ def test_eda_plot_selection_filters_table_only_when_enabled(monkeypatch) -> None
     status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         None,
         None,
         [],
@@ -1460,7 +1530,7 @@ def test_eda_panel_sorts_filters_and_pages_table_server_side(monkeypatch) -> Non
         {
             "candidate_id": ["A", "B", "C", "D"],
             "dipper_score": [1.0, 4.0, 3.0, 2.0],
-            "interest_score": [4.0, 5.0, 6.0, 7.0],
+            "classification_confidence": [4.0, 3.0, 2.0, 1.0],
         }
     )
     queue_data = {"candidate_ids": ["A", "B", "C", "D"], "queue_size": 4}
@@ -1469,7 +1539,7 @@ def test_eda_panel_sorts_filters_and_pages_table_server_side(monkeypatch) -> Non
     status, _fig, rows, page_count, _style, _status_base, _trace_idx = review_app.update_eda_panel(
         queue_data,
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         None,
         None,
         [],
@@ -1497,7 +1567,7 @@ def test_eda_navigation_callback_returns_patch_without_large_state(monkeypatch) 
         {
             "candidate_id": ["A", "B"],
             "dipper_score": [1.0, 2.0],
-            "interest_score": [4.0, 5.0],
+            "classification_confidence": [4.0, 3.0],
         }
     )
     monkeypatch.setattr(review_app, "_current_eda_frame", lambda: frame)
@@ -1505,7 +1575,7 @@ def test_eda_navigation_callback_returns_patch_without_large_state(monkeypatch) 
     status, patch, style = review_app.update_eda_current_candidate(
         "B",
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         [],
         "black",
         "Queue rows: 2/2 | Plotted: 2",
@@ -1619,13 +1689,13 @@ def test_review_gui_state_round_trips_eda_controls() -> None:
     state = _sample_saved_review_gui_state(
         eda_panel_state="expanded",
         eda_x_metric="dipper_score",
-        eda_y_metric="interest_score",
+        eda_y_metric="classification_confidence",
         eda_color_metric="review_score",
         eda_symbol_metric="event_class",
         eda_log_flags=["logy", "ignored"],
         eda_selection_mode=["table", "ignored"],
         eda_table_sort_by=[
-            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "classification_confidence", "direction": "desc"},
             {"column_id": "dipper_score", "direction": "asc"},
         ],
         eda_table_filter_query='{candidate_id} contains "A"',
@@ -1637,13 +1707,13 @@ def test_review_gui_state_round_trips_eda_controls() -> None:
     assert state["eda_state"] == {
         "panel_state": "expanded",
         "x_metric": "dipper_score",
-        "y_metric": "interest_score",
+        "y_metric": "classification_confidence",
         "color_metric": "review_score",
         "symbol_metric": "event_class",
         "log_flags": ["logy"],
         "selection_mode": ["table"],
         "table_sort_by": [
-            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "classification_confidence", "direction": "desc"},
             {"column_id": "dipper_score", "direction": "asc"},
         ],
         "table_filter_query": '{candidate_id} contains "A"',
@@ -1652,13 +1722,13 @@ def test_review_gui_state_round_trips_eda_controls() -> None:
     assert outputs[17:] == (
         "expanded",
         "dipper_score",
-        "interest_score",
+        "classification_confidence",
         "review_score",
         "event_class",
         ["logy"],
         ["table"],
         [
-            {"column_id": "interest_score", "direction": "desc"},
+            {"column_id": "classification_confidence", "direction": "desc"},
             {"column_id": "dipper_score", "direction": "asc"},
         ],
         '{candidate_id} contains "A"',
@@ -1943,6 +2013,90 @@ def test_vetting_filter_group_has_known_variable_and_dipper_contaminant_presets(
     assert "Vetting radius (arcsec):" in texts
     assert "Exclude Known Variables" in texts
     assert "Exclude Dipper Contaminants" in texts
+
+
+def test_reset_all_filters_control_and_defaults() -> None:
+    ids = _component_ids_in_order(app.layout)
+    texts = _component_text_in_order(app.layout)
+
+    numeric_idx = ids.index("reset-numeric-filters-btn")
+    assert ids[numeric_idx + 1] == "reset-all-filters-btn"
+    assert "Reset All Filters" in texts
+
+    result = review_app.reset_all_filters(1, 7)
+    assert len(result) == len(review_app._FILTER_VALUE_OUTPUTS) + 2
+    state = review_app._queue_filter_ui_state_from_values(*result[:-2])
+
+    assert state["filter_unreviewed"] == []
+    assert state["filter_failed"] == []
+    assert state["select_filter_mode"] == "exclude"
+    assert state["select_filter_logic"] == "and"
+    assert state["catalog_neighbor_radius_arcsec"] == review_app.DEFAULT_REVIEW_VETTING_RADIUS_ARCSEC
+    assert all(state[fkey] == [] for _cid, fkey in review_app._VETTING_POLICY_STATES)
+    assert all(state[fkey] == "Any" for _cid, fkey in review_app._BOOL_MODE_STATES)
+    assert all(state[fkey] is None for _cid, fkey in review_app._NUM_INPUT_STATES)
+    assert all(state[fkey] == "Any" for _cid, fkey in review_app._TEXT_STATES)
+    assert all(state[fkey] == [] for _cid, fkey in review_app._SELECT_STATES)
+    assert state["sort_cols"] == ["candidate_id"]
+    assert state["sort_desc"] == []
+    assert result[-2] == 8
+    assert result[-1] == "Reset all queue filters and sorting."
+
+
+def test_categorical_filter_mode_button_toggles_and_refreshes() -> None:
+    ids = _component_ids_in_order(app.layout)
+    texts = _component_text_in_order(app.layout)
+
+    mode_state_idx = ids.index("select-filter-mode")
+    assert ids[mode_state_idx + 1] == "toggle-select-filter-mode-btn"
+    assert "All categorical filters: Exclude selected" in texts
+
+    include_result = review_app.toggle_select_filter_mode(1, [], 4)
+    assert include_result == (
+        ["include"],
+        5,
+        "Categorical filters now include their selected values.",
+    )
+    assert review_app.sync_select_filter_mode_button(include_result[0]) == (
+        "All categorical filters: Include selected",
+        "compact-btn select-filter-mode-btn is-include",
+        "Click to exclude selected values from every categorical filter.",
+    )
+
+    exclude_result = review_app.toggle_select_filter_mode(2, include_result[0], 5)
+    assert exclude_result == (
+        [],
+        6,
+        "Categorical filters now exclude their selected values.",
+    )
+    assert review_app.sync_select_filter_mode_button(exclude_result[0]) == (
+        "All categorical filters: Exclude selected",
+        "compact-btn select-filter-mode-btn is-exclude",
+        "Click to include selected values in every categorical filter.",
+    )
+
+
+def test_categorical_filter_logic_buttons_toggle_and_refresh() -> None:
+    ids = _component_ids_in_order(app.layout)
+    logic_state_idx = ids.index("select-filter-logic")
+    assert ids[logic_state_idx + 1:logic_state_idx + 3] == [
+        "select-filter-logic-and-btn",
+        "select-filter-logic-or-btn",
+    ]
+
+    or_result = review_app.set_select_filter_logic_or(1, "and", 6)
+    assert or_result == ("or", 7, "Categorical filters now combine with OR.")
+    assert review_app.sync_select_filter_logic_buttons(or_result[0]) == (
+        "compact-btn select-filter-logic-btn",
+        "compact-btn select-filter-logic-btn is-active",
+    )
+
+    and_result = review_app.set_select_filter_logic_and(1, "or", 7)
+    assert and_result == ("and", 8, "Categorical filters now combine with AND.")
+    assert review_app.sync_select_filter_logic_buttons(and_result[0]) == (
+        "compact-btn select-filter-logic-btn is-active",
+        "compact-btn select-filter-logic-btn",
+    )
 
 
 def test_sidebar_filter_options_show_classification_labels_without_changing_values(

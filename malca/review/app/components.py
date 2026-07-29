@@ -75,6 +75,16 @@ def _render_external_followup(
     error_text_style = {'fontSize': '10px', 'color': theme_spec["error"]}
     run_dir = _resolve_run_dir_from_plot_dir(plot_dir if plot_dir is not None else PLOT_DIR) or _run_dir_from_source_path()
     lookup_keys = _candidate_lookup_keys(candidate_id, payload)
+    external_path_indexes = {}
+    if run_dir is not None:
+        external_path_indexes = shared_lookup_external_lc_paths_from_manifest(
+            run_dir / "results",
+            (
+                "atlas", "neowise", "ztf", "gaia_epoch", "tess", "ps1",
+                "superwasp", "kelt", "nsvs", "asas3", "crts", "dasch",
+            ),
+            lookup_keys,
+        )
 
     def _fmt_ms(value, digits: int = 3) -> str:
         try:
@@ -247,7 +257,7 @@ def _render_external_followup(
     ]
     atlas_extras = []
     if run_dir is not None:
-        atlas_idx = _index_external_lc_paths(str(run_dir.resolve()), "atlas")
+        atlas_idx = external_path_indexes.get("atlas", {})
         for key in lookup_keys:
             path_str = atlas_idx.get(str(key))
             if path_str:
@@ -274,10 +284,12 @@ def _render_external_followup(
 
     # NEOWISE summary + optional light curve panel
     neowise_epochs = payload.get('neowise_n_epochs', 0)
+    neowise_w1_range = payload.get('neowise_w1_range', 'n/a')
+    neowise_w2_range = payload.get('neowise_w2_range', 'n/a')
     neowise_rows = pd.DataFrame()
     neowise_path = None
     if run_dir is not None:
-        idx_map = _index_neowise_paths(str(run_dir.resolve()))
+        idx_map = external_path_indexes.get("neowise", {})
         for key in lookup_keys:
             path_str = idx_map.get(str(key))
             if path_str:
@@ -286,7 +298,24 @@ def _render_external_followup(
     neowise_plot = None
     if neowise_path and neowise_path.exists():
         try:
-            neowise_rows = pd.read_parquet(neowise_path)
+            neowise_rows = combine_neowise_epochs(
+                normalize_external_lc_dataframe("neowise", pd.read_parquet(neowise_path))
+            )
+            neowise_epochs = len(neowise_rows)
+            for band, target_name in (
+                ("w1mpro", "neowise_w1_range"),
+                ("w2mpro", "neowise_w2_range"),
+            ):
+                values = (
+                    pd.to_numeric(neowise_rows[band], errors="coerce").dropna()
+                    if band in neowise_rows.columns
+                    else pd.Series(dtype=float)
+                )
+                value = float(values.max() - values.min()) if len(values) >= 2 else np.nan
+                if target_name == "neowise_w1_range":
+                    neowise_w1_range = value
+                else:
+                    neowise_w2_range = value
             neowise_plot = _exportable_graph(
                 _build_neowise_figure_with_theme(neowise_rows, theme),
                 panel="external",
@@ -298,8 +327,8 @@ def _render_external_followup(
 
     neowise_metrics = [
         _metric("Epochs", neowise_epochs),
-        _metric("W1 range", payload.get('neowise_w1_range', 'n/a')),
-        _metric("W2 range", payload.get('neowise_w2_range', 'n/a')),
+        _metric("W1 range", neowise_w1_range),
+        _metric("W2 range", neowise_w2_range),
     ]
     neowise_extras = []
     if neowise_path:
@@ -317,7 +346,7 @@ def _render_external_followup(
     ]
     ztf_extras = []
     if run_dir is not None:
-        ztf_idx = _index_external_lc_paths(str(run_dir.resolve()), "ztf")
+        ztf_idx = external_path_indexes.get("ztf", {})
         for key in lookup_keys:
             path_str = ztf_idx.get(str(key))
             if path_str:
@@ -350,7 +379,7 @@ def _render_external_followup(
     ]
     gaia_epoch_extras = []
     if run_dir is not None:
-        gaia_idx = _index_external_lc_paths(str(run_dir.resolve()), "gaia_epoch")
+        gaia_idx = external_path_indexes.get("gaia_epoch", {})
         for key in lookup_keys:
             path_str = gaia_idx.get(str(key))
             if path_str:
@@ -382,7 +411,7 @@ def _render_external_followup(
     ]
     tess_extras = []
     if run_dir is not None:
-        tess_idx = _index_external_lc_paths(str(run_dir.resolve()), "tess")
+        tess_idx = external_path_indexes.get("tess", {})
         for key in lookup_keys:
             path_str = tess_idx.get(str(key))
             if path_str:
@@ -415,7 +444,7 @@ def _render_external_followup(
     ]
     ps1_extras = []
     if run_dir is not None:
-        ps1_idx = _index_external_lc_paths(str(run_dir.resolve()), "ps1")
+        ps1_idx = external_path_indexes.get("ps1", {})
         for key in lookup_keys:
             path_str = ps1_idx.get(str(key))
             if path_str:
@@ -445,11 +474,13 @@ def _render_external_followup(
 
     # CRTS LC card
     crts_metrics = [
+        _metric("State", payload.get('crts_lc_state', 'not fetched')),
         _metric("Points", payload.get('crts_lc_n_points', 'n/a')),
+        _metric("Span [d]", payload.get('crts_lc_time_span_days', 'n/a')),
     ]
     crts_extras = []
     if run_dir is not None:
-        crts_idx = _index_external_lc_paths(str(run_dir.resolve()), "crts")
+        crts_idx = external_path_indexes.get("crts", {})
         for key in lookup_keys:
             path_str = crts_idx.get(str(key))
             if path_str:
@@ -472,7 +503,99 @@ def _render_external_followup(
 
     crts_card = _section('CRTS', crts_metrics, crts_extras)
 
-    return [cutout_card, multi_survey_card, spectra_card, atlas_card, neowise_card, ztf_card, gaia_epoch_card, tess_card, ps1_card, crts_card]
+    def _legacy_lc_card(
+        source: str,
+        label: str,
+        band_specs: list[tuple[str, str, str, str]],
+        *,
+        filter_col: str | None = None,
+    ) -> html.Div:
+        metrics = [
+            _metric("State", payload.get(f"{source}_lc_state", "not fetched")),
+            _metric("Points", payload.get(f"{source}_lc_n_points", "n/a")),
+            _metric("Span [d]", payload.get(f"{source}_lc_time_span_days", "n/a")),
+        ]
+        extras = []
+        source_index = external_path_indexes.get(source, {})
+        for key in lookup_keys:
+            path_text = source_index.get(str(key))
+            if not path_text:
+                continue
+            path = Path(path_text)
+            if path.exists():
+                try:
+                    figure = _build_external_lc_figure(
+                        pd.read_parquet(path),
+                        label,
+                        band_specs,
+                        time_col="hjd",
+                        filter_col=filter_col,
+                        source_name=source,
+                        theme=theme,
+                        jd_system="jd",
+                    )
+                    extras.append(
+                        _exportable_graph(
+                            figure,
+                            panel="external",
+                            name=source,
+                            height="250px",
+                        )
+                    )
+                except Exception:
+                    pass
+            break
+        return _section(label, metrics, extras)
+
+    legacy_cards = [
+        _legacy_lc_card(
+            "superwasp",
+            "SuperWASP",
+            [
+                ("raw", "mag", "mag_err", "#4fa3ff"),
+                ("sysrem", "mag", "mag_err", "#ff9f43"),
+            ],
+            filter_col="proc_type",
+        ),
+        _legacy_lc_card(
+            "kelt",
+            "KELT",
+            [
+                ("raw", "mag", "mag_err", "#55c667"),
+                ("tfa", "mag", "mag_err", "#d45087"),
+            ],
+            filter_col="proc_type",
+        ),
+        _legacy_lc_card(
+            "nsvs",
+            "NSVS",
+            [("NSVS", "mag", "mag_err", "#9e9e9e")],
+        ),
+        _legacy_lc_card(
+            "asas3",
+            "ASAS-3",
+            [("V", "mag", "mag_err", "#2ca02c")],
+        ),
+        _legacy_lc_card(
+            "dasch",
+            "DASCH",
+            [("B", "mag", "mag_err", "#5b7db1")],
+        ),
+    ]
+
+    return [
+        cutout_card,
+        multi_survey_card,
+        spectra_card,
+        atlas_card,
+        neowise_card,
+        ztf_card,
+        gaia_epoch_card,
+        tess_card,
+        ps1_card,
+        *legacy_cards,
+        crts_card,
+    ]
 
 
 # ---- sidebar filter helpers ------------------------------------------------

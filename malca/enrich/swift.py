@@ -13,7 +13,7 @@ from malca.io.table_io import read_feature_table, write_parquet_table
 DEFAULT_SWIFT_CATALOGS: dict[str, str] = {
     "swift_2sxps": "IX/58/2sxps",
     "swift_1sxps": "J/ApJS/210/8/1sxps",
-    "swift_uvotssc2": "II/363/uvotssc2",
+    "swift_uvotssc1": "II/339/uvotssc1",
 }
 
 SWIFT_LONG_COLUMNS = ["candidate_id", "swift_catalog", "catalog", "sep_arcsec", "swift_is_uvot", "swift_is_xrt"]

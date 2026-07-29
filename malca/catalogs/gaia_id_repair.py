@@ -21,7 +21,7 @@ from malca.products.feature_layers import (
 )
 from malca.catalogs.gaia_fetch import fetch_gaia_catalog
 from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, normalize_gaia_source_ids, parse_gaia_source_id
-from malca.review.store import db_connect, get_candidate_payload
+from malca.review.store import db_connect, ensure_review_db_schema, get_candidate_payload
 from malca.io.table_io import read_feature_table, write_feature_table
 
 
@@ -54,6 +54,7 @@ GAIA_REPAIR_COLUMNS = (
 def _connect_review_db_for_repair(db_path: Path, *, write: bool) -> sqlite3.Connection:
     """Open review DBs read-only for dry-runs and migratable for writes."""
     if write:
+        ensure_review_db_schema(db_path)
         return db_connect(db_path)
 
     uri = f"{db_path.resolve().as_uri()}?mode=ro"

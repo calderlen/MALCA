@@ -16,7 +16,7 @@ SKYVIEW_URL = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
 
 DEFAULT_CUTOUT_FOV_ARCSEC = 120.0
 DEFAULT_CUTOUT_SIZE_PX = 512
-DEFAULT_CUTOUT_SURVEY_KEY = "panstarrs-dr1-color"
+DEFAULT_CUTOUT_SURVEY_KEY = "decaps-dr2"
 ASASSN_PIXEL_SCALE_ARCSEC = 8.0
 ASASSN_FWHM_PIXELS = 2.0
 ASASSN_FWHM_ARCSEC = ASASSN_PIXEL_SCALE_ARCSEC * ASASSN_FWHM_PIXELS
@@ -188,9 +188,7 @@ def survey_matches_coordinates(survey: CutoutSurvey, ra: float, dec: float) -> b
 
 
 def default_cutout_survey_key_for_coordinates(ra: float, dec: float) -> str:
-    del ra
-    if dec < -30.0:
-        return "dss2"
+    del ra, dec
     return DEFAULT_CUTOUT_SURVEY_KEY
 
 

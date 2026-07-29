@@ -68,7 +68,6 @@ from malca.config import (
     VETTING_SIMBAD_MAX_RETRIES,
     GAIA_ESA_TAP_URL,
     ALERCE_API_BASE,
-    ATLAS_API_BASE,
     TNS_API_BASE,
     ASASSN_VAR_CATALOG_ID,
     ZTF_VAR_CATALOG_ID,
@@ -76,7 +75,6 @@ from malca.config import (
     CHANDRA_CSC_CATALOG_ID,
     OGLE_MICROLENS_CATALOG_ID,
     ALERCE_RADIUS_ARCSEC as CFG_ALERCE_RADIUS_ARCSEC,
-    ATLAS_MJD_MIN as CFG_ATLAS_MJD_MIN,
     ZTF_VAR_RADIUS_ARCSEC as CFG_ZTF_VAR_RADIUS_ARCSEC,
     TNS_RADIUS_ARCSEC as CFG_TNS_RADIUS_ARCSEC,
     EROSITA_RADIUS_ARCSEC as CFG_EROSITA_RADIUS_ARCSEC,
@@ -92,8 +90,6 @@ from malca.config import (
     CRTS_CHUNK_SIZE as CFG_CRTS_CHUNK_SIZE,
     GAIA_EPOCH_VET_CHUNK_SIZE as CFG_GAIA_EPOCH_VET_CHUNK_SIZE,
     VSX_ALL_CATALOG_PATH,
-    ATLAS_POLL_INTERVAL as CFG_ATLAS_POLL_INTERVAL,
-    ATLAS_MAX_POLL as CFG_ATLAS_MAX_POLL,
     VETTING_HTTP_TIMEOUT,
     VETTING_BACKOFF_CAP,
     MJD_TO_JD,
@@ -112,7 +108,14 @@ from malca.catalogs.evidence import (
     normalize_catalog_neighbor_frame,
 )
 from malca.catalogs.gaia_ids import parse_gaia_source_id
+from malca.catalogs.neowise_epochs import combine_neowise_epochs
 from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
+from malca.enrichment.atlas_forced_photometry import (
+    query_atlas_forced_phot,
+    summarize_atlas_lc as _summarize_atlas_lc,
+)
+from malca.enrichment.astrometry import angular_separation_arcsec, propagate_linear_icrs
+from malca.enrichment import legacy_survey_lcs
 from malca.core.utils import batch_tap_crossmatch
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.products.feature_layers import feature_value_series
@@ -134,8 +137,8 @@ SIMBAD_MAX_RETRIES = VETTING_SIMBAD_MAX_RETRIES
 GAIA_VAR_CHUNK_SIZE = min(GAIA_CHUNK_SIZE, 100)
 GAIA_TAP_URLS = [GAIA_ESA_TAP_URL, GAIA_AIP_TAP_URL]
 ASASSN_VAR_CATALOG = ASASSN_VAR_CATALOG_ID
-ASASSN_VAR_REPO_LOCAL_CSV = Path(__file__).resolve().parents[2] / "input" / "asassn_variables_220326.csv"
-ASASSN_VAR_PACKAGE_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_variables_220326.csv"
+ASASSN_VAR_REPO_LOCAL_CSV = Path(__file__).resolve().parents[2] / "input" / "asassn_catalog_full.csv"
+ASASSN_VAR_PACKAGE_LOCAL_CSV = Path(__file__).resolve().parent.parent / "input" / "asassn_catalog_full.csv"
 ASASSN_VAR_LOCAL_CSV = ASASSN_VAR_REPO_LOCAL_CSV
 ASASSN_VAR_RADIUS_ARCSEC = 5.0
 GAIA_TAP_RETRY_BASE_DELAY = 5.0
@@ -155,9 +158,6 @@ ALERCE_RADIUS_ARCSEC = CFG_ALERCE_RADIUS_ARCSEC
 ALERCE_BATCH_SIZE = CFG_ALERCE_BATCH_SIZE
 ALERCE_WORKERS = CFG_ALERCE_WORKERS
 
-ATLAS_MJD_MIN = CFG_ATLAS_MJD_MIN
-ATLAS_POLL_INTERVAL = CFG_ATLAS_POLL_INTERVAL
-ATLAS_MAX_POLL = CFG_ATLAS_MAX_POLL
 
 
 def _short_error(exc: Exception, max_len: int = 240) -> str:
@@ -595,7 +595,14 @@ def _external_lc_status_hit(
     row = rows.iloc[-1]
     if str(row.get("status", "")) != "no_data":
         return None
-    return {col: row.get(col, np.nan) for col in summary_cols}
+    summary = {col: row.get(col, np.nan) for col in summary_cols}
+    for col in summary_cols:
+        if not col.endswith("_state"):
+            continue
+        value = summary.get(col)
+        if value is None or pd.isna(value) or not str(value).strip():
+            summary[col] = "no_coverage"
+    return summary
 
 
 def _read_external_lc_file(path: Path | None) -> pd.DataFrame | None:
@@ -744,40 +751,6 @@ def _summarize_long_mag_lc(lc: pd.DataFrame, prefix: str, bands: tuple[str, ...]
     for band in bands:
         out[f"{prefix}_{band.lower()}_range"] = _band_mag_range(lc, band)
     return out
-
-
-def _summarize_atlas_lc(phot: pd.DataFrame) -> dict:
-    if phot.empty:
-        raise ValueError("empty ATLAS light curve")
-    summary = {
-        "atlas_has_phot": True,
-        "atlas_n_det_cyan": 0,
-        "atlas_n_det_orange": 0,
-        "atlas_cyan_range": np.nan,
-        "atlas_orange_range": np.nan,
-    }
-    if "F" in phot.columns:
-        cyan = phot[phot["F"] == "c"]
-        orange = phot[phot["F"] == "o"]
-    elif "filter" in phot.columns:
-        cyan = phot[phot["filter"] == "c"]
-        orange = phot[phot["filter"] == "o"]
-    else:
-        return summary
-
-    mag_col = "m" if "m" in phot.columns else "mag" if "mag" in phot.columns else None
-    if mag_col is None:
-        return summary
-
-    c_mags = pd.to_numeric(cyan[mag_col], errors="coerce").dropna()
-    o_mags = pd.to_numeric(orange[mag_col], errors="coerce").dropna()
-    summary["atlas_n_det_cyan"] = len(c_mags)
-    summary["atlas_n_det_orange"] = len(o_mags)
-    if len(c_mags) >= 2:
-        summary["atlas_cyan_range"] = round(float(c_mags.max() - c_mags.min()), 4)
-    if len(o_mags) >= 2:
-        summary["atlas_orange_range"] = round(float(o_mags.max() - o_mags.min()), 4)
-    return summary
 
 
 def _summarize_ztf_lc(lc: pd.DataFrame) -> dict:
@@ -930,13 +903,126 @@ def _normalize_gaia_epoch_tap_lightcurve(lc_all: pd.DataFrame) -> pd.DataFrame:
 def _summarize_neowise_lc(lc: pd.DataFrame) -> dict:
     if lc.empty:
         raise ValueError("empty NEOWISE light curve")
-    w1 = pd.to_numeric(lc["w1mpro"], errors="coerce").dropna() if "w1mpro" in lc.columns else pd.Series(dtype=float)
-    w2 = pd.to_numeric(lc["w2mpro"], errors="coerce").dropna() if "w2mpro" in lc.columns else pd.Series(dtype=float)
+    identity_status = (
+        str(lc["target_identity_status"].dropna().iloc[0])
+        if "target_identity_status" in lc.columns and lc["target_identity_status"].notna().any()
+        else "legacy_unverified"
+    )
+    identity_sep = (
+        float(pd.to_numeric(lc["target_sep_arcsec"], errors="coerce").median())
+        if "target_sep_arcsec" in lc.columns and pd.to_numeric(lc["target_sep_arcsec"], errors="coerce").notna().any()
+        else np.nan
+    )
+    epochs = combine_neowise_epochs(lc)
+    w1 = pd.to_numeric(epochs["w1mpro"], errors="coerce").dropna()
+    w2 = pd.to_numeric(epochs["w2mpro"], errors="coerce").dropna()
     return {
-        "neowise_n_epochs": len(lc),
+        "neowise_n_epochs": len(epochs),
         "neowise_w1_range": float(w1.max() - w1.min()) if len(w1) >= 2 else np.nan,
         "neowise_w2_range": float(w2.max() - w2.min()) if len(w2) >= 2 else np.nan,
+        "neowise_identity_status": identity_status,
+        "neowise_identity_sep_arcsec": identity_sep,
     }
+
+
+def _summarize_verified_neowise_lc(lc: pd.DataFrame) -> dict:
+    summary = _summarize_neowise_lc(lc)
+    if summary.get("neowise_identity_status") != "matched":
+        raise ValueError("NEOWISE cache has no verified target identity")
+    return summary
+
+
+def _candidate_numeric_value(frame: pd.DataFrame, idx: object, *columns: str) -> float:
+    for column in columns:
+        if column not in frame.columns:
+            continue
+        value = pd.to_numeric(frame.loc[idx, column], errors="coerce")
+        if np.isfinite(value):
+            return float(value)
+    return np.nan
+
+
+def _mapping_numeric_value(candidate: pd.Series | dict, *columns: str) -> float:
+    for column in columns:
+        value = pd.to_numeric(candidate.get(column), errors="coerce")
+        if np.isfinite(value):
+            return float(value)
+    return np.nan
+
+
+def _neowise_query_radius_arcsec(
+    candidate: pd.Series | dict,
+    base_radius_arcsec: float,
+) -> float:
+    """Enclose the target's proper-motion track over the NEOWISE mission."""
+    pmra = _mapping_numeric_value(candidate, "pmra", "gaia_pmra", "pmra_gaia")
+    pmdec = _mapping_numeric_value(candidate, "pmdec", "gaia_pmdec", "pmdec_gaia")
+    ref_epoch = _mapping_numeric_value(candidate, "ref_epoch", "gaia_ref_epoch")
+    if not np.isfinite(ref_epoch):
+        ref_epoch = 2016.0
+    if not (np.isfinite(pmra) and np.isfinite(pmdec)):
+        return float(base_radius_arcsec)
+    # NEOWISE-R began in late 2013.  Extend the other endpoint to the current
+    # date so a long-lived cache/query remains complete for newly released data.
+    first_mjd = 56600.0
+    now_mjd = float(pd.Timestamp.now(tz="UTC").to_julian_date() - 2400000.5)
+    first_jyear = 2000.0 + (first_mjd - 51544.5) / 365.25
+    now_jyear = 2000.0 + (now_mjd - 51544.5) / 365.25
+    max_years = max(abs(first_jyear - ref_epoch), abs(now_jyear - ref_epoch))
+    displacement = float(np.hypot(pmra, pmdec)) * max_years / 1000.0
+    return float(base_radius_arcsec) + displacement
+
+
+def _filter_neowise_candidate_identity(
+    lc: pd.DataFrame,
+    candidate: pd.Series | dict,
+    *,
+    max_sep_arcsec: float,
+) -> tuple[pd.DataFrame, str]:
+    """Keep only NEOWISE detections positionally consistent with one candidate."""
+    if lc.empty:
+        return lc.copy(), "no_data"
+    lookup = {str(column).lower(): str(column) for column in lc.columns}
+    ra_col = lookup.get("ra")
+    dec_col = lookup.get("dec")
+    mjd_col = lookup.get("mjd")
+    if ra_col is None or dec_col is None or mjd_col is None:
+        return pd.DataFrame(columns=list(lc.columns)), "missing_catalog_astrometry"
+
+    target_ra = _mapping_numeric_value(candidate, "ra", "ra_deg")
+    target_dec = _mapping_numeric_value(candidate, "dec", "dec_deg")
+    if not (np.isfinite(target_ra) and np.isfinite(target_dec)):
+        return pd.DataFrame(columns=list(lc.columns)), "missing_target_astrometry"
+    mjd = pd.to_numeric(lc[mjd_col], errors="coerce").to_numpy(dtype=float)
+    catalog_ra = pd.to_numeric(lc[ra_col], errors="coerce").to_numpy(dtype=float)
+    catalog_dec = pd.to_numeric(lc[dec_col], errors="coerce").to_numpy(dtype=float)
+    pmra = _mapping_numeric_value(candidate, "pmra", "gaia_pmra", "pmra_gaia")
+    pmdec = _mapping_numeric_value(candidate, "pmdec", "gaia_pmdec", "pmdec_gaia")
+    reference_epoch = _mapping_numeric_value(candidate, "ref_epoch", "gaia_ref_epoch")
+    if not np.isfinite(reference_epoch):
+        reference_epoch = 2016.0
+    propagated_ra, propagated_dec, method = propagate_linear_icrs(
+        float(target_ra),
+        float(target_dec),
+        mjd,
+        pmra_mas_per_year=float(pmra) if np.isfinite(pmra) else None,
+        pmdec_mas_per_year=float(pmdec) if np.isfinite(pmdec) else None,
+        reference_epoch_jyear=float(reference_epoch),
+    )
+    separation = angular_separation_arcsec(propagated_ra, propagated_dec, catalog_ra, catalog_dec)
+    identity_radius = min(float(max_sep_arcsec), 1.5)
+    keep = (
+        np.isfinite(mjd) & np.isfinite(catalog_ra) & np.isfinite(catalog_dec)
+        & np.isfinite(separation) & (separation <= identity_radius)
+    )
+    out = lc.loc[keep].copy()
+    if out.empty:
+        return out, f"no_identity_match:{method}"
+    out["target_sep_arcsec"] = separation[keep]
+    out["target_identity_method"] = method
+    out["target_identity_status"] = "matched"
+    out["target_identity_radius_arcsec"] = identity_radius
+    return out.reset_index(drop=True), "matched"
 
 
 def _summarize_flux_lc(lc: pd.DataFrame, group_col: str, n_col: str, total_col: str, range_col: str) -> dict:
@@ -949,6 +1035,100 @@ def _summarize_flux_lc(lc: pd.DataFrame, group_col: str, n_col: str, total_col: 
         total_col: len(lc),
         range_col: float(flux_vals.max() - flux_vals.min()) if len(flux_vals) >= 2 else np.nan,
     }
+
+
+def _summarize_tess_lc(lc: pd.DataFrame) -> dict:
+    science_lc = lc
+    if "quality" in lc.columns:
+        quality = pd.to_numeric(lc["quality"], errors="coerce")
+        science_lc = lc.loc[quality.eq(0)].copy()
+    summary = _summarize_flux_lc(
+        science_lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"
+    )
+    summary["tess_identity_status"] = (
+        str(lc["target_identity_status"].dropna().iloc[0])
+        if "target_identity_status" in lc.columns and lc["target_identity_status"].notna().any()
+        else "legacy_unverified"
+    )
+    summary["tess_target_id"] = (
+        str(lc["tess_target_id"].dropna().iloc[0])
+        if "tess_target_id" in lc.columns and lc["tess_target_id"].notna().any()
+        else ""
+    )
+    summary["tess_identity_sep_arcsec"] = (
+        float(pd.to_numeric(lc["target_sep_arcsec"], errors="coerce").median())
+        if "target_sep_arcsec" in lc.columns and pd.to_numeric(lc["target_sep_arcsec"], errors="coerce").notna().any()
+        else np.nan
+    )
+    return summary
+
+
+def _summarize_verified_tess_lc(lc: pd.DataFrame) -> dict:
+    summary = _summarize_tess_lc(lc)
+    if summary.get("tess_identity_status") != "matched":
+        raise ValueError("TESS cache has no verified target identity")
+    return summary
+
+
+def _tess_target_token(value: object) -> str:
+    text = str(value or "").strip().upper()
+    digits = "".join(character for character in text if character.isdigit())
+    return digits or text
+
+
+def _select_tess_target_search_result(
+    search: object,
+    candidate: pd.Series | dict,
+) -> tuple[object | None, str, float, str]:
+    """Select every product for one TIC/nearest sky target, never all cone targets."""
+    table = getattr(search, "table", None)
+    if table is None or len(table) == 0:
+        return None, "", np.nan, "missing_search_metadata"
+    colnames = list(getattr(table, "colnames", getattr(table, "columns", [])))
+    target_col = next((name for name in ("target_name", "targetid", "target_id") if name in colnames), None)
+    distance_col = next((name for name in ("distance", "separation", "sep") if name in colnames), None)
+    if target_col is None or distance_col is None:
+        return None, "", np.nan, "missing_search_identity_columns"
+
+    target_names = np.asarray([str(value).strip() for value in table[target_col]], dtype=object)
+    raw_distance = table[distance_col]
+    try:
+        unit = getattr(raw_distance, "unit", None)
+        distances = np.asarray(raw_distance.to(u.arcsec).value if unit is not None else raw_distance, dtype=float)
+    except Exception:
+        distances = np.asarray(raw_distance, dtype=float)
+    finite = np.isfinite(distances)
+    if not finite.any():
+        return None, "", np.nan, "invalid_search_separation"
+
+    requested_tokens = {
+        _tess_target_token(candidate.get(column))
+        for column in ("tic_id", "ticid", "tess_id")
+        if candidate.get(column) is not None and str(candidate.get(column)).strip()
+    }
+    chosen_name = ""
+    method = "nearest_position"
+    if requested_tokens:
+        matching_names = [
+            name for name in target_names
+            if _tess_target_token(name) in requested_tokens
+        ]
+        if matching_names:
+            chosen_name = matching_names[0]
+            method = "catalog_identifier"
+    if not chosen_name:
+        chosen_name = str(target_names[int(np.nanargmin(np.where(finite, distances, np.nan)))])
+    mask = target_names == chosen_name
+    if not mask.any():
+        return None, chosen_name, np.nan, "identity_selection_failed"
+    chosen_distance = float(np.nanmin(distances[mask]))
+    if chosen_distance > float(TESS_SEARCH_RADIUS_ARCSEC):
+        return None, chosen_name, chosen_distance, "identity_outside_radius"
+    try:
+        selected = search[mask]
+    except Exception:
+        return None, chosen_name, chosen_distance, "identity_selection_failed"
+    return selected, chosen_name, chosen_distance, method
 
 
 def _summarize_count_lc(lc: pd.DataFrame, n_col: str) -> dict:
@@ -1250,7 +1430,7 @@ def query_gaia_variability(
 
     def _apply_gaia_var(sid: str, flag: object, class_name: object, score: object) -> int:
         applied = 0
-        is_var = bool(flag) or bool(_safe_text(class_name))
+        is_var = _to_bool_flag(flag) or bool(_safe_text(class_name))
         for idx in idx_map.get(sid, []):
             df.loc[idx, "gaia_var_flag"] = is_var
             df.loc[idx, "gaia_var_class"] = _safe_text(class_name)
@@ -1272,7 +1452,11 @@ def query_gaia_variability(
 
     missing_ids = [sid for sid in gaia_ids if refresh_cache or sid not in cached_ids]
     if not missing_ids:
-        flagged = int(pd.Series([df.loc[idxs[0], "gaia_var_flag"] for idxs in idx_map.values()]).fillna(False).astype(bool).sum())
+        flagged = int(
+            pd.Series([df.loc[idxs[0], "gaia_var_flag"] for idxs in idx_map.values()])
+            .map(_to_bool_flag)
+            .sum()
+        )
         classified = int((df["gaia_var_class"].fillna("").astype(str).str.strip() != "").sum())
         print(f"Gaia variability: served {len(gaia_ids)} source_ids from cache; {flagged} flagged, {classified} classified")
         return df
@@ -1391,13 +1575,56 @@ def resolve_asassn_var_local_csv(local_csv: Path | str | None = None) -> Path:
             raise FileNotFoundError(f"ASAS-SN variables local CSV not found: {path}")
         return path
 
-    checked = [ASASSN_VAR_REPO_LOCAL_CSV, ASASSN_VAR_PACKAGE_LOCAL_CSV]
+    checked = [
+        ASASSN_VAR_REPO_LOCAL_CSV,
+        ASASSN_VAR_PACKAGE_LOCAL_CSV,
+        ASASSN_VAR_REPO_LOCAL_CSV.with_name("asassn_variables_220326.csv"),
+        ASASSN_VAR_PACKAGE_LOCAL_CSV.with_name("asassn_variables_220326.csv"),
+    ]
     for path in checked:
         path = Path(path).expanduser()
         if path.is_file():
             return path
     checked_text = ", ".join(str(Path(path).expanduser()) for path in checked)
     raise FileNotFoundError(f"ASAS-SN variables local CSV not found. Checked: {checked_text}")
+
+
+_ASASSN_LOCAL_COLUMN_ALIASES = {
+    # The full export contains both an internal UUID-like ``id`` and the
+    # public ``asassn_name``. Prefer the public source name; the case-insensitive
+    # lookup would otherwise mistake the internal ``id`` for legacy ``ID``.
+    "ID": ("asassn_name", "ASASSN-V", "source_name", "ID"),
+    "RAJ2000": ("RAJ2000", "raj2000", "ra"),
+    "DEJ2000": ("DEJ2000", "dej2000", "dec"),
+    "ML_classification": ("ML_classification", "variable_type", "Type", "var_type"),
+    "Period": ("Period", "period", "Per"),
+    "EDR3_source_id": ("EDR3_source_id", "edr3_source_id", "GaiaDR3", "gaia_id"),
+    "DR2_source_id": ("DR2_source_id", "gdr2_id", "GaiaDR2", "gaia_dr2_id"),
+}
+
+
+def _asassn_local_column_map(columns: Iterable[object]) -> dict[str, str]:
+    available = {str(column).casefold(): str(column) for column in columns}
+    rename: dict[str, str] = {}
+    for canonical, aliases in _ASASSN_LOCAL_COLUMN_ALIASES.items():
+        source = next(
+            (
+                available.get(alias.casefold())
+                for alias in aliases
+                if alias.casefold() in available
+            ),
+            None,
+        )
+        if source is not None:
+            rename[source] = canonical
+    required = {"ID", "RAJ2000", "DEJ2000"}
+    missing = required - set(rename.values())
+    if missing:
+        raise ValueError(
+            f"ASAS-SN variables CSV missing canonical columns {missing}; "
+            f"available columns begin with {list(columns)[:12]}"
+        )
+    return rename
 
 
 def _load_asassn_local_catalog(path: Path) -> pd.DataFrame:
@@ -1407,12 +1634,65 @@ def _load_asassn_local_catalog(path: Path) -> pd.DataFrame:
     if not path.is_file():
         raise FileNotFoundError(f"ASAS-SN variables local CSV not found: {path}")
     print(f"ASAS-SN variables: loading local catalog {path.name}...")
-    cat = pd.read_csv(path, low_memory=False)
-    need = {"RAJ2000", "DEJ2000", "ID"}
-    if not need.issubset(cat.columns):
-        raise ValueError(f"ASAS-SN variables CSV missing columns {need}, got {list(cat.columns)[:12]}...")
+    header = pd.read_csv(path, nrows=0)
+    rename = _asassn_local_column_map(header.columns)
+    string_columns = {
+        source: "string"
+        for source, canonical in rename.items()
+        if canonical in {"ID", "EDR3_source_id", "DR2_source_id"}
+    }
+    cat = pd.read_csv(
+        path,
+        usecols=list(rename),
+        dtype=string_columns,
+        low_memory=False,
+    ).rename(columns=rename)
     _asassn_cache[key] = cat
     return cat
+
+
+def _asassn_catalog_gaia_id(value: object) -> str | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    return parse_gaia_source_id(text.split()[-1])
+
+
+def _candidate_gaia_ids(row: pd.Series) -> set[str]:
+    ids: set[str] = set()
+    for column in ("gaia_id", "gaia_dr2_id"):
+        if column not in row.index:
+            continue
+        source_id = parse_gaia_source_id(row.get(column))
+        if source_id is not None:
+            ids.add(source_id)
+    return ids
+
+
+def _select_asassn_local_match(candidate: pd.Series, matches: pd.DataFrame) -> pd.Series | None:
+    """Choose the nearest match, rejecting a conflicting catalog Gaia identity."""
+    ordered = matches.sort_values("sep_arcsec", na_position="last")
+    candidate_ids = _candidate_gaia_ids(candidate)
+    if not candidate_ids:
+        return ordered.iloc[0]
+
+    catalog_id_columns = [
+        column for column in ("EDR3_source_id", "DR2_source_id") if column in ordered.columns
+    ]
+    if not catalog_id_columns:
+        return ordered.iloc[0]
+
+    catalog_ids = ordered[catalog_id_columns].apply(
+        lambda column: column.map(_asassn_catalog_gaia_id)
+    )
+    exact_identity = catalog_ids.isin(candidate_ids).any(axis=1)
+    if exact_identity.any():
+        return ordered.loc[exact_identity].iloc[0]
+
+    has_catalog_identity = catalog_ids.notna().any(axis=1)
+    if has_catalog_identity.all():
+        return None
+    return ordered.loc[~has_catalog_identity].iloc[0]
 
 
 def _asassn_via_local(
@@ -1452,7 +1732,9 @@ def _asassn_via_local(
 
     n_matched = 0
     for cand_idx, group in matched.groupby("candidate_idx", sort=False):
-        best = group.sort_values("sep_arcsec", na_position="last").iloc[0]
+        best = _select_asassn_local_match(df.loc[cand_idx], group)
+        if best is None:
+            continue
         df.loc[cand_idx, "asassn_var_name"] = _safe_text(best.get("ID"))
         if type_col:
             df.loc[cand_idx, "asassn_var_type"] = _safe_text(best.get(type_col))
@@ -1547,7 +1829,7 @@ def crossmatch_asassn_variables(
     Crossmatch against the ASAS-SN Variable Stars Database (VizieR II/366).
     Adds columns: asassn_var_name, asassn_var_type, asassn_var_period.
 
-    method='local' — ``input/asassn_variables_*.csv`` (or *local_csv*) + SkyCoord.
+    method='local' — ``input/asassn_catalog_full.csv`` (or *local_csv*) + SkyCoord.
     method='tap'    — VizieR TAP upload to ``II/366/catv2021``.
     """
     df = df.copy()
@@ -2990,7 +3272,8 @@ def query_gaia_eb_params(
     Query Gaia DR3 vari_eclipsing_binary for detailed EB parameters.
 
     Only queries sources already classified as ECL by the Gaia classifier.
-    Adds columns: gaia_eb_period, gaia_eb_morph, gaia_eb_global_ranking.
+    Adds the full Gaia geometric-model fit, its uncertainties, derived primary
+    and secondary eclipse parameters, period, morphology, and global ranking.
     """
     df = df.copy()
     df["gaia_eb_period"] = np.nan
@@ -3007,95 +3290,47 @@ def query_gaia_eb_params(
         return df
 
     gaia_ids = []
-    idx_map = {}
-    for idx, val in df.loc[ecl_mask, "gaia_id"].items():
+    for val in df.loc[ecl_mask, "gaia_id"]:
         sid = _parse_gaia_source_id_str(val)
         if sid is None:
             continue
         gaia_ids.append(sid)
-        idx_map.setdefault(sid, []).append(idx)
     gaia_ids = sorted(set(gaia_ids))
 
     if not gaia_ids:
         return df
 
-    all_ids = set(gaia_ids)
-    cached_by_id: dict[str, pd.Series] = {}
-    if not refresh_cache:
-        cached_by_id = _cached_rows_by_key(_read_vetting_cache(cache_dir, "gaia_eb"), "source_id", all_ids)
+    # Share the versioned full-model cache with periodic-catalog and dedicated
+    # Gaia-binary enrichment paths.  This avoids maintaining a second cache
+    # that silently drops eclipse geometry and uncertainties.
+    from malca.catalogs.periodic_catalogs import fetch_gaia_dr3_eb_periods
+    from malca.enrichment.gaia_binary import prepare_gaia_eb_frame
 
-    matched = 0
-    for sid, cached in cached_by_id.items():
-        period = pd.to_numeric(cached.get("gaia_eb_period"), errors="coerce")
-        morph = _safe_text(cached.get("gaia_eb_morph"))
-        ranking = pd.to_numeric(cached.get("gaia_eb_global_ranking"), errors="coerce")
-        for idx in idx_map.get(sid, []):
-            df.loc[idx, "gaia_eb_period"] = float(period) if pd.notna(period) else np.nan
-            df.loc[idx, "gaia_eb_morph"] = morph
-            df.loc[idx, "gaia_eb_global_ranking"] = float(ranking) if pd.notna(ranking) else np.nan
-            if pd.notna(period):
-                matched += 1
-
-    missing_ids = [sid for sid in gaia_ids if refresh_cache or sid not in cached_by_id]
-    if not missing_ids:
-        print(f"Gaia EB params: served {len(gaia_ids)} ECL-classified sources from cache")
-        print(f"Gaia EB params: {matched} sources with orbital parameters")
+    eb = fetch_gaia_dr3_eb_periods(
+        [int(source_id) for source_id in gaia_ids],
+        cache_dir=Path(cache_dir) if cache_dir is not None else DEFAULT_CACHE_DIR / "gaia",
+        chunk_size=chunk_size,
+        show_tqdm=True,
+        refresh_cache=refresh_cache,
+    )
+    prepared = prepare_gaia_eb_frame(eb)
+    if prepared.empty:
+        print("Gaia EB params: no orbital parameters returned")
         return df
 
-    n_ecl = len(missing_ids)
-    if cached_by_id and not refresh_cache:
-        print(f"Gaia EB params: served {len(cached_by_id)} sources from cache; querying {n_ecl} misses")
-    else:
-        print(f"Gaia EB params: querying {n_ecl} ECL-classified sources")
-    test_query = f"SELECT source_id FROM gaiadr3.vari_eclipsing_binary WHERE source_id = {missing_ids[0]}"
-    taps = _connect_gaia_taps_until_available(test_query, label="Gaia EB params")
-
-    eb_results = {}
-    for i in tqdm(range(0, len(missing_ids), chunk_size), desc="Gaia EB params"):
-        chunk = missing_ids[i : i + chunk_size]
-        ids_str = ",".join(chunk)
-        query = f"""
-            SELECT source_id, frequency, model_type, global_ranking
-            FROM gaiadr3.vari_eclipsing_binary
-            WHERE source_id IN ({ids_str})
-        """
-        result = _run_gaia_tap_query_until_success(taps, query, label=f"Gaia EB chunk {i}")
-        for row in result:
-            sid = str(row["source_id"])
-            freq = row["frequency"]
-            period = 1.0 / float(freq) if freq and float(freq) > 0 else np.nan
-            morph = str(row["model_type"]) if row["model_type"] else ""
-            ranking = float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan
-            eb_results[sid] = (period, morph, ranking)
-
-    cache_rows = []
-    for sid in missing_ids:
-        indices = idx_map.get(sid, [])
-        info = eb_results.get(sid)
-        if info is None:
-            cache_rows.append({
-                "source_id": sid,
-                "gaia_eb_period": np.nan,
-                "gaia_eb_morph": "",
-                "gaia_eb_global_ranking": np.nan,
-            })
+    lookup = prepared.set_index("gaia_id")
+    source_ids = df["gaia_id"].map(_parse_gaia_source_id_str)
+    for column in prepared.columns:
+        if column == "gaia_id":
             continue
-        period, morph, ranking = info
-        for idx in indices:
-            df.loc[idx, "gaia_eb_period"] = period
-            df.loc[idx, "gaia_eb_morph"] = morph
-            df.loc[idx, "gaia_eb_global_ranking"] = ranking
-            matched += 1
-        cache_rows.append({
-            "source_id": sid,
-            "gaia_eb_period": period,
-            "gaia_eb_morph": morph,
-            "gaia_eb_global_ranking": ranking,
-        })
-
-    _write_vetting_cache(cache_dir, "gaia_eb", pd.DataFrame(cache_rows), key_cols=["source_id"])
-
-    print(f"Gaia EB params: {matched} sources with orbital parameters")
+        values = source_ids.map(lookup[column])
+        if column not in df.columns:
+            df[column] = values
+        else:
+            df.loc[ecl_mask, column] = values.loc[ecl_mask]
+    df["gaia_eb_morph"] = df["gaia_eb_morph"].fillna("").astype(str)
+    matched = int(pd.to_numeric(df.loc[ecl_mask, "gaia_eb_period"], errors="coerce").notna().sum())
+    print(f"Gaia EB params: {matched} sources with full geometric-model parameters")
     return df
 
 
@@ -3291,167 +3526,9 @@ def query_alerce(
 # ATLAS FORCED PHOTOMETRY
 # =============================================================================
 
-
-def _atlas_submit_job(
-    ra: float, dec: float, token: str, mjd_min: float = ATLAS_MJD_MIN,
-) -> str | None:
-    """Submit an ATLAS forced photometry job. Returns task URL or None."""
-    try:
-        resp = requests.post(
-            f"{ATLAS_API_BASE}/queue/",
-            headers={"Authorization": f"Token {token}"},
-            data={"ra": ra, "dec": dec, "mjd_min": mjd_min},
-            timeout=30,
-        )
-        if resp.status_code == 429:
-            return None
-        resp.raise_for_status()
-        return resp.url
-    except Exception:
-        return None
-
-
-def _atlas_poll_result(task_url: str, token: str) -> pd.DataFrame | None:
-    """Poll an ATLAS task until complete, return photometry DataFrame or None."""
-    for _ in range(ATLAS_MAX_POLL):
-        try:
-            resp = requests.get(
-                task_url,
-                headers={"Authorization": f"Token {token}"},
-                timeout=VETTING_HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("finishtimestamp"):
-                result_url = data.get("result_url")
-                if result_url:
-                    phot_resp = requests.get(
-                        result_url,
-                        headers={"Authorization": f"Token {token}"},
-                        timeout=VETTING_HTTP_TIMEOUT,
-                    )
-                    phot_resp.raise_for_status()
-                    text = phot_resp.text
-                    # Strip comment lines
-                    lines = [l for l in text.split("\n") if not l.startswith("###")]
-                    if lines:
-                        return pd.read_csv(io.StringIO("\n".join(lines)), delim_whitespace=True)
-                return None
-        except Exception:
-            pass
-        time.sleep(ATLAS_POLL_INTERVAL)
-    return None
-
-
-def query_atlas_forced_phot(
-    df: pd.DataFrame,
-    token: str | None = None,
-    output_dir: Path | None = None,
-    refresh_cache: bool = False,
-) -> pd.DataFrame:
-    """
-    Query ATLAS forced photometry for independent variability confirmation.
-
-    Requires an ATLAS API token (register at https://fallingstar-data.com/forcedphot/).
-
-    Adds columns: atlas_has_phot, atlas_n_det_cyan, atlas_n_det_orange,
-                  atlas_cyan_range, atlas_orange_range.
-    If *output_dir* is set, saves the full photometry DataFrame per candidate
-    as ``atlas_lc_<candidate_id>.parquet``.
-    """
-    df = df.copy()
-    df["atlas_has_phot"] = False
-    df["atlas_n_det_cyan"] = 0
-    df["atlas_n_det_orange"] = 0
-    df["atlas_cyan_range"] = np.nan
-    df["atlas_orange_range"] = np.nan
-
-    valid = df["ra"].notna() & df["dec"].notna()
-    if not valid.any():
-        return df
-
-    if output_dir:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-    valid_idx = df.index[valid].tolist()
-    summary_cols = ["atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange", "atlas_cyan_range", "atlas_orange_range"]
-    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
-        df,
-        valid_idx,
-        output_dir=output_dir,
-        refresh_cache=refresh_cache,
-        module="ATLAS LCs",
-        file_prefix="atlas_lc",
-        summary_cols=summary_cols,
-        match_col="atlas_has_phot",
-        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, 0.0, "atlas", ATLAS_MJD_MIN),
-        summarize_func=_summarize_atlas_lc,
-    )
-    if not valid_idx:
-        print(f"ATLAS: {cached_matched}/{int(valid.sum())} candidates with photometry")
-        return df
-
-    token = token or os.environ.get("MALCA_ATLAS_TOKEN") or os.environ.get("ATLAS_API_TOKEN")
-    if not token:
-        print("ATLAS: no API token provided, skipping uncached candidates (register at https://fallingstar-data.com/forcedphot/)")
-        return df
-
-    n_valid = int(valid.sum())
-    print(f"ATLAS: submitting {len(valid_idx)} forced photometry jobs")
-    matched = cached_matched
-    status_rows: list[dict] = []
-
-    for idx in tqdm(valid_idx, desc="ATLAS forced phot"):
-        ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
-        cache_key = _coord_lookup_cache_key(df, idx, 0.0, "atlas", ATLAS_MJD_MIN)
-
-        task_url = _atlas_submit_job(ra, dec, token)
-        if task_url is None:
-            continue
-
-        phot = _atlas_poll_result(task_url, token)
-        if phot is None or phot.empty:
-            row = _external_lc_status_row(
-                df,
-                idx,
-                module="ATLAS LCs",
-                cache_key=cache_key,
-                summary={
-                    "atlas_has_phot": False,
-                    "atlas_n_det_cyan": 0,
-                    "atlas_n_det_orange": 0,
-                    "atlas_cyan_range": np.nan,
-                    "atlas_orange_range": np.nan,
-                },
-                status="no_data",
-            )
-            if row is not None:
-                status_rows.append(row)
-            continue
-
-        summary = _summarize_atlas_lc(phot)
-        for col, value in summary.items():
-            df.loc[idx, col] = value
-
-        if output_dir and not phot.empty:
-            _write_external_lc_file(output_dir, "atlas_lc", df, idx, phot)
-
-        row = _external_lc_status_row(
-            df,
-            idx,
-            module="ATLAS LCs",
-            cache_key=cache_key,
-            summary=summary,
-            status="fetched",
-        )
-        if row is not None:
-            status_rows.append(row)
-
-        matched += 1
-
-    _write_external_lc_status(output_dir, status_rows)
-    print(f"ATLAS: {matched}/{n_valid} candidates with photometry")
-    return df
+# The implementation lives in ``atlas_forced_photometry``.  It is imported
+# above so both legacy vetting orchestration and ``malca external-lcs`` use the
+# same resumable bulk queue.
 
 
 # =============================================================================
@@ -3820,7 +3897,7 @@ def fetch_gaia_epoch_lcs(
 
     # Only fetch for candidates with epoch photometry available
     if "gaia_epoch_available" in df.columns:
-        valid = df["gaia_id"].notna() & df["gaia_epoch_available"].astype(bool)
+        valid = df["gaia_id"].notna() & df["gaia_epoch_available"].map(_to_bool_flag)
     else:
         valid = df["gaia_id"].notna()
     if not valid.any():
@@ -4460,6 +4537,8 @@ def query_neowise_lightcurves(
     df["neowise_n_epochs"] = 0
     df["neowise_w1_range"] = np.nan
     df["neowise_w2_range"] = np.nan
+    df["neowise_identity_status"] = "not_queried"
+    df["neowise_identity_sep_arcsec"] = np.nan
 
     valid = df["ra"].notna() & df["dec"].notna()
     if not valid.any():
@@ -4472,7 +4551,10 @@ def query_neowise_lightcurves(
     print(f"NEOWISE LCs: fetching {n_valid} light curves")
 
     valid_idx = df.index[valid].tolist()
-    summary_cols = ["neowise_n_epochs", "neowise_w1_range", "neowise_w2_range"]
+    summary_cols = [
+        "neowise_n_epochs", "neowise_w1_range", "neowise_w2_range",
+        "neowise_identity_status", "neowise_identity_sep_arcsec",
+    ]
     valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
         df,
         valid_idx,
@@ -4482,8 +4564,13 @@ def query_neowise_lightcurves(
         file_prefix="neowise_lc",
         summary_cols=summary_cols,
         match_col="neowise_n_epochs",
-        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, max_sep_arcsec, "neowise"),
-        summarize_func=_summarize_neowise_lc,
+        cache_key_func=lambda idx: _coord_lookup_cache_key(
+            df,
+            idx,
+            _neowise_query_radius_arcsec(df.loc[idx], max_sep_arcsec),
+            "neowise-identity-v2",
+        ),
+        summarize_func=_summarize_verified_neowise_lc,
     )
     if not valid_idx:
         print(f"NEOWISE LCs: {cached_matched}/{n_valid} with data")
@@ -4492,17 +4579,20 @@ def query_neowise_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, np.nan, np.nan, None, None)
+            return (idx, 0, np.nan, np.nan, "missing_target_astrometry", np.nan, None, None)
 
-        cache_key = _coord_lookup_cache_key(df, idx, max_sep_arcsec, "neowise")
+        query_radius_arcsec = _neowise_query_radius_arcsec(df.loc[idx], max_sep_arcsec)
+        cache_key = _coord_lookup_cache_key(
+            df, idx, query_radius_arcsec, "neowise-identity-v2"
+        )
 
         query = f"""
-        SELECT mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro, w1snr, w2snr,
+        SELECT ra, dec, mjd, w1mpro, w1sigmpro, w2mpro, w2sigmpro, w1snr, w2snr,
                qual_frame, qi_fact, cc_flags
         FROM neowiser_p1bs_psd
         WHERE CONTAINS(
             POINT('ICRS', ra, dec),
-            CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {max_sep_arcsec / 3600.0})
+            CIRCLE('ICRS', {ra:.7f}, {dec:.7f}, {query_radius_arcsec / 3600.0})
         ) = 1
         ORDER BY mjd ASC
         """
@@ -4510,14 +4600,21 @@ def query_neowise_lightcurves(
             result = Irsa.query_tap(query)
             table = result.to_table()
             if table is None or len(table) == 0:
-                return (idx, 0, np.nan, np.nan, None, cache_key)
+                return (idx, 0, np.nan, np.nan, "no_data", np.nan, None, cache_key)
 
             lc = table.to_pandas()
 
             lc = filter_neowise_single_exposure_lc(lc)
+            lc, identity_status = _filter_neowise_candidate_identity(
+                lc,
+                df.loc[idx],
+                max_sep_arcsec=max_sep_arcsec,
+            )
+            if not lc.empty:
+                lc["target_query_radius_arcsec"] = query_radius_arcsec
 
             if lc.empty:
-                return (idx, 0, np.nan, np.nan, None, cache_key)
+                return (idx, 0, np.nan, np.nan, identity_status, np.nan, None, cache_key)
 
             summary = _summarize_neowise_lc(lc)
 
@@ -4530,11 +4627,13 @@ def query_neowise_lightcurves(
                 summary["neowise_n_epochs"],
                 summary["neowise_w1_range"],
                 summary["neowise_w2_range"],
+                summary["neowise_identity_status"],
+                summary["neowise_identity_sep_arcsec"],
                 None,
                 cache_key,
             )
         except Exception as exc:
-            return (idx, 0, np.nan, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
+            return (idx, 0, np.nan, np.nan, "error", np.nan, f"{idx}: {_short_error(exc)}", cache_key)
 
     matched = cached_matched
     failures: list[str] = []
@@ -4543,14 +4642,23 @@ def query_neowise_lightcurves(
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="NEOWISE LCs"):
-            idx, n_epochs, w1_range, w2_range, error, cache_key = fut.result()
+            idx, n_epochs, w1_range, w2_range, identity_status, identity_sep, error, cache_key = fut.result()
             if error is not None:
                 failures.append(error)
+                df.loc[idx, "neowise_identity_status"] = "error"
                 continue
             df.loc[idx, "neowise_n_epochs"] = n_epochs
             df.loc[idx, "neowise_w1_range"] = w1_range
             df.loc[idx, "neowise_w2_range"] = w2_range
-            summary = {"neowise_n_epochs": n_epochs, "neowise_w1_range": w1_range, "neowise_w2_range": w2_range}
+            df.loc[idx, "neowise_identity_status"] = identity_status
+            df.loc[idx, "neowise_identity_sep_arcsec"] = identity_sep
+            summary = {
+                "neowise_n_epochs": n_epochs,
+                "neowise_w1_range": w1_range,
+                "neowise_w2_range": w2_range,
+                "neowise_identity_status": identity_status,
+                "neowise_identity_sep_arcsec": identity_sep,
+            }
             row = _external_lc_status_row(
                 df,
                 idx,
@@ -4646,6 +4754,9 @@ def fetch_tess_lightcurves(
     df["tess_n_sectors"] = 0
     df["tess_total_points"] = 0
     df["tess_flux_range"] = np.nan
+    df["tess_identity_status"] = "not_queried"
+    df["tess_identity_sep_arcsec"] = np.nan
+    df["tess_target_id"] = ""
 
     valid = df["ra"].notna() & df["dec"].notna()
     if not valid.any():
@@ -4658,7 +4769,10 @@ def fetch_tess_lightcurves(
     _safe_print(f"TESS LCs: fetching {n_valid} light curves")
 
     valid_idx = df.index[valid].tolist()
-    summary_cols = ["tess_n_sectors", "tess_total_points", "tess_flux_range"]
+    summary_cols = [
+        "tess_n_sectors", "tess_total_points", "tess_flux_range",
+        "tess_identity_status", "tess_identity_sep_arcsec", "tess_target_id",
+    ]
     valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
         df,
         valid_idx,
@@ -4668,8 +4782,10 @@ def fetch_tess_lightcurves(
         file_prefix="tess_lc",
         summary_cols=summary_cols,
         match_col="tess_n_sectors",
-        cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess"),
-        summarize_func=lambda lc: _summarize_flux_lc(lc, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range"),
+        cache_key_func=lambda idx: _coord_lookup_cache_key(
+            df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess-identity-v2"
+        ),
+        summarize_func=_summarize_verified_tess_lc,
     )
     if not valid_idx:
         _safe_print(f"TESS LCs: {cached_matched}/{n_valid} with data")
@@ -4678,15 +4794,30 @@ def fetch_tess_lightcurves(
     def _fetch_one(idx: int) -> tuple:
         ra, dec = float(df.loc[idx, "ra"]), float(df.loc[idx, "dec"])
         if not (np.isfinite(ra) and np.isfinite(dec)):
-            return (idx, 0, 0, np.nan, None, None)
+            return (idx, 0, 0, np.nan, "missing_target_astrometry", np.nan, "", None, None)
 
-        cache_key = _coord_lookup_cache_key(df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess")
+        cache_key = _coord_lookup_cache_key(
+            df, idx, TESS_SEARCH_RADIUS_ARCSEC, "tess-identity-v2"
+        )
 
         def _attempt_fetch() -> tuple:
             coord = SkyCoord(ra=ra, dec=dec, unit="deg")
-            search = lk.search_lightcurve(coord, radius=21, mission="TESS")
+            search = lk.search_lightcurve(
+                coord,
+                radius=float(TESS_SEARCH_RADIUS_ARCSEC) * u.arcsec,
+                mission="TESS",
+            )
             if search is None or len(search) == 0:
-                return (idx, 0, 0, np.nan, None, cache_key)
+                return (idx, 0, 0, np.nan, "no_data", np.nan, "", None, cache_key)
+
+            search, tess_target_id, identity_sep, identity_method = _select_tess_target_search_result(
+                search, df.loc[idx]
+            )
+            if search is None or len(search) == 0:
+                return (
+                    idx, 0, 0, np.nan, identity_method, identity_sep,
+                    tess_target_id, None, cache_key,
+                )
 
             # Prefer SPOC 2-min, then QLP, then any
             spoc = search[search.author == "SPOC"]
@@ -4700,35 +4831,54 @@ def fetch_tess_lightcurves(
                     lc_collection = search.download_all(quality_bitmask="default")
 
             if lc_collection is None or len(lc_collection) == 0:
-                return (idx, 0, 0, np.nan, None, cache_key)
+                return (idx, 0, 0, np.nan, "no_downloaded_data", identity_sep, tess_target_id, None, cache_key)
 
             rows = []
             sectors = set()
             for lc_obj in lc_collection:
                 t = lc_obj.time.value
-                f = lc_obj.flux.value
-                fe = lc_obj.flux_err.value if lc_obj.flux_err is not None else np.full_like(f, np.nan)
+                f_raw = np.asarray(lc_obj.flux.value, dtype=float)
+                fe_raw = (
+                    np.asarray(lc_obj.flux_err.value, dtype=float)
+                    if lc_obj.flux_err is not None else np.full_like(f_raw, np.nan)
+                )
                 q = lc_obj.quality.value if hasattr(lc_obj, "quality") and lc_obj.quality is not None else np.zeros(len(t), dtype=int)
-                sector = getattr(lc_obj.meta, "SECTOR", None) if hasattr(lc_obj, "meta") else None
+                meta = getattr(lc_obj, "meta", {})
+                sector = meta.get("SECTOR") if hasattr(meta, "get") else getattr(meta, "SECTOR", None)
                 if sector is None:
-                    sector = getattr(lc_obj, "SECTOR", 0)
+                    sector = getattr(lc_obj, "sector", getattr(lc_obj, "SECTOR", 0))
                 sectors.add(sector)
+                good_flux = np.isfinite(f_raw) & (np.asarray(q) == 0)
+                sector_median = float(np.nanmedian(f_raw[good_flux])) if good_flux.any() else np.nan
+                if not np.isfinite(sector_median) or sector_median == 0:
+                    continue
+                f = f_raw / sector_median
+                fe = fe_raw / abs(sector_median)
                 for j in range(len(t)):
                     rows.append({
                         "time": float(t[j]),
                         "flux": float(f[j]),
                         "flux_err": float(fe[j]),
+                        "flux_raw": float(f_raw[j]),
+                        "flux_normalization": sector_median,
+                        "flux_normalization_method": "per_sector_median_quality0",
                         "quality": int(q[j]),
                         "sector": int(sector) if sector is not None else 0,
+                        "target_identity_status": "matched",
+                        "target_identity_method": identity_method,
+                        "target_sep_arcsec": identity_sep,
+                        "tess_target_id": tess_target_id,
+                        "target_ra_deg": ra,
+                        "target_dec_deg": dec,
                     })
 
             if not rows:
-                return (idx, 0, 0, np.nan, None, cache_key)
+                return (idx, 0, 0, np.nan, "no_downloaded_data", identity_sep, tess_target_id, None, cache_key)
 
             lc_df = pd.DataFrame(rows)
             lc_df = lc_df[np.isfinite(lc_df["flux"])].copy()
 
-            summary = _summarize_flux_lc(lc_df, "sector", "tess_n_sectors", "tess_total_points", "tess_flux_range")
+            summary = _summarize_tess_lc(lc_df)
 
             if output_dir and not lc_df.empty:
                 _write_external_lc_file(output_dir, "tess_lc", df, idx, lc_df)
@@ -4738,6 +4888,9 @@ def fetch_tess_lightcurves(
                 summary["tess_n_sectors"],
                 summary["tess_total_points"],
                 summary["tess_flux_range"],
+                summary["tess_identity_status"],
+                summary["tess_identity_sep_arcsec"],
+                summary["tess_target_id"],
                 None,
                 cache_key,
             )
@@ -4749,9 +4902,9 @@ def fetch_tess_lightcurves(
                 if attempt == 0 and _tess_error_is_retryable(exc):
                     _purge_tess_bad_cache_files(_tess_cache_paths_from_error(exc))
                     continue
-                return (idx, 0, 0, np.nan, f"{idx}: {_short_error(exc)}", cache_key)
+                return (idx, 0, 0, np.nan, "error", np.nan, "", f"{idx}: {_short_error(exc)}", cache_key)
 
-        return (idx, 0, 0, np.nan, f"{idx}: TESS retry exhausted", cache_key)
+        return (idx, 0, 0, np.nan, "error", np.nan, "", f"{idx}: TESS retry exhausted", cache_key)
 
     matched = cached_matched
     failures: list[str] = []
@@ -4761,9 +4914,13 @@ def fetch_tess_lightcurves(
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
         for fut in tqdm(as_completed(futures), total=len(futures), desc="TESS LCs"):
-            idx, n_sectors, total_points, flux_range, error, cache_key = fut.result()
+            (
+                idx, n_sectors, total_points, flux_range, identity_status,
+                identity_sep, tess_target_id, error, cache_key,
+            ) = fut.result()
             if error is not None:
                 failures.append(error)
+                df.loc[idx, "tess_identity_status"] = "error"
                 row = _external_lc_status_row(
                     df,
                     idx,
@@ -4783,7 +4940,17 @@ def fetch_tess_lightcurves(
             df.loc[idx, "tess_n_sectors"] = n_sectors
             df.loc[idx, "tess_total_points"] = total_points
             df.loc[idx, "tess_flux_range"] = flux_range
-            summary = {"tess_n_sectors": n_sectors, "tess_total_points": total_points, "tess_flux_range": flux_range}
+            df.loc[idx, "tess_identity_status"] = identity_status
+            df.loc[idx, "tess_identity_sep_arcsec"] = identity_sep
+            df.loc[idx, "tess_target_id"] = tess_target_id
+            summary = {
+                "tess_n_sectors": n_sectors,
+                "tess_total_points": total_points,
+                "tess_flux_range": flux_range,
+                "tess_identity_status": identity_status,
+                "tess_identity_sep_arcsec": identity_sep,
+                "tess_target_id": tess_target_id,
+            }
             row = _external_lc_status_row(
                 df,
                 idx,
@@ -6217,6 +6384,313 @@ def fetch_panstarrs_lightcurves(
 
 
 # =============================================================================
+# LEGACY SURVEY LIGHT CURVES
+# =============================================================================
+
+
+def _summarize_legacy_mag_lc(
+    lc: pd.DataFrame,
+    prefix: str,
+    *,
+    preferred_proc_type: str | None = None,
+    selected_only: bool = False,
+    time_col: str = "hjd",
+) -> dict:
+    if lc.empty:
+        raise ValueError(f"empty {prefix} light curve")
+    sample = lc
+    if preferred_proc_type is not None and "proc_type" in sample.columns:
+        preferred = sample[
+            sample["proc_type"].astype(str).str.lower() == preferred_proc_type.lower()
+        ]
+        if not preferred.empty:
+            sample = preferred
+    if selected_only and "selected" in sample.columns:
+        selected = sample[sample["selected"].fillna(False).astype(bool)]
+        if not selected.empty:
+            sample = selected
+    if "mag" in sample.columns:
+        measured = sample[pd.to_numeric(sample["mag"], errors="coerce").notna()]
+        if not measured.empty:
+            sample = measured
+
+    times = pd.to_numeric(sample.get(time_col), errors="coerce").dropna()
+    if times.empty:
+        raise ValueError(f"{prefix} light curve has no finite {time_col} epochs")
+    unique_times = np.unique(times.to_numpy(dtype=float))
+    return {
+        f"{prefix}_n_points": int(len(unique_times)),
+        f"{prefix}_time_span_days": (
+            float(unique_times.max() - unique_times.min())
+            if len(unique_times) >= 2
+            else 0.0
+        ),
+        f"{prefix}_state": "matched",
+    }
+
+
+def _legacy_summary_columns(prefix: str) -> list[str]:
+    return [
+        f"{prefix}_n_points",
+        f"{prefix}_time_span_days",
+        f"{prefix}_state",
+    ]
+
+
+def _fetch_legacy_coordinate_lightcurves(
+    df: pd.DataFrame,
+    *,
+    module: str,
+    file_prefix: str,
+    prefix: str,
+    radius_arcsec: float,
+    query_func: Callable[[float, float], pd.DataFrame],
+    summarize_func: Callable[[pd.DataFrame], dict],
+    output_dir: Path | None,
+    workers: int,
+    refresh_cache: bool,
+) -> pd.DataFrame:
+    """Shared cache/state wrapper for coordinate-selected legacy surveys."""
+    df = df.copy()
+    summary_cols = _legacy_summary_columns(prefix)
+    df[summary_cols[0]] = 0
+    df[summary_cols[1]] = np.nan
+    df[summary_cols[2]] = "fetch_failed"
+
+    ra_values = (
+        pd.to_numeric(df["ra"], errors="coerce")
+        if "ra" in df.columns
+        else pd.Series(np.nan, index=df.index)
+    )
+    dec_values = (
+        pd.to_numeric(df["dec"], errors="coerce")
+        if "dec" in df.columns
+        else pd.Series(np.nan, index=df.index)
+    )
+    valid = ra_values.notna() & dec_values.notna()
+    if not valid.any():
+        return df
+    df.loc[valid, summary_cols[2]] = "pending"
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    valid_idx = df.index[valid].tolist()
+    cache_key_func = lambda idx: _coord_lookup_cache_key(
+        df,
+        idx,
+        radius_arcsec,
+        file_prefix,
+    )
+    valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
+        df,
+        valid_idx,
+        output_dir=output_dir,
+        refresh_cache=refresh_cache,
+        module=module,
+        file_prefix=file_prefix,
+        summary_cols=summary_cols,
+        match_col=summary_cols[0],
+        cache_key_func=cache_key_func,
+        summarize_func=summarize_func,
+    )
+    n_valid = int(valid.sum())
+    if not valid_idx:
+        print(f"{module}: {cached_matched}/{n_valid} with data")
+        return df
+
+    def _fetch_one(idx):
+        cache_key = cache_key_func(idx)
+        try:
+            lc = query_func(
+                float(df.loc[idx, "ra"]),
+                float(df.loc[idx, "dec"]),
+            )
+            if lc.empty:
+                summary = {
+                    summary_cols[0]: 0,
+                    summary_cols[1]: np.nan,
+                    summary_cols[2]: "no_coverage",
+                }
+                return idx, lc, summary, None, cache_key
+            return idx, lc, summarize_func(lc), None, cache_key
+        except Exception as exc:
+            summary = {
+                summary_cols[0]: 0,
+                summary_cols[1]: np.nan,
+                summary_cols[2]: "fetch_failed",
+            }
+            return idx, pd.DataFrame(), summary, _short_error(exc), cache_key
+
+    status_rows: list[dict] = []
+    matched = cached_matched
+    failures: list[str] = []
+    max_workers = max(1, min(int(workers), len(valid_idx)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_one, idx): idx for idx in valid_idx}
+        for future in tqdm(
+            as_completed(futures),
+            total=len(futures),
+            desc=module,
+        ):
+            idx, lc, summary, error, cache_key = future.result()
+            for column in summary_cols:
+                df.loc[idx, column] = summary.get(column, np.nan)
+
+            if error is None and not lc.empty:
+                _write_external_lc_file(output_dir, file_prefix, df, idx, lc)
+                matched += 1
+            elif error is not None:
+                failures.append(f"{_candidate_cache_id(df, idx)}: {error}")
+                summary = dict(summary)
+                summary["error_message"] = error
+
+            row = _external_lc_status_row(
+                df,
+                idx,
+                module=module,
+                cache_key=cache_key,
+                summary=summary,
+                status=(
+                    "fetched"
+                    if error is None and not lc.empty
+                    else "no_data"
+                    if error is None
+                    else "error"
+                ),
+            )
+            if row is not None:
+                status_rows.append(row)
+
+    _write_external_lc_status(output_dir, status_rows)
+    if failures:
+        examples = "; ".join(failures[:3])
+        suffix = "" if len(failures) <= 3 else f"; and {len(failures) - 3} more"
+        _safe_print(
+            f"{module}: {len(failures)}/{n_valid} fetch failed "
+            f"(recorded explicitly): {examples}{suffix}"
+        )
+    print(f"{module}: {matched}/{n_valid} with data")
+    return df
+
+
+def fetch_superwasp_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 4,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    return _fetch_legacy_coordinate_lightcurves(
+        df,
+        module="SuperWASP LCs",
+        file_prefix="superwasp_lc",
+        prefix="superwasp_lc",
+        radius_arcsec=legacy_survey_lcs.SUPERWASP_MATCH_RADIUS_ARCSEC,
+        query_func=legacy_survey_lcs.query_superwasp_lightcurve,
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(
+            lc,
+            "superwasp_lc",
+            preferred_proc_type="raw",
+        ),
+        output_dir=output_dir,
+        workers=workers,
+        refresh_cache=refresh_cache,
+    )
+
+
+def fetch_kelt_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 2,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    cache_dir = _external_catalog_cache_dir("kelt")
+    return _fetch_legacy_coordinate_lightcurves(
+        df,
+        module="KELT LCs",
+        file_prefix="kelt_lc",
+        prefix="kelt_lc",
+        radius_arcsec=legacy_survey_lcs.KELT_MATCH_RADIUS_ARCSEC,
+        query_func=lambda ra, dec: legacy_survey_lcs.query_kelt_lightcurve(
+            ra,
+            dec,
+            cache_dir=cache_dir,
+        ),
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(
+            lc,
+            "kelt_lc",
+            preferred_proc_type="raw",
+        ),
+        output_dir=output_dir,
+        workers=min(workers, 2),
+        refresh_cache=refresh_cache,
+    )
+
+
+def fetch_nsvs_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 4,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    return _fetch_legacy_coordinate_lightcurves(
+        df,
+        module="NSVS LCs",
+        file_prefix="nsvs_lc",
+        prefix="nsvs_lc",
+        radius_arcsec=legacy_survey_lcs.NSVS_MATCH_RADIUS_ARCSEC,
+        query_func=legacy_survey_lcs.query_nsvs_lightcurve,
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(lc, "nsvs_lc"),
+        output_dir=output_dir,
+        workers=workers,
+        refresh_cache=refresh_cache,
+    )
+
+
+def fetch_asas3_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 2,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    return _fetch_legacy_coordinate_lightcurves(
+        df,
+        module="ASAS-3 LCs",
+        file_prefix="asas3_lc",
+        prefix="asas3_lc",
+        radius_arcsec=legacy_survey_lcs.ASAS3_MATCH_RADIUS_ARCSEC,
+        query_func=legacy_survey_lcs.query_asas3_lightcurve,
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(
+            lc,
+            "asas3_lc",
+            selected_only=True,
+        ),
+        output_dir=output_dir,
+        workers=min(workers, 2),
+        refresh_cache=refresh_cache,
+    )
+
+
+def fetch_dasch_lightcurves(
+    df: pd.DataFrame,
+    output_dir: Path | None = None,
+    workers: int = 2,
+    refresh_cache: bool = False,
+) -> pd.DataFrame:
+    return _fetch_legacy_coordinate_lightcurves(
+        df,
+        module="DASCH LCs",
+        file_prefix="dasch_lc",
+        prefix="dasch_lc",
+        radius_arcsec=legacy_survey_lcs.DASCH_MATCH_RADIUS_ARCSEC,
+        query_func=legacy_survey_lcs.query_dasch_lightcurve,
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(lc, "dasch_lc"),
+        output_dir=output_dir,
+        workers=min(workers, 2),
+        refresh_cache=refresh_cache,
+    )
+
+
+# =============================================================================
 # CRTS LIGHT CURVES
 # =============================================================================
 
@@ -6403,10 +6877,13 @@ def fetch_crts_lightcurves(
     """
     df = df.copy()
     df["crts_lc_n_points"] = 0
+    df["crts_lc_time_span_days"] = np.nan
+    df["crts_lc_state"] = "fetch_failed"
 
     valid = df["ra"].notna() & df["dec"].notna()
     if not valid.any():
         return df
+    df.loc[valid, "crts_lc_state"] = "pending"
 
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -6415,7 +6892,11 @@ def fetch_crts_lightcurves(
     print(f"CRTS LCs: fetching {n_valid} light curves via CGI")
 
     valid_idx = df.index[valid].tolist()
-    summary_cols = ["crts_lc_n_points"]
+    summary_cols = [
+        "crts_lc_n_points",
+        "crts_lc_time_span_days",
+        "crts_lc_state",
+    ]
     valid_idx, _, cached_matched = _apply_external_lc_cache_hits(
         df,
         valid_idx,
@@ -6426,7 +6907,11 @@ def fetch_crts_lightcurves(
         summary_cols=summary_cols,
         match_col="crts_lc_n_points",
         cache_key_func=lambda idx: _coord_lookup_cache_key(df, idx, CRTS_MATCH_RADIUS_ARCSEC, "crts"),
-        summarize_func=lambda lc: _summarize_count_lc(lc, "crts_lc_n_points"),
+        summarize_func=lambda lc: _summarize_legacy_mag_lc(
+            lc,
+            "crts_lc",
+            time_col="mjd",
+        ),
     )
     if not valid_idx:
         print(f"CRTS LCs: {cached_matched}/{n_valid} with data")
@@ -6451,15 +6936,33 @@ def fetch_crts_lightcurves(
                 idx,
                 module="CRTS LCs",
                 cache_key=cache_key,
-                summary={"crts_lc_n_points": 0, "error_message": short},
+                summary={
+                    "crts_lc_n_points": 0,
+                    "crts_lc_time_span_days": np.nan,
+                    "crts_lc_state": "fetch_failed",
+                    "error_message": short,
+                },
                 status="error",
             )
             if row is not None:
                 status_rows.append(row)
             continue
 
-        n_points = int(len(lc_df))
-        df.loc[idx, "crts_lc_n_points"] = n_points
+        if lc_df.empty:
+            summary = {
+                "crts_lc_n_points": 0,
+                "crts_lc_time_span_days": np.nan,
+                "crts_lc_state": "no_coverage",
+            }
+        else:
+            summary = _summarize_legacy_mag_lc(
+                lc_df,
+                "crts_lc",
+                time_col="mjd",
+            )
+        n_points = int(summary["crts_lc_n_points"])
+        for column in summary_cols:
+            df.loc[idx, column] = summary.get(column, np.nan)
         if output_dir and n_points > 0:
             _write_external_lc_file(output_dir, "crts_lc", df, idx, lc_df)
         if n_points > 0:
@@ -6470,7 +6973,7 @@ def fetch_crts_lightcurves(
             idx,
             module="CRTS LCs",
             cache_key=cache_key,
-            summary={"crts_lc_n_points": n_points},
+            summary=summary,
             status="fetched" if n_points > 0 else "no_data",
         )
         if row is not None:
@@ -6504,8 +7007,22 @@ def fetch_external_lcs(
     run_allwise_mep: bool = True,
     run_vvvx_virac: bool = True,
     run_ps1: bool = True,
+    run_superwasp: bool = True,
+    run_kelt: bool = True,
+    run_nsvs: bool = True,
+    run_asas3: bool = True,
     run_crts: bool = True,
+    run_dasch: bool = True,
     atlas_token: str | None = None,
+    atlas_results_root: Path | None = None,
+    atlas_task_checkpoint: Path | None = None,
+    atlas_batch_size: int = 100,
+    atlas_poll_interval: float = 60.0,
+    atlas_mjd_min: float = 57000.0,
+    atlas_mjd_max: float | None = None,
+    atlas_image_type: str = "reduced",
+    atlas_max_wait_seconds: float | None = None,
+    atlas_submit_only: bool = False,
     workers: int = 4,
     checkpoint_path: Path | None = None,
     progress_callback: Callable[[str], None] | None = None,
@@ -6557,10 +7074,19 @@ def fetch_external_lcs(
         "AllWISE MEP LCs": "allwise_mep_n_epochs",
         "VVVX/VIRAC2 LCs": "vvvx_virac_n_epochs",
         "Pan-STARRS LCs": "ps1_lc_n_points",
+        "SuperWASP LCs": "superwasp_lc_n_points",
+        "KELT LCs": "kelt_lc_n_points",
+        "NSVS LCs": "nsvs_lc_n_points",
+        "ASAS-3 LCs": "asas3_lc_n_points",
         "CRTS LCs": "crts_lc_n_points",
+        "DASCH LCs": "dasch_lc_n_points",
     }
 
     def _module_done(name):
+        # ATLAS resumes from its permanent per-task journal.  A partially
+        # populated summary column never means that the whole bulk job is done.
+        if name == "ATLAS LCs":
+            return False
         if not _resumed:
             return False
         col = _MODULE_MARKERS.get(name)
@@ -6602,7 +7128,23 @@ def fetch_external_lcs(
                 df.to_parquet(checkpoint_path, index=False)
 
     if run_atlas:
-        _run_module("ATLAS LCs", query_atlas_forced_phot, token=atlas_token, output_dir=output_dir, refresh_cache=refresh_cache)
+        _run_module(
+            "ATLAS LCs",
+            query_atlas_forced_phot,
+            token=atlas_token,
+            output_dir=output_dir,
+            results_root=atlas_results_root,
+            task_checkpoint=atlas_task_checkpoint,
+            batch_size=atlas_batch_size,
+            poll_interval=atlas_poll_interval,
+            mjd_min=atlas_mjd_min,
+            mjd_max=atlas_mjd_max,
+            image_type=atlas_image_type,
+            max_wait_seconds=atlas_max_wait_seconds,
+            submit_only=atlas_submit_only,
+            refresh_cache=refresh_cache,
+            progress=_emit,
+        )
 
     if run_ztf:
         _run_module("ZTF LCs", fetch_ztf_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
@@ -6637,8 +7179,23 @@ def fetch_external_lcs(
     if run_ps1:
         _run_module("Pan-STARRS LCs", fetch_panstarrs_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
 
+    if run_superwasp:
+        _run_module("SuperWASP LCs", fetch_superwasp_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
+
+    if run_kelt:
+        _run_module("KELT LCs", fetch_kelt_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
+
+    if run_nsvs:
+        _run_module("NSVS LCs", fetch_nsvs_lightcurves, output_dir=output_dir, workers=workers, refresh_cache=refresh_cache)
+
+    if run_asas3:
+        _run_module("ASAS-3 LCs", fetch_asas3_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
+
     if run_crts:
         _run_module("CRTS LCs", fetch_crts_lightcurves, output_dir=output_dir, refresh_cache=refresh_cache)
+
+    if run_dasch:
+        _run_module("DASCH LCs", fetch_dasch_lightcurves, output_dir=output_dir, workers=min(workers, 2), refresh_cache=refresh_cache)
 
     elapsed = time.perf_counter() - total_start
     if failures:
@@ -6665,7 +7222,7 @@ def vet_candidates(
     run_tns: bool = True,
     run_gaia_eb: bool = True,
     run_alerce: bool = True,
-    run_atlas: bool = True,
+    run_atlas: bool = False,
     run_gaia_epoch: bool = True,
     run_erosita: bool = True,
     run_chandra_csc: bool = True,
@@ -6781,6 +7338,10 @@ def vet_candidates(
 
     def _module_done(name):
         """Check if a module's marker column already has data (from checkpoint)."""
+        if name == "ATLAS forced phot":
+            # The ATLAS task ledger, not a partially populated summary column,
+            # is authoritative for per-candidate resume state.
+            return False
         if not (_resumed or skip_existing):
             return False
         col = _MODULE_MARKERS.get(name)
@@ -6884,6 +7445,13 @@ def vet_candidates(
             df.to_parquet(checkpoint_path, index=False)
 
     if run_atlas:
+        if atlas_output_dir is None:
+            if checkpoint_path is None:
+                raise ValueError(
+                    "atlas_output_dir is required when ATLAS vetting is enabled "
+                    "without a checkpoint path"
+                )
+            atlas_output_dir = Path(checkpoint_path).expanduser().parent / "external_lcs"
         _run_module(
             "ATLAS forced phot",
             query_atlas_forced_phot,
@@ -6955,47 +7523,55 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
             return values.astype(float) != 0.0
         return values.astype(str).str.strip().str.lower().isin(truthy)
 
+    def _nonblank_series(series: pd.Series) -> pd.Series:
+        return series.fillna("").astype(str).str.strip().ne("")
+
     if "simbad_main_id" in df.columns:
-        n = (df["simbad_main_id"] != "").sum()
+        simbad_matches = _nonblank_series(df["simbad_main_id"])
+        n = simbad_matches.sum()
         print(f"  SIMBAD matches:         {n}/{len(df)}")
         if n > 0:
-            print(f"  Median SIMBAD refs:     {df.loc[df['simbad_main_id'] != '', 'simbad_nbref'].median():.0f}")
+            print(f"  Median SIMBAD refs:     {df.loc[simbad_matches, 'simbad_nbref'].median():.0f}")
 
     if "gaia_var_flag" in df.columns:
         print(f"  Gaia variable flag:     {_truthy_series(df['gaia_var_flag']).sum()}/{len(df)}")
     if "gaia_var_class" in df.columns:
-        n = (df["gaia_var_class"] != "").sum()
+        gaia_classified = _nonblank_series(df["gaia_var_class"])
+        n = gaia_classified.sum()
         print(f"  Gaia classified:        {n}/{len(df)}")
         if n > 0:
-            for cls, cnt in df.loc[df["gaia_var_class"] != "", "gaia_var_class"].value_counts().head(5).items():
+            for cls, cnt in df.loc[gaia_classified, "gaia_var_class"].value_counts().head(5).items():
                 print(f"    {cls}: {cnt}")
 
     if "gaia_epoch_available" in df.columns:
-        print(f"  Gaia epoch available:   {df['gaia_epoch_available'].sum()}/{len(df)}")
+        print(f"  Gaia epoch available:   {_truthy_series(df['gaia_epoch_available']).sum()}/{len(df)}")
 
     if "asassn_var_type" in df.columns:
-        n = (df["asassn_var_type"] != "").sum()
+        n = _nonblank_series(df["asassn_var_type"]).sum()
         print(f"  ASAS-SN var matches:    {n}/{len(df)}")
 
     if "microlens_match" in df.columns:
-        n = df["microlens_match"].fillna(False).astype(bool).sum()
+        microlens_mask = _truthy_series(df["microlens_match"])
+        n = microlens_mask.sum()
         print(f"  Microlens matches:      {n}/{len(df)}")
         if n > 0 and "microlens_catalog" in df.columns:
-            for cls, cnt in df.loc[df["microlens_match"].fillna(False).astype(bool), "microlens_catalog"].value_counts().head(5).items():
+            for cls, cnt in df.loc[microlens_mask, "microlens_catalog"].value_counts().head(5).items():
                 print(f"    {cls}: {cnt}")
 
     if "ztf_var_type" in df.columns:
-        n = (df["ztf_var_type"] != "").sum()
+        ztf_matches = _nonblank_series(df["ztf_var_type"])
+        n = ztf_matches.sum()
         print(f"  ZTF var matches:        {n}/{len(df)}")
         if n > 0:
-            for cls, cnt in df.loc[df["ztf_var_type"] != "", "ztf_var_type"].value_counts().head(5).items():
+            for cls, cnt in df.loc[ztf_matches, "ztf_var_type"].value_counts().head(5).items():
                 print(f"    {cls}: {cnt}")
 
     if "tns_name" in df.columns:
-        n = (df["tns_name"] != "").sum()
+        n = _nonblank_series(df["tns_name"]).sum()
         print(f"  TNS transients:         {n}/{len(df)}")
-        if n > 0:
-            for cls, cnt in df.loc[df["tns_type"] != "", "tns_type"].value_counts().head(5).items():
+        if n > 0 and "tns_type" in df.columns:
+            tns_classified = _nonblank_series(df["tns_type"])
+            for cls, cnt in df.loc[tns_classified, "tns_type"].value_counts().head(5).items():
                 print(f"    {cls}: {cnt}")
 
     if "gaia_eb_period" in df.columns:
@@ -7003,23 +7579,24 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
         print(f"  Gaia EB params:         {n}/{len(df)}")
 
     if "alerce_oid" in df.columns:
-        n = (df["alerce_oid"] != "").sum()
+        n = _nonblank_series(df["alerce_oid"]).sum()
         print(f"  ALeRCE matches:         {n}/{len(df)}")
-        if n > 0:
-            lc_cls = df.loc[df["alerce_lc_class"] != "", "alerce_lc_class"].value_counts().head(5)
+        if n > 0 and "alerce_lc_class" in df.columns:
+            alerce_classified = _nonblank_series(df["alerce_lc_class"])
+            lc_cls = df.loc[alerce_classified, "alerce_lc_class"].value_counts().head(5)
             if len(lc_cls) > 0:
                 print(f"  ALeRCE LC classes:")
                 for cls, cnt in lc_cls.items():
                     print(f"    {cls}: {cnt}")
 
     if "erosita_det" in df.columns:
-        n = df["erosita_det"].fillna(False).astype(bool).sum()
+        n = _truthy_series(df["erosita_det"]).sum()
         print(f"  eROSITA X-ray det:      {n}/{len(df)}")
     if "chandra_det" in df.columns:
-        n = df["chandra_det"].fillna(False).astype(bool).sum()
+        n = _truthy_series(df["chandra_det"]).sum()
         print(f"  Chandra CSC det:        {n}/{len(df)}")
     if "xray_det" in df.columns:
-        n = df["xray_det"].fillna(False).astype(bool).sum()
+        n = _truthy_series(df["xray_det"]).sum()
         print(f"  Structured X-ray det:   {n}/{len(df)}")
 
     if "atlas_has_phot" in df.columns:
@@ -7042,17 +7619,17 @@ def _print_vetting_summary(df: pd.DataFrame, total_start: float) -> None:
     # We only want to flag true for variables with a catalog type/class, not
     # generic variable-flag evidence.
     if "gaia_var_class" in df.columns:
-        known_mask |= df["gaia_var_class"] != ""
+        known_mask |= df["gaia_var_class"].fillna("").astype(str).str.strip() != ""
     if "asassn_var_type" in df.columns:
-        known_mask |= df["asassn_var_type"] != ""
+        known_mask |= df["asassn_var_type"].fillna("").astype(str).str.strip() != ""
     if "microlens_match" in df.columns:
-        known_mask |= df["microlens_match"].fillna(False).astype(bool)
+        known_mask |= _truthy_series(df["microlens_match"])
     if "ztf_var_type" in df.columns:
-        known_mask |= df["ztf_var_type"] != ""
+        known_mask |= df["ztf_var_type"].fillna("").astype(str).str.strip() != ""
     if "tns_name" in df.columns:
-        known_mask |= df["tns_name"] != ""
+        known_mask |= df["tns_name"].fillna("").astype(str).str.strip() != ""
     if "alerce_lc_class" in df.columns:
-        known_mask |= df["alerce_lc_class"] != ""
+        known_mask |= df["alerce_lc_class"].fillna("").astype(str).str.strip() != ""
     if "vsx_class" in df.columns:
         known_mask |= df["vsx_class"].fillna("").astype(str).str.strip() != ""
 
@@ -7121,7 +7698,7 @@ def main():
 
     g_io.add_argument("input", type=Path, help="Input Parquet with candidates (needs ra, dec columns)")
     g_io.add_argument("-o", "--output", type=Path, default=None, help="Output Parquet path (default: <input>_vetted.parquet)")
-    g_io.add_argument("--min-score", type=float, default=None, help="Only vet candidates with interest_score >= this value")
+    g_io.add_argument("--min-score", type=float, default=None, help="Only vet candidates with classification_confidence >= this value")
     g_io.add_argument("--all-candidates", action="store_true", help="Vet all input rows instead of only failed_any=False passers")
     g_radii.add_argument("--simbad-radius", type=float, default=SIMBAD_RADIUS_ARCSEC, help=f"SIMBAD search radius in arcsec (default: {SIMBAD_RADIUS_ARCSEC})")
     g_radii.add_argument("--asassn-radius", type=float, default=ASASSN_VAR_RADIUS_ARCSEC, help=f"ASAS-SN crossmatch radius in arcsec (default: {ASASSN_VAR_RADIUS_ARCSEC})")
@@ -7143,9 +7720,27 @@ def main():
     g_skip.add_argument("--no-erosita", action="store_true", help="Skip eROSITA X-ray crossmatch")
     g_skip.add_argument("--no-chandra-csc", action="store_true", help="Skip Chandra CSC X-ray crossmatch")
     g_skip.add_argument("--no-pm-check", action="store_true", help="Skip proper motion consistency check")
-    g_skip.add_argument("--no-atlas", action="store_true", help="Skip ATLAS forced photometry (default: enabled)")
+    g_skip.add_argument(
+        "--atlas",
+        dest="run_atlas",
+        action="store_true",
+        default=False,
+        help="Enable resumable ATLAS forced photometry (default: disabled)",
+    )
+    g_skip.add_argument(
+        "--no-atlas",
+        dest="run_atlas",
+        action="store_false",
+        help="Disable ATLAS forced photometry (default)",
+    )
     g_workers.add_argument("--alerce-workers", type=int, default=8, help="Parallel workers for ALeRCE queries (default: 8)")
     g_workers.add_argument("--atlas-token", type=str, default=None, help="ATLAS forced photometry API token (or set MALCA_ATLAS_TOKEN env var)")
+    g_workers.add_argument(
+        "--atlas-output-dir",
+        type=Path,
+        default=None,
+        help="Directory for ATLAS parquets/task journal (default: <input-dir>/external_lcs)",
+    )
     g_workers.add_argument("--tns-api-key", type=str, default=None, help="TNS API key (ignored; TNS uses local catalog)")
     g_workers.add_argument("--neowise-lc", dest="neowise_lc", action="store_true", help="Fetch full NEOWISE light curves (default: disabled)")
     g_workers.add_argument("--no-neowise-lc", dest="neowise_lc", action="store_false", help="Skip full NEOWISE light curves")
@@ -7205,9 +7800,9 @@ def main():
         _ckpt_path = path.with_name(path.stem + "_vetting_CHECKPOINT.parquet")
 
     # Filter by score if requested
-    if args.min_score is not None and "interest_score" in df.columns:
+    if args.min_score is not None and "classification_confidence" in df.columns:
         before = len(df)
-        df = df[df["interest_score"] >= args.min_score].copy()
+        df = df[df["classification_confidence"] >= args.min_score].copy()
         print(f"Filtered to {len(df)} candidates with score >= {args.min_score} (from {before})")
     if not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
@@ -7234,7 +7829,7 @@ def main():
         run_alerce=_enabled("alerce", args.no_alerce),
         run_erosita=_enabled("erosita", args.no_erosita),
         run_chandra_csc=_enabled("chandra-csc", args.no_chandra_csc),
-        run_atlas=_enabled("atlas", args.no_atlas),
+        run_atlas=("atlas" in only_modules) if only_modules is not None else args.run_atlas,
         run_pm_check=_enabled("pm-check", args.no_pm_check),
         run_neowise_lc=("neowise-lc" in only_modules) if only_modules is not None else args.neowise_lc,
         simbad_radius_arcsec=args.simbad_radius,
@@ -7247,6 +7842,7 @@ def main():
         erosita_radius_arcsec=args.erosita_radius,
         chandra_radius_arcsec=args.chandra_radius,
         atlas_token=args.atlas_token or os.environ.get("MALCA_ATLAS_TOKEN"),
+        atlas_output_dir=args.atlas_output_dir or path.parent / "external_lcs",
         tns_api_key=args.tns_api_key or os.environ.get("MALCA_TNS_API_KEY"),
         neowise_output_dir=args.neowise_output_dir,
         neowise_workers=args.neowise_workers,

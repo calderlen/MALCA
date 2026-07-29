@@ -118,6 +118,25 @@ def _render_feature_section(title: str, rows: list[dict[str, str]], open_default
     )
 
 
+def _render_dipper_probability_card(payload: dict) -> html.Div | None:
+    raw = payload.get("prob_dipper_like")
+    if raw is None:
+        return None
+    try:
+        prob = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(prob):
+        return None
+    prob = min(max(float(prob), 0.0), 1.0)
+    pct = 100.0 * prob
+    return html.Div([
+        html.Div("ML Dipper Probability", className="dipper-prob-card-label"),
+        html.Div(f"{pct:.1f}%", className="dipper-prob-card-value"),
+        html.Div(f"prob_dipper_like = {prob:.6f}", className="dipper-prob-card-detail"),
+    ], className="dipper-prob-card")
+
+
 def _stat_feature_label(key: str) -> str:
     raw = str(key)
     if raw.startswith("stats_"):
@@ -192,9 +211,14 @@ _OTHER_PAYLOAD_PERIOD_FILTER_KEYS = {
 }
 
 _OTHER_PAYLOAD_EXTERNAL_LC_PREFIXES = (
+    "asas3_lc_",
     "crts_lc_",
+    "dasch_lc_",
     "gaia_epoch_lc_",
+    "kelt_lc_",
+    "nsvs_lc_",
     "ps1_lc_",
+    "superwasp_lc_",
     "tess_",
     "ztf_lc_",
 )
@@ -427,6 +451,10 @@ def _render_metadata_review_layout(
     """Render the streamlined candidate metadata panel."""
     output: list = []
 
+    dipper_probability_card = _render_dipper_probability_card(payload)
+    if dipper_probability_card is not None:
+        output.append(dipper_probability_card)
+
     rows_by_section: dict[str, list[dict[str, str]]] = {section: [] for section in _REVIEW_SECTION_ORDER}
     for row in feature_rows:
         section = str(row.get("section") or "Advanced Metadata")
@@ -494,6 +522,11 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_cadence_median_dt_days": r"Cadence median $\Delta t$ (days)",
         "stats_cadence_p05_dt_days": r"Cadence $P_{05}$ $\Delta t$ (days)",
         "stats_cadence_p95_dt_days": r"Cadence $P_{95}$ $\Delta t$ (days)",
+        "stats_photometry_band_mode": "Photometry bands used",
+        "stats_photometry_band_alignment": "Band alignment",
+        "stats_photometry_g_points": "g-band points",
+        "stats_photometry_v_points": "V-band points",
+        "stats_photometry_v_minus_g_offset_mag": "V-g offset applied (mag)",
         "stats_photometry_robust_sigma_mag": r"Robust $\sigma_m$ (mag)",
         "stats_photometry_std_mag": r"$\sigma_m$ (mag)",
         "stats_photometry_IQR_mag": r"IQR($m$) (mag)",
@@ -507,6 +540,8 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_photometry_p84_mag": r"$P_{84}(m)$ (mag)",
         "stats_photometry_p95_mag": r"$P_{95}(m)$ (mag)",
         "stats_clipped_mean_mag_3sigma_about_median": r"Clipped mean (3$\sigma$ about median) (mag)",
+        "stats_clipped_mean_mag_3sigma_about_median_g": r"Clipped mean (3$\sigma$ about median, g) (mag)",
+        "stats_clipped_mean_mag_3sigma_about_median_vband": r"Clipped mean (3$\sigma$ about median, V) (mag)",
         "stats_clipped_std_mag_3sigma_about_median": r"Clipped std (3$\sigma$ about median) (mag)",
         "stats_n_outliers_removed_robust_3sigma": r"Outliers removed (robust 3$\sigma$)",
         "stats_error_and_snr_stats_error_mean": "Error mean (mag)",
@@ -519,6 +554,9 @@ def _render_stat_cards(stat_rows: list[tuple[str, str]]) -> list:
         "stats_variability_reduced_chi2_vs_constant": r"Reduced $\chi^2$ vs constant",
         "stats_variability_von_neumann_ratio": r"Inverse von Neumann ratio $1/\eta$",
         "stats_variability_roms": "RoMS",
+        "stats_variability_sokolovsky_v": r"Sokolovsky peak-to-peak $v$",
+        "stats_variability_sokolovsky_v_g": r"Sokolovsky peak-to-peak $v$ (g)",
+        "stats_variability_sokolovsky_v_vband": r"Sokolovsky peak-to-peak $v$ (V)",
         "stats_variability_lag1_autocorr": r"Lag-1 $\rho$",
         "stats_variability_stetson_I": r"Stetson $I$",
         "stats_variability_stetson_J": r"Stetson $J$",
@@ -1312,10 +1350,29 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 30.0) ->
         score_str = f" ({score:.2f})" if score and not pd.isna(score) else ""
         cards.append(_cell("Gaia DR3", f"{gaia_cls}{score_str}", hit=True))
 
-    # Gaia EB period cell
+    # Gaia EB evidence cell.  The level is based on distinct evidence families;
+    # Gaia's NSS EclipsingBinary copy of the photometric period counts only once.
     eb_period = payload.get('gaia_eb_period')
-    if eb_period and not pd.isna(eb_period):
-        cards.append(_cell("Gaia EB", f"P={eb_period:.4f} d", hit=True))
+    eb_level = payload.get('gaia_eb_evidence_level')
+    eb_families = payload.get('gaia_binary_evidence_families')
+    has_eb_level = _ok(eb_level) and str(eb_level) != 'none'
+    if (eb_period and not pd.isna(eb_period)) or has_eb_level:
+        details = []
+        if has_eb_level:
+            details.append(str(eb_level).replace('_', ' '))
+        if eb_period and not pd.isna(eb_period):
+            details.append(f"P={eb_period:.4f} d")
+        if _ok(eb_families):
+            details.append(str(eb_families).replace(',', ' + '))
+        cards.append(_cell("Gaia EB", " · ".join(details), hit=str(eb_level) not in {'', 'none'}))
+
+    binary_level = payload.get('gaia_binary_evidence_level')
+    nss_types = payload.get('gaia_nss_solution_types')
+    if _ok(binary_level) and str(binary_level) != 'none' and not _ok(eb_level):
+        value = str(binary_level).replace('_', ' ')
+        if _ok(nss_types):
+            value += f" · NSS {nss_types}"
+        cards.append(_cell("Gaia binary", value, hit=True))
 
     # ASAS-SN cell
     asassn_type = payload.get('asassn_var_type')
@@ -1364,12 +1421,12 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 30.0) ->
         catalog_str = f" ({catalogs})" if catalogs and str(catalogs).strip() else ""
         cards.append(_cell("X-ray", f"Detected{catalog_str}{flux_str}", hit=True))
 
-    # SFR cell
+    # Legacy nearest-SFR cell.  This is proximity metadata, not membership.
     sfr_name = payload.get('sfr_name')
     if _ok(sfr_name):
         sfr_sep = payload.get('sfr_sep_arcmin')
         sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
-        cards.append(_cell("SFR", f"{sfr_name}{sep_str}", hit=True))
+        cards.append(_cell("Nearest SFR", f"{sfr_name}{sep_str}", hit=True))
 
     # Cluster cell
     cluster_name = payload.get('cluster_name')
@@ -1378,12 +1435,54 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 30.0) ->
         d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
         cards.append(_cell("Cluster", f"{cluster_name}{d_str}", hit=True))
 
-    # BANYAN cell
+    # Separate cloud-environment overlap from stellar-association membership.
+    environment_matches = payload.get('sfr_environment_matches')
+    if _ok(environment_matches):
+        cards.append(_cell("Cloud environment", str(environment_matches), hit=True))
+
+    membership_class = payload.get('sfr_membership_class')
+    membership_name = payload.get('sfr_membership_name')
+    association_classes = {
+        'catalog_confirmed_member',
+        'kinematically_consistent_member',
+        'dispersed_association_member',
+    }
+    if str(membership_class) in association_classes:
+        label = str(membership_class).replace('_', ' ').title()
+        name_str = f": {membership_name}" if _ok(membership_name) else ""
+        cards.append(_cell("Association evidence", f"{label}{name_str}", hit=True))
+
+    # BANYAN cells: mapped-SFR probability is association-specific; the legacy
+    # global value remains explicitly labeled as global.
+    mapped_sfr = payload.get('banyan_sfr_name')
+    mapped_prob = payload.get('banyan_sfr_prob')
+    if _ok(mapped_sfr):
+        threshold = payload.get('sfr_membership_threshold', 0.90)
+        mapped_hit = bool(
+            mapped_prob is not None
+            and not pd.isna(mapped_prob)
+            and threshold is not None
+            and not pd.isna(threshold)
+            and float(mapped_prob) >= float(threshold)
+        )
+        prob_str = (
+            f" ({mapped_prob:.0%})"
+            if mapped_prob is not None and not pd.isna(mapped_prob)
+            else ""
+        )
+        cards.append(
+            _cell(
+                "BANYAN mapped SFR",
+                f"{mapped_sfr}{prob_str}",
+                hit=mapped_hit,
+            )
+        )
+
     banyan_assoc = payload.get('banyan_best_assoc')
     banyan_fp = payload.get('banyan_field_prob')
     if _ok(banyan_assoc) and str(banyan_assoc).strip().lower() != 'field':
         fp_str = f" (P_field={banyan_fp:.0%})" if banyan_fp and not pd.isna(banyan_fp) else ""
-        cards.append(_cell("BANYAN", f"{banyan_assoc}{fp_str}", hit=True))
+        cards.append(_cell("BANYAN global", f"{banyan_assoc}{fp_str}", hit=True))
 
     # YSO class cell (skip generic classifications from IR color-color)
     yso_cls = payload.get('yso_class')

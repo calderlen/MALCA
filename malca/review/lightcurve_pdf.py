@@ -7,7 +7,12 @@ from io import BytesIO
 import numpy as np
 
 from malca.plotting.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE, _load_matplotlib, finalize_publication_figure, style_publication_axis
-from malca.review.interactive_plot import DIP_EVENT_COLOR, JUMP_EVENT_COLOR, PHASE_TIME_COLORSCALE
+from malca.review.interactive_plot import (
+    DIP_EVENT_COLOR,
+    JUMP_EVENT_COLOR,
+    PHASE_TIME_COLORSCALE,
+    _event_annotation_y,
+)
 from malca.review.lightcurve_assembly import MARKER_MAP, PlotTrace, ReviewLightCurvePlotSpec
 
 _HEADER_BOX = {
@@ -57,6 +62,24 @@ def _phase_time_colormap():
     )
 
 
+def _matplotlib_color(value: str | None, fallback: str) -> str | tuple[float, ...]:
+    """Translate Plotly ``rgb(a)`` color strings into Matplotlib colors."""
+    color = str(value or fallback).strip()
+    lower = color.lower()
+    if lower.startswith("rgba(") or lower.startswith("rgb("):
+        try:
+            components = [float(item.strip()) for item in color[color.index("(") + 1 : -1].split(",")]
+            if len(components) not in {3, 4}:
+                return fallback
+            rgb = tuple(float(np.clip(item / 255.0, 0.0, 1.0)) for item in components[:3])
+            if len(components) == 4:
+                return (*rgb, float(np.clip(components[3], 0.0, 1.0)))
+            return rgb
+        except (TypeError, ValueError):
+            return fallback
+    return color
+
+
 def _axis_label_for_offset(jd_offset: float) -> str:
     if abs(float(jd_offset) - round(float(jd_offset))) < 1e-6:
         return rf"$\mathrm{{JD}} - {int(round(float(jd_offset)))}\ [\mathrm{{d}}]$"
@@ -83,8 +106,20 @@ def _apply_magnitude_y_tick_policy(ax, panel) -> None:
     ax.tick_params(axis="y", which="minor", left=False, right=False)
 
 
-def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
+def _draw_header_boxes(
+    ax,
+    *,
+    left: str | None,
+    right: str | None,
+    font_size: float | None = None,
+    text_color: str = "0.12",
+    bbox: dict | None = None,
+) -> None:
     """Draw left/right coordinate boxes centered on the top plot border."""
+    size = float(font_size) if font_size is not None else _HEADER_TEXT_FONT_SIZE
+    box = dict(_HEADER_BOX)
+    if bbox:
+        box.update(bbox)
     if left:
         ax.text(
             _HEADER_LEFT_X,
@@ -93,9 +128,9 @@ def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
             transform=ax.transAxes,
             ha="left",
             va="center",
-            fontsize=_HEADER_TEXT_FONT_SIZE,
-            color="0.12",
-            bbox=_HEADER_BOX,
+            fontsize=size,
+            color=text_color,
+            bbox=box,
             clip_on=False,
             zorder=30,
         )
@@ -107,9 +142,9 @@ def _draw_header_boxes(ax, *, left: str | None, right: str | None) -> None:
             transform=ax.transAxes,
             ha="right",
             va="center",
-            fontsize=_HEADER_TEXT_FONT_SIZE,
-            color="0.12",
-            bbox=_HEADER_BOX,
+            fontsize=size,
+            color=text_color,
+            bbox=box,
             clip_on=False,
             zorder=30,
         )
@@ -211,6 +246,37 @@ def _plot_trace(ax, trace: PlotTrace, *, label: str | None = None, marker_size: 
         )
 
 
+def _raw_event_geometry(spec: ReviewLightCurvePlotSpec) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return the same raw-data geometry used by the interactive renderer."""
+    raw_traces = [
+        trace
+        for trace in spec.traces
+        if trace.panel_id == "raw" and trace.kind == "scatter" and trace.showlegend
+    ]
+    if not raw_traces:
+        raw_traces = [
+            trace
+            for trace in spec.traces
+            if trace.panel_id == "raw" and trace.kind == "scatter"
+        ]
+    x_values = (
+        np.concatenate([np.asarray(trace.x, dtype=float) for trace in raw_traces])
+        if raw_traces
+        else np.array([], dtype=float)
+    )
+    y_values = (
+        np.concatenate([np.asarray(trace.y, dtype=float) for trace in raw_traces])
+        if raw_traces
+        else np.array([], dtype=float)
+    )
+    finite = np.isfinite(y_values)
+    span = float(np.nanmax(y_values[finite]) - np.nanmin(y_values[finite])) if finite.any() else 1.0
+    pad = span * 0.10
+    if not np.isfinite(pad) or pad <= 0:
+        pad = 0.05 * max(1.0, abs(float(y_values[finite][0])) if finite.any() else 1.0)
+    return x_values, y_values, pad
+
+
 def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
     """Render a review light-curve spec as publication PDF bytes."""
     if spec.status != "ok":
@@ -300,19 +366,63 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
             )
             value_buckets[trace.panel_id].append(y[valid])
 
+        raw_event_x, raw_event_y, raw_event_pad = _raw_event_geometry(spec)
+        rendered_event_annotations: set[int] = set()
         for event in spec.events:
             ax = ax_by_panel.get(event.panel_id)
             if ax is None:
                 continue
-            color = event.color or (DIP_EVENT_COLOR if event.kind == "dip" else JUMP_EVENT_COLOR)
-            if str(color).startswith("rgba("):
-                color = DIP_EVENT_COLOR if event.kind == "dip" else JUMP_EVENT_COLOR
+            fallback_color = DIP_EVENT_COLOR if event.kind == "dip" else JUMP_EVENT_COLOR
+            color = _matplotlib_color(event.color, fallback_color)
             alpha = 0.22 + 0.28 * float(event.confidence)
             x0 = float(event.x0)
             half_width = float(event.half_width or 0.0)
             if event.show_span and half_width > 0:
                 ax.axvspan(x0 - half_width, x0 + half_width, color=color, alpha=0.08, linewidth=0, zorder=1)
             ax.axvline(x0, color=color, linestyle="--", linewidth=0.9, alpha=alpha + 0.25, zorder=2)
+
+            marker_y, label_y = _event_annotation_y(
+                raw_event_x,
+                raw_event_y,
+                x0,
+                half_width,
+                kind=event.kind,
+                is_flux=bool(spec.is_flux),
+                pad=raw_event_pad,
+            )
+            value_buckets[event.panel_id].append(np.asarray([marker_y, label_y], dtype=float))
+            label_yanchor = "top" if event.kind == "dip" else "bottom"
+            for ann_idx, ann in enumerate(spec.annotations):
+                if ann.panel_id != event.panel_id or abs(float(ann.x) - x0) > 1e-6:
+                    continue
+                if ann.text == "◆":
+                    ax.text(
+                        x0,
+                        marker_y,
+                        ann.text,
+                        ha="center",
+                        va="center",
+                        fontsize=float(ann.font_size or 18.0),
+                        color=_matplotlib_color(ann.color, fallback_color),
+                        clip_on=False,
+                        zorder=8,
+                    )
+                    rendered_event_annotations.add(ann_idx)
+                elif ann.text.startswith(str(event.kind).title()):
+                    ax.text(
+                        x0,
+                        label_y,
+                        ann.text,
+                        ha="center",
+                        va=label_yanchor,
+                        fontsize=float(ann.font_size or 9.0),
+                        color=ann.color or "0.20",
+                        alpha=float(ann.opacity if ann.opacity is not None else 0.92),
+                        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.92, "pad": 0.8},
+                        clip_on=False,
+                        zorder=8,
+                    )
+                    rendered_event_annotations.add(ann_idx)
 
         for hline in spec.hlines:
             ax = ax_by_panel.get(hline.panel_id)
@@ -328,8 +438,8 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                 continue
             ax.axvline(vline.x, color=vline.color or "0.55", linestyle=":", linewidth=0.65, alpha=0.7, zorder=1)
 
-        for ann in spec.annotations:
-            if ann.text == "◆" or ann.text.startswith("Dip thr") or ann.text.startswith("Jump thr"):
+        for ann_idx, ann in enumerate(spec.annotations):
+            if ann_idx in rendered_event_annotations:
                 continue
             ax = ax_by_panel.get(ann.panel_id or "")
             if ax is None:
@@ -356,6 +466,18 @@ def render_review_lightcurve_pdf(spec: ReviewLightCurvePlotSpec) -> bytes:
                     fontsize=float(ann.font_size or 11.0),
                     color=ann.color or "0.20",
                     bbox={"facecolor": "white", "edgecolor": "0.75", "alpha": 0.9, "linewidth": 0.6},
+                )
+            elif ann.xref == "axis" and ann.yref == "axis":
+                ax.text(
+                    ann.x,
+                    ann.y,
+                    ann.text,
+                    transform=ax.transData,
+                    ha=ann.xanchor or "left",
+                    va=ann.yanchor or "top",
+                    fontsize=float(ann.font_size or 7.0),
+                    color=ann.color or "0.20",
+                    alpha=float(ann.opacity if ann.opacity is not None else 1.0),
                 )
 
         time_panel = None

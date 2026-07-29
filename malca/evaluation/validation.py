@@ -20,6 +20,7 @@ import numpy as np
 
 from malca.config import DEFAULT_OUTPUT_DIR, VSX_MAX_SEP_ARCSEC
 from malca.io.table_io import read_feature_table, write_parquet_table
+from malca.products.candidates import coerce_strict_bool_series
 
 
 # Default validation candidates (Brayden's list)
@@ -64,6 +65,12 @@ def validate_detections(
     match_tolerance_arcsec: float = VSX_MAX_SEP_ARCSEC,
     event_type: Literal["dip", "jump", "either"] = "dip",
     significance_column: str | None = None,
+    match_mode: Literal["id", "coordinates"] = "id",
+    label_column: str = "expected_detected",
+    results_ra_column: str = "ra",
+    results_dec_column: str = "dec",
+    candidates_ra_column: str = "ra",
+    candidates_dec_column: str = "dec",
 ) -> dict:
     """
     Validate detection results against known candidates.
@@ -79,77 +86,192 @@ def validate_detections(
     Returns:
         Dictionary with validation metrics
     """
-    # Determine significance column if not provided
-    if significance_column is None:
-        if event_type == "dip":
-            significance_column = "dip_significant" if "dip_significant" in results_df.columns else None
-        elif event_type == "jump":
-            significance_column = "jump_significant" if "jump_significant" in results_df.columns else None
-        else:  # either
-            significance_column = None
-    
-    # Extract IDs from both datasets
-    if id_column in results_df.columns:
-        detected_ids = set(results_df[id_column].astype(str))
-    else:
-        # Try to extract from path column
-        if "path" in results_df.columns:
-            detected_ids = set(
-                results_df["path"].apply(lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", ""))
-            )
-        else:
-            raise ValueError(f"Cannot find ID column '{id_column}' or 'path' in results")
-    
-    if id_column in candidates_df.columns:
-        expected_ids = set(candidates_df[id_column].astype(str))
-    else:
-        raise ValueError(f"Cannot find ID column '{id_column}' in candidates")
-    
-    if significance_column is None or significance_column not in results_df.columns:
-        raise ValueError(
-            f"Missing required significance column '{significance_column}' in results."
+    if results_df.empty:
+        significant_mask = pd.Series(False, index=results_df.index, dtype="bool")
+    elif significance_column is not None:
+        if significance_column not in results_df.columns:
+            raise ValueError(f"Missing required significance column {significance_column!r} in results")
+        significant_mask = coerce_strict_bool_series(
+            results_df[significance_column], field_name=significance_column
         )
+    else:
+        required_significance = {
+            "dip": ("dip_significant",),
+            "jump": ("jump_significant",),
+            "either": ("dip_significant", "jump_significant"),
+        }[event_type]
+        missing_significance = [col for col in required_significance if col not in results_df.columns]
+        if missing_significance:
+            raise ValueError("Missing required significance column(s): " + ", ".join(missing_significance))
+        masks = [
+            coerce_strict_bool_series(results_df[col], field_name=col)
+            for col in required_significance
+        ]
+        significant_mask = masks[0].copy()
+        for mask in masks[1:]:
+            significant_mask |= mask
 
-    significant_mask = results_df[significance_column].astype(bool)
-    if event_type == "either" and "jump_significant" in results_df.columns:
-        significant_mask |= results_df["jump_significant"].astype(bool)
-    detected_ids = set(
-        results_df[significant_mask][id_column].astype(str)
-        if id_column in results_df.columns
-        else results_df[significant_mask]["path"].apply(
-            lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", "")
+    candidates = candidates_df.copy()
+    if label_column in candidates.columns:
+        labels = coerce_strict_bool_series(candidates[label_column], field_name=label_column)
+        label_scope = "explicit_positive_and_negative_labels"
+    else:
+        labels = pd.Series(True, index=candidates.index, dtype="bool")
+        label_scope = "positive_reference_only"
+
+    candidate_keys = _candidate_keys(candidates, id_column)
+    if candidate_keys.duplicated().any():
+        duplicate_values = sorted(candidate_keys.loc[candidate_keys.duplicated(keep=False)].unique())
+        raise ValueError(f"Candidate labels contain duplicate {id_column} values: {duplicate_values[:5]}")
+    candidates = candidates.assign(_validation_key=candidate_keys, _validation_positive=labels.to_numpy())
+
+    significant_results = results_df.loc[significant_mask].copy()
+    if match_mode == "id":
+        result_keys = _strict_id_series(results_df, id_column, dataset="results")
+        significant_keys = set(result_keys.loc[significant_mask])
+        candidates["_validation_detected"] = candidates["_validation_key"].isin(significant_keys)
+        labelled_keys = set(candidates["_validation_key"])
+        unlabeled_detections = significant_keys - labelled_keys
+    elif match_mode == "coordinates":
+        candidates["_validation_detected"] = _coordinate_detection_mask(
+            significant_results,
+            candidates,
+            tolerance_arcsec=match_tolerance_arcsec,
+            results_ra_column=results_ra_column,
+            results_dec_column=results_dec_column,
+            candidates_ra_column=candidates_ra_column,
+            candidates_dec_column=candidates_dec_column,
         )
-    )
-    
-    # Compute validation metrics
-    true_positives = detected_ids & expected_ids
-    false_positives = detected_ids - expected_ids
-    false_negatives = expected_ids - detected_ids
-    
+        matched_result_mask = _coordinate_detection_mask(
+            candidates,
+            significant_results,
+            tolerance_arcsec=match_tolerance_arcsec,
+            results_ra_column=candidates_ra_column,
+            results_dec_column=candidates_dec_column,
+            candidates_ra_column=results_ra_column,
+            candidates_dec_column=results_dec_column,
+        ) if not significant_results.empty else pd.Series(False, index=significant_results.index)
+        unlabeled_detections = {
+            f"result_row_{idx}" for idx in significant_results.index[~matched_result_mask]
+        }
+    else:
+        raise ValueError(f"Unsupported match_mode: {match_mode!r}")
+
+    positive = candidates["_validation_positive"]
+    detected = candidates["_validation_detected"].astype(bool)
+    true_positives = set(candidates.loc[positive & detected, "_validation_key"])
+    false_negatives = set(candidates.loc[positive & ~detected, "_validation_key"])
+    labelled_negative = ~positive if label_column in candidates_df.columns else pd.Series(False, index=candidates.index)
+    false_positives = set(candidates.loc[labelled_negative & detected, "_validation_key"])
+    true_negatives = set(candidates.loc[labelled_negative & ~detected, "_validation_key"])
+
     n_tp = len(true_positives)
     n_fp = len(false_positives)
     n_fn = len(false_negatives)
-    n_expected = len(expected_ids)
-    n_detected = len(detected_ids)
-    
-    # Compute metrics
-    precision = n_tp / n_detected if n_detected > 0 else 0.0
+    n_tn = len(true_negatives)
+    n_expected = int(positive.sum())
+    n_detected = int(detected.sum())
+
+    precision = n_tp / (n_tp + n_fp) if label_column in candidates_df.columns and (n_tp + n_fp) else None
     recall = n_tp / n_expected if n_expected > 0 else 0.0
-    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    f1_score = (
+        2 * precision * recall / (precision + recall)
+        if precision is not None and (precision + recall) > 0
+        else None
+    )
+    recall_low, recall_high = _wilson_interval(n_tp, n_expected)
+    precision_low, precision_high = _wilson_interval(n_tp, n_tp + n_fp) if precision is not None else (None, None)
     
     return {
+        "match_mode": match_mode,
+        "label_scope": label_scope,
         "n_expected": n_expected,
         "n_detected": n_detected,
         "n_true_positives": n_tp,
         "n_false_positives": n_fp,
         "n_false_negatives": n_fn,
+        "n_true_negatives": n_tn,
+        "n_unlabeled_detections": len(unlabeled_detections),
         "precision": precision,
+        "precision_ci95_low": precision_low,
+        "precision_ci95_high": precision_high,
         "recall": recall,
+        "recall_ci95_low": recall_low,
+        "recall_ci95_high": recall_high,
         "f1_score": f1_score,
         "true_positives": sorted(true_positives),
         "false_positives": sorted(false_positives),
         "false_negatives": sorted(false_negatives),
+        "true_negatives": sorted(true_negatives),
+        "unlabeled_detections": sorted(unlabeled_detections),
     }
+
+
+def _strict_id_series(frame: pd.DataFrame, id_column: str, *, dataset: str) -> pd.Series:
+    if id_column not in frame.columns:
+        raise ValueError(f"Cannot use ID matching: {dataset} is missing {id_column!r}")
+    ids = frame[id_column].astype("string").str.strip()
+    missing = ids.isna() | ids.eq("")
+    if bool(missing.any()):
+        raise ValueError(f"{dataset} contains {int(missing.sum())} blank/null {id_column} value(s)")
+    return ids.astype(str)
+
+
+def _candidate_keys(frame: pd.DataFrame, id_column: str) -> pd.Series:
+    if id_column in frame.columns:
+        return _strict_id_series(frame, id_column, dataset="candidates")
+    return pd.Series([f"candidate_row_{idx}" for idx in frame.index], index=frame.index, dtype="string")
+
+
+def _coordinate_detection_mask(
+    results: pd.DataFrame,
+    candidates: pd.DataFrame,
+    *,
+    tolerance_arcsec: float,
+    results_ra_column: str,
+    results_dec_column: str,
+    candidates_ra_column: str,
+    candidates_dec_column: str,
+) -> pd.Series:
+    required = [results_ra_column, results_dec_column]
+    missing_results = [col for col in required if col not in results.columns]
+    required_candidates = [candidates_ra_column, candidates_dec_column]
+    missing_candidates = [col for col in required_candidates if col not in candidates.columns]
+    if missing_results or missing_candidates:
+        raise ValueError(
+            "Coordinate matching requires explicit RA/Dec columns; "
+            f"missing results={missing_results}, candidates={missing_candidates}"
+        )
+    if not np.isfinite(tolerance_arcsec) or tolerance_arcsec <= 0:
+        raise ValueError("match_tolerance_arcsec must be finite and positive")
+    result_ra = pd.to_numeric(results[results_ra_column], errors="coerce").to_numpy(float)
+    result_dec = pd.to_numeric(results[results_dec_column], errors="coerce").to_numpy(float)
+    candidate_ra = pd.to_numeric(candidates[candidates_ra_column], errors="coerce").to_numpy(float)
+    candidate_dec = pd.to_numeric(candidates[candidates_dec_column], errors="coerce").to_numpy(float)
+    if not (np.isfinite(result_ra).all() and np.isfinite(result_dec).all()):
+        raise ValueError("Results contain missing/non-finite matching coordinates")
+    if not (np.isfinite(candidate_ra).all() and np.isfinite(candidate_dec).all()):
+        raise ValueError("Candidates contain missing/non-finite matching coordinates")
+    detected = np.zeros(len(candidates), dtype=bool)
+    if len(results):
+        ra1 = np.deg2rad(candidate_ra)[:, None]
+        dec1 = np.deg2rad(candidate_dec)[:, None]
+        ra2 = np.deg2rad(result_ra)[None, :]
+        dec2 = np.deg2rad(result_dec)[None, :]
+        cosine = np.sin(dec1) * np.sin(dec2) + np.cos(dec1) * np.cos(dec2) * np.cos(ra1 - ra2)
+        separation_arcsec = np.rad2deg(np.arccos(np.clip(cosine, -1.0, 1.0))) * 3600.0
+        detected = np.nanmin(separation_arcsec, axis=1) <= tolerance_arcsec
+    return pd.Series(detected, index=candidates.index, dtype="bool")
+
+
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float | None, float | None]:
+    if trials <= 0:
+        return None, None
+    proportion = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (proportion + z * z / (2.0 * trials)) / denominator
+    half_width = z * np.sqrt(proportion * (1.0 - proportion) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half_width)), float(min(1.0, center + half_width))
 
 
 def print_validation_report(metrics: dict, verbose: bool = False) -> None:
@@ -162,9 +284,13 @@ def print_validation_report(metrics: dict, verbose: bool = False) -> None:
     print(f"\nTrue Positives:       {metrics['n_true_positives']}")
     print(f"False Positives:      {metrics['n_false_positives']}")
     print(f"False Negatives:      {metrics['n_false_negatives']}")
-    print(f"\nPrecision:            {metrics['precision']:.2%}")
+    precision = metrics.get("precision")
+    print(f"\nPrecision:            {precision:.2%}" if precision is not None else "\nPrecision:            not estimable (no labelled negatives)")
     print(f"Recall:               {metrics['recall']:.2%}")
-    print(f"F1 Score:             {metrics['f1_score']:.2%}")
+    f1_score = metrics.get("f1_score")
+    print(f"F1 Score:             {f1_score:.2%}" if f1_score is not None else "F1 Score:             not estimable")
+    if metrics.get("n_unlabeled_detections"):
+        print(f"Unlabelled detections: {metrics['n_unlabeled_detections']} (excluded from precision)")
     
     if verbose:
         if metrics['false_negatives']:
@@ -344,6 +470,12 @@ def main():
         help="Event type to validate (default: dip)",
     )
     parser.add_argument(
+        "--match-mode",
+        choices=["id", "coordinates"],
+        default="id",
+        help="Use exact IDs or explicit sky-coordinate matching (default: id)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=None,
@@ -419,8 +551,6 @@ def main():
     else:
         print("Using default Brayden candidate list")
         candidates_df = pd.DataFrame(DEFAULT_CANDIDATES)
-        # Filter to only expected detections
-        candidates_df = candidates_df[candidates_df["expected_detected"] == True].copy()
         
         # Filter by mag_bin if specified
         if mag_bin and "mag_bin" in candidates_df.columns:
@@ -433,6 +563,7 @@ def main():
         candidates_df,
         id_column=args.id_column,
         event_type=args.event_type,
+        match_mode=args.match_mode,
     )
     
     # Print report

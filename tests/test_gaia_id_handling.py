@@ -15,6 +15,8 @@ from malca.catalogs.gaia_id_repair import repair_gaia_ids_frame, repair_review_d
 from malca.ltv.review import _add_gaia_ids_from_index_ltv
 from malca.stv.pipeline import _add_gaia_ids_from_index
 from malca.catalogs.gaia_fetch import (
+    GAIA_CURRENT_FETCH_COLUMNS,
+    GAIA_EXPECTED_COLUMNS,
     _GAIA_QUERY_TEMPLATE,
     _ensure_gaia_schema,
     _extract_gaia_ids,
@@ -439,6 +441,7 @@ def test_query_gaia_by_ids_matches_numeric_like_requested_ids(tmp_path) -> None:
 
 
 def test_gaia_fetch_current_schema_requires_separate_bp_rp() -> None:
+    assert len(GAIA_EXPECTED_COLUMNS) == len(set(GAIA_EXPECTED_COLUMNS))
     stale = pd.DataFrame(
         {
             "source_id": ["123"],
@@ -452,12 +455,22 @@ def test_gaia_fetch_current_schema_requires_separate_bp_rp() -> None:
             "w4_err": [0.3],
         }
     )
-    current = stale.assign(phot_bp_mean_mag=[15.1], phot_rp_mean_mag=[14.2])
+    current = stale.assign(
+        **{
+            column: (["VARIABLE"] if column == "phot_variable_flag" else [1.0])
+            for column in GAIA_CURRENT_FETCH_COLUMNS
+            if column not in stale.columns
+        }
+    )
 
     assert not _has_current_gaia_fetch_schema(stale)
     assert _has_current_gaia_fetch_schema(current)
     assert "g.phot_bp_mean_mag" in _GAIA_QUERY_TEMPLATE
     assert "g.phot_rp_mean_mag" in _GAIA_QUERY_TEMPLATE
+    assert "g.pmra_error" in _GAIA_QUERY_TEMPLATE
+    assert "g.pmdec_error" in _GAIA_QUERY_TEMPLATE
+    assert "g.rv_chisq_pvalue" in _GAIA_QUERY_TEMPLATE
+    assert "g.astrometric_excess_noise_sig" in _GAIA_QUERY_TEMPLATE
 
     normalized = _ensure_gaia_schema(current)
     assert "phot_bp_mean_mag" in normalized.columns

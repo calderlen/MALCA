@@ -56,6 +56,28 @@ def test_audit_dispatches_to_audit_module(monkeypatch) -> None:
     assert calls == [("malca.evaluation.audit", ["ltv-status"])]
 
 
+def test_review_tui_dispatches_without_loading_dash(monkeypatch) -> None:
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_run_module_main(module_name: str, remaining_args: list[str]) -> None:
+        calls.append((module_name, remaining_args))
+
+    monkeypatch.setattr(cli, "_run_module_main", fake_run_module_main)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["malca", "review-tui", "--review-db", "review.db", "--viewer", "none"],
+    )
+
+    assert cli.main() == 0
+    assert calls == [
+        (
+            "malca.review.tui",
+            ["--review-db", "review.db", "--viewer", "none"],
+        )
+    ]
+
+
 def test_ltv_pipeline_dispatches_to_pipeline_module(monkeypatch) -> None:
     calls: list[tuple[str, list[str]]] = []
 

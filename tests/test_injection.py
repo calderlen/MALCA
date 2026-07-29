@@ -47,7 +47,7 @@ def _base_detection_args() -> argparse.Namespace:
     )
 
 
-def test_inject_dip_is_deterministic_with_explicit_rng() -> None:
+def test_inject_dip_preserves_the_observed_noise_realization() -> None:
     df = pd.DataFrame(
         {
             "JD": np.linspace(0.0, 20.0, 32),
@@ -61,7 +61,12 @@ def test_inject_dip_is_deterministic_with_explicit_rng() -> None:
     different = injection.inject_dip(df, 10.0, 3.0, 0.4, rng=np.random.default_rng(456))
 
     pd.testing.assert_frame_equal(first, second)
-    assert not np.allclose(first["mag"].to_numpy(), different["mag"].to_numpy())
+    pd.testing.assert_frame_equal(first, different)
+    expected = df["mag"].to_numpy() + injection.skewnormal_dip(
+        df["JD"].to_numpy(), 10.0, 3.0, 0.4
+    )
+    np.testing.assert_allclose(first["mag"].to_numpy(), expected)
+    np.testing.assert_allclose(first["error"].to_numpy(), df["error"].to_numpy())
 
 
 def test_injection_and_detection_rate_use_gp_masked_baseline() -> None:

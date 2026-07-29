@@ -70,3 +70,37 @@ def test_gaia_variable_flag_alone_does_not_mark_candidate_likely_known() -> None
 
     assert bool(out.loc[0, "vetting_likely_known"]) is False
     assert bool(out.loc[1, "vetting_likely_known"]) is True
+
+
+def test_null_catalog_labels_and_false_text_flags_do_not_mark_candidate_known() -> None:
+    df = pd.DataFrame(
+        {
+            "candidate_id": ["UNKNOWN", "KNOWN"],
+            "gaia_var_class": [None, None],
+            "asassn_var_type": [None, None],
+            "ztf_var_type": [None, None],
+            "tns_name": [None, None],
+            "alerce_lc_class": [None, None],
+            "microlens_match": ["False", "yes"],
+        }
+    )
+
+    out = vetting.vet_candidates(
+        df,
+        run_simbad=False,
+        run_gaia_var=False,
+        run_asassn_var=False,
+        run_microlens=False,
+        run_ztf_var=False,
+        run_tns=False,
+        run_gaia_eb=False,
+        run_alerce=False,
+        run_atlas=False,
+        run_gaia_epoch=False,
+        run_erosita=False,
+        run_chandra_csc=False,
+        run_pm_check=False,
+    )
+
+    assert bool(out.loc[0, "vetting_likely_known"]) is False
+    assert bool(out.loc[1, "vetting_likely_known"]) is True

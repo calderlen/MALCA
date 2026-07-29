@@ -5,13 +5,35 @@ from pathlib import Path
 
 import pandas as pd
 
-from malca.ltv.multi_survey import compute_ltv_multi_survey_features
+from malca.ltv.multi_survey import (
+    LTV_MS_FEATURE_VERSION,
+    compute_ltv_multi_survey_features,
+)
 from malca.ltv.review import ingest_ltv_results
 
 
 def test_ltv_multi_survey_features_summarize_external_lc_files(tmp_path: Path) -> None:
     external_dir = tmp_path / "external_lcs"
     external_dir.mkdir()
+    pd.DataFrame(
+        {
+            "MJD": [59000.0, 59365.25, 59400.0],
+            "m": [-20.0, 99.0, -99.0],
+            "dm": [99.0, 99.0, 99.0],
+            "uJy": [100.0, 50.0, -1.0],
+            "duJy": [10.0, 5.0, 1.0],
+            "F": ["c", "c", "c"],
+            "err": [0, 0, 0],
+            "x": [500.0, 500.0, 500.0],
+            "y": [500.0, 500.0, 500.0],
+            "maj": [2.5, 2.5, 2.5],
+            "min": [2.2, 2.2, 2.2],
+            "apfit": [-0.5, -0.5, -0.5],
+            "mag5sig": [19.0, 19.0, 19.0],
+            "Sky": [20.0, 20.0, 20.0],
+            "atlas_image_type": ["reduced", "reduced", "reduced"],
+        }
+    ).to_parquet(external_dir / "atlas_lc_ltv_123.parquet", index=False)
     pd.DataFrame(
         {
             "jd": [2450000.0, 2450365.25],
@@ -74,6 +96,11 @@ def test_ltv_multi_survey_features_summarize_external_lc_files(tmp_path: Path) -
     )
 
     assert out.loc[0, "ltv_ms_feature_status"] == "ok"
+    assert out.loc[0, "ltv_ms_feature_version"] == LTV_MS_FEATURE_VERSION == "2"
+    assert out.loc[0, "ltv_ms_atlas_n_points"] == 2
+    assert out.loc[0, "ltv_ms_atlas_time_span_days"] == 365.25
+    assert round(float(out.loc[0, "ltv_ms_atlas_mag_range"]), 6) == 0.752575
+    assert round(float(out.loc[0, "ltv_ms_atlas_mag_slope_per_year"]), 6) == 0.752575
     assert out.loc[0, "ltv_ms_ztf_n_points"] == 2
     assert out.loc[0, "ltv_ms_ztf_time_span_days"] == 365.25
     assert out.loc[0, "ltv_ms_ztf_mag_range"] == 1.0

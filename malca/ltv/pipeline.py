@@ -941,13 +941,34 @@ def _write_ltv_multi_survey_features(
     *,
     external_lc_dir: Path,
 ) -> tuple[Path, pd.DataFrame]:
-    from malca.ltv.multi_survey import compute_ltv_multi_survey_features
+    from malca.ltv.multi_survey import (
+        LTV_MS_FEATURE_VERSION,
+        compute_ltv_multi_survey_features,
+    )
 
     output_path = ltv_multi_survey_output_path(mag_bin, run_dir)
     if output_path.exists() and not args.overwrite:
         df = read_feature_table(output_path)
         assert_ltv_product_schema(df, stage="ltv-multi-survey")
-        return output_path, df
+        saved_version_values = (
+            df["ltv_ms_feature_version"].astype("string")
+            if "ltv_ms_feature_version" in df.columns
+            else pd.Series(pd.NA, index=df.index, dtype="string")
+        )
+        saved_versions = saved_version_values.dropna().unique().tolist()
+        is_current = (
+            not df.empty
+            and bool(saved_version_values.notna().all())
+            and bool(saved_version_values.eq(LTV_MS_FEATURE_VERSION).all())
+        )
+        if is_current:
+            return output_path, df
+        if args.verbose:
+            _safe_status_print(
+                "[ltv-pipeline] Recomputing stale LTV multi-survey features "
+                f"(saved versions={saved_versions or ['missing']}, "
+                f"current={LTV_MS_FEATURE_VERSION})"
+            )
 
     out = compute_ltv_multi_survey_features(
         _ensure_ltv_candidate_id(

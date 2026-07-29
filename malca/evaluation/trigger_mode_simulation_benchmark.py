@@ -575,6 +575,16 @@ def _rate(series: pd.Series) -> float:
     return float(series.fillna(False).astype(bool).mean())
 
 
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    if trials <= 0:
+        return np.nan, np.nan
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denominator
+    half = z * np.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
+
+
 def summarize_trigger_results(df: pd.DataFrame, group_cols: list[str] | tuple[str, ...]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     grouped = df.groupby(list(group_cols), dropna=False) if group_cols else [((), df)]
@@ -588,6 +598,14 @@ def summarize_trigger_results(df: pd.DataFrame, group_cols: list[str] | tuple[st
         detected = ok["dip_significant"].fillna(False).astype(bool) if "dip_significant" in ok.columns else pd.Series(dtype=bool)
         recovered = ok["target_recovered"].fillna(False).astype(bool) if "target_recovered" in ok.columns else pd.Series(dtype=bool)
         true_positive_detected = detected & has_dip & ok["detected_overlap"].fillna(False).astype(bool) if len(ok) else pd.Series(dtype=bool)
+        observable_success = int(recovered[observable].sum()) if len(ok) and observable.any() else 0
+        dip_success = int(recovered[has_dip].sum()) if len(ok) and has_dip.any() else 0
+        control_fp = int(detected[controls].sum()) if len(ok) and controls.any() else 0
+        precision_success = int(true_positive_detected.sum()) if len(ok) else 0
+        observable_ci = _wilson_interval(observable_success, int(observable.sum()) if len(ok) else 0)
+        dip_ci = _wilson_interval(dip_success, int(has_dip.sum()) if len(ok) else 0)
+        fp_ci = _wilson_interval(control_fp, int(controls.sum()) if len(ok) else 0)
+        precision_ci = _wilson_interval(precision_success, int(detected.sum()) if len(ok) else 0)
 
         row.update(
             {
@@ -599,10 +617,23 @@ def summarize_trigger_results(df: pd.DataFrame, group_cols: list[str] | tuple[st
                 "status_error_rate": float(1.0 - len(ok) / max(1, len(sub_all))),
                 "dip_significant_rate": _rate(detected),
                 "observable_recall": float(recovered[observable].mean()) if len(ok) and observable.any() else np.nan,
+                "observable_recovered_n": observable_success,
+                "observable_recall_ci95_low": observable_ci[0],
+                "observable_recall_ci95_high": observable_ci[1],
                 "all_dip_recall": float(recovered[has_dip].mean()) if len(ok) and has_dip.any() else np.nan,
+                "all_dip_recovered_n": dip_success,
+                "all_dip_recall_ci95_low": dip_ci[0],
+                "all_dip_recall_ci95_high": dip_ci[1],
                 "control_false_positive_rate": float(detected[controls].mean()) if len(ok) and controls.any() else np.nan,
+                "control_false_positive_n": control_fp,
+                "control_false_positive_rate_ci95_low": fp_ci[0],
+                "control_false_positive_rate_ci95_high": fp_ci[1],
                 "off_target_detection_rate": _rate(ok.loc[has_dip, "off_target_detection"]) if len(ok) and has_dip.any() else np.nan,
                 "precision_by_trial": float(true_positive_detected.sum() / detected.sum()) if len(ok) and detected.any() else np.nan,
+                "precision_numerator": precision_success,
+                "precision_denominator": int(detected.sum()) if len(ok) else 0,
+                "precision_by_trial_ci95_low": precision_ci[0],
+                "precision_by_trial_ci95_high": precision_ci[1],
                 "phase_template_fallback_rate": _rate(ok["phase_template_fallback"]) if "phase_template_fallback" in ok.columns else np.nan,
                 "median_raw_trigger_points": float(ok["raw_trigger_points"].median()) if "raw_trigger_points" in ok.columns and len(ok) else np.nan,
                 "median_event_points": float(ok["event_points"].median()) if "event_points" in ok.columns and len(ok) else np.nan,

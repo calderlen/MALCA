@@ -4,6 +4,7 @@ import subprocess
 import sys
 import json
 import types
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -38,7 +39,15 @@ from malca.review.dustycult_visualization import (
     occulter_absorption_grid,
     occulter_parameters_from_fit,
 )
-from malca.review.store import db_connect
+from malca.review.store import db_connect, upsert_candidates_frame
+from malca.stv.dimming_window import (
+    DIMMING_WINDOW_METHOD_VERSION,
+    DimmingComplexWindow,
+)
+
+
+def _insert_candidate(conn, candidate_id: str = "cand-1") -> None:
+    upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": candidate_id}]))
 
 
 _DUSTYCULT_REQUIRED_SAMPLE_COLUMNS = (
@@ -292,6 +301,59 @@ def test_control_defaults_broad_stored_event_gets_broad_t0_prior(tmp_path: Path)
     assert defaults["t0_width_days"] == 30.0
 
 
+def test_control_defaults_use_shared_dimming_complex_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lc_path = tmp_path / "cand-1.dat2"
+    lc_path.touch()
+    df = pd.DataFrame(
+        {"JD": [100.0, 110.0, 140.0], "mag": [12.0, 12.4, 12.0], "error": [0.02] * 3}
+    )
+    window = DimmingComplexWindow(
+        start_index=1,
+        stop_index=9,
+        start_jd=110.0,
+        end_jd=140.0,
+        status="ongoing_right_censored",
+        is_lower_limit=True,
+        left_boundary_type="recovery",
+        right_boundary_type="data_edge",
+        left_gap_state="none",
+        right_gap_state="none",
+        left_recovery_index=1,
+        right_recovery_index=None,
+        left_edge_dim_confirmed=False,
+        right_edge_dim_confirmed=True,
+        peak_jd=125.0,
+        peak_depth_mag=0.31,
+        peak_indices=(4, 5, 6),
+        integrated_excess=2.0,
+        gap_count=1,
+        max_gap_days=12.0,
+    )
+    monkeypatch.setattr(
+        "malca.review.dustycult.load_canonical_cleaned_lightcurve",
+        lambda *args, **kwargs: (df, lc_path),
+    )
+    monkeypatch.setattr(
+        "malca.review.dustycult.measure_dimming_complex_window",
+        lambda *args, **kwargs: SimpleNamespace(window=window),
+    )
+
+    with db_connect(tmp_path / "review.db") as conn:
+        defaults = control_defaults_for_candidate(conn, "cand-1", {})
+
+    assert defaults["source"] == DIMMING_WINDOW_METHOD_VERSION
+    assert defaults["start_jd"] == 110.0
+    assert defaults["end_jd"] == 140.0
+    assert defaults["t0_jd"] == 125.0
+    assert defaults["duration_days"] == 30.0
+    assert defaults["duration_upper_days"] is None
+    assert defaults["dimming_complex_status"] == "right_censored"
+    assert defaults["dimming_complex_is_lower_limit"] is True
+
+
 def test_control_defaults_fall_back_when_stored_window_fails_preflight(tmp_path: Path, monkeypatch) -> None:
     df = pd.DataFrame({"JD": [1.0, 2.0, 3.0], "mag": [12.0, 13.0, 12.1], "error": [0.02, 0.02, 0.02]})
 
@@ -445,6 +507,7 @@ def test_upsert_dustycult_fit_replaces_mode_and_curve_rows(tmp_path: Path) -> No
         }
     )
     with db_connect(db_path) as conn:
+        _insert_candidate(conn)
         upsert_dustycult_fit(
             conn,
             {
@@ -505,6 +568,7 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -551,6 +615,7 @@ def test_run_dustycult_fit_preflight_failure_skips_julia(tmp_path: Path, monkeyp
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -589,6 +654,7 @@ def test_run_dustycult_fit_one_band_result_is_warning(tmp_path: Path, monkeypatc
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -626,6 +692,7 @@ def test_run_dustycult_fit_all_divergent_degenerate_samples_fail(tmp_path: Path,
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",

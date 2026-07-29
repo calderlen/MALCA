@@ -90,6 +90,52 @@ def _normalize_period_search_bounds(min_period, max_period) -> tuple[float, floa
     return min_p, max_p
 
 
+def _payload_baseline_days(payload: dict | None) -> float | None:
+    """Derive baseline span from candidate payload stats when available."""
+    payload = payload or {}
+    for key in ("stats_time_span_days", "baseline_days", "period_baseline_days"):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            value = float("nan")
+        if np.isfinite(value) and value > 0:
+            return float(value)
+    try:
+        jd_start = float(payload.get("stats_jd_start"))
+        jd_end = float(payload.get("stats_jd_end"))
+    except (TypeError, ValueError):
+        return None
+    if np.isfinite(jd_start) and np.isfinite(jd_end) and jd_end > jd_start:
+        return float(jd_end - jd_start)
+    return None
+
+
+def _adaptive_review_period_bounds(
+    payload: dict | None,
+    *,
+    long_p: bool = False,
+    user_min: float | None = None,
+    user_max: float | None = None,
+) -> tuple[float, float]:
+    """Return review-stage adaptive (min, max) period bounds for a candidate."""
+    from malca.core.period_bounds import STAGE_LONG, STAGE_REVIEW, adaptive_period_bounds
+
+    baseline = _payload_baseline_days(payload)
+    stage = STAGE_LONG if long_p else STAGE_REVIEW
+    bounds = adaptive_period_bounds(
+        baseline_days=baseline,
+        stage=stage,
+        user_min_period=user_min,
+        user_max_period=user_max,
+    )
+    return bounds.as_tuple()
+
+
+def _long_p_enabled(toggle_value: object) -> bool:
+    if isinstance(toggle_value, (list, tuple, set)):
+        return "long" in {str(v) for v in toggle_value}
+    return bool(toggle_value)
+
 def _period_cache_key(candidate_id: object, method: object, min_period: float, max_period: float, base_period: object = None) -> str:
     method_name = str(method or 'pdm').strip().lower()
     key = f"{str(candidate_id)}|{method_name}|{float(min_period):.12g}|{float(max_period):.12g}"
@@ -244,6 +290,25 @@ def _auto_period_search_label(method: str, label: str) -> str:
 
 
 @app.callback(
+    [Output('pdm-min-period', 'value', allow_duplicate=True),
+     Output('pdm-max-period', 'value', allow_duplicate=True)],
+    [Input('current-candidate-id', 'data'),
+     Input('period-long-p-toggle', 'value')],
+    prevent_initial_call=True,
+)
+def sync_adaptive_period_bounds_on_navigate(candidate_id, long_p_toggle):
+    """Set review period-search bounds from the candidate baseline (or long-P)."""
+    if candidate_id is None:
+        raise dash.exceptions.PreventUpdate
+    payload, _stored_lc_path, _source_path = _candidate_context(str(candidate_id))
+    min_p, max_p = _adaptive_review_period_bounds(
+        payload,
+        long_p=_long_p_enabled(long_p_toggle),
+    )
+    return float(min_p), float(max_p)
+
+
+@app.callback(
     [Output('pdm-result-store', 'data', allow_duplicate=True),
      Output('pdm-result-label', 'children', allow_duplicate=True),
      Output('pdm-manual-period', 'value', allow_duplicate=True),
@@ -251,20 +316,31 @@ def _auto_period_search_label(method: str, label: str) -> str:
      Output('auto-period-request', 'data', allow_duplicate=True)],
     [Input('current-candidate-id', 'data'),
      Input('pdm-min-period', 'value'),
-     Input('pdm-max-period', 'value')],
+     Input('pdm-max-period', 'value'),
+     Input('period-long-p-toggle', 'value')],
     [State('auto-period-cache', 'data'),
      State('auto-period-request', 'data')],
     prevent_initial_call=True,
 )
-def auto_period_on_navigate(candidate_id, min_period, max_period, auto_period_cache, auto_period_request):
+def auto_period_on_navigate(candidate_id, min_period, max_period, long_p_toggle, auto_period_cache, auto_period_request):
     """Queue harmonic checks for stored periods, or a fallback search when no period exists."""
     if candidate_id is None:
         return None, '', None, no_update, {'nonce': 0}
     candidate_id = str(candidate_id)
     auto_period_cache = dict(auto_period_cache or {})
     auto_period_request = dict(auto_period_request or {})
-    min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
     payload, _stored_lc_path, _source_path = _candidate_context(candidate_id)
+    long_p = _long_p_enabled(long_p_toggle)
+    if min_period is None or max_period is None:
+        min_p, max_p = _adaptive_review_period_bounds(payload, long_p=long_p)
+    else:
+        min_p, max_p = _normalize_period_search_bounds(min_period, max_period)
+        if long_p:
+            min_long, max_long = _adaptive_review_period_bounds(payload, long_p=True)
+            if max_p < max_long:
+                max_p = float(max_long)
+            if min_p > min_long:
+                min_p = float(min_long)
     base_period, base_source = shared_resolve_stored_review_period(payload)
     if base_period is None:
         method = AUTO_FALLBACK_PERIOD_METHOD

@@ -14,6 +14,7 @@ Usage:
 """
 from pathlib import Path
 import argparse
+import json
 import os
 
 from astropy.coordinates import SkyCoord
@@ -48,6 +49,63 @@ from malca.config import VIZIER_TAP_URL
 from malca.core.utils import batch_tap_crossmatch
 
 
+CLASSIFIER_VERSION = "heuristic-v2"
+
+# These aliases are deliberately ordered.  The first finite value wins on each
+# row, and the selected column is recorded in the output so a score can be
+# traced back to the actual pipeline field that supplied it.
+CLASSIFIER_INPUT_ALIASES: dict[str, tuple[str, ...]] = {
+    "duration_days": ("event_duration_days", "timescale_days", "duration", "duration_days"),
+    "depth_mag": ("event_depth_mag", "dip_depth_mag"),
+    "depth_fraction": ("max_depth",),
+    "mass_solar": ("mass50", "mass_gspphot", "stellar_mass"),
+    "radius_solar": ("radius", "radius_gspphot", "stellar_radius"),
+    "g_mag": ("phot_g_mean_mag", "gaia_g"),
+    "bp_rp": ("bp_rp",),
+    "distance_pc": ("distance_gspphot", "distance_pc"),
+    "h_mag": ("tmass_h", "Hmag", "h_m"),
+    "k_mag": ("tmass_k", "Kmag", "k_m", "ks_m"),
+    "w1_mag": ("w1", "W1mag", "w1mpro"),
+    "w2_mag": ("w2", "W2mag", "w2mpro"),
+}
+
+
+def _coalesce_numeric(df: pd.DataFrame, aliases: tuple[str, ...]) -> tuple[pd.Series, pd.Series]:
+    values = pd.Series(np.nan, index=df.index, dtype=float)
+    source = pd.Series("", index=df.index, dtype=object)
+    for col in aliases:
+        if col not in df.columns:
+            continue
+        candidate = pd.to_numeric(df[col], errors="coerce")
+        take = values.isna() & candidate.notna() & np.isfinite(candidate)
+        values.loc[take] = candidate.loc[take]
+        source.loc[take] = col
+    return values, source
+
+
+def _record_input_source(df: pd.DataFrame, key: str, source: pd.Series) -> None:
+    df[f"classification_{key}_source"] = source.fillna("").astype(str)
+
+
+def _append_note(df: pd.DataFrame, mask: pd.Series, column: str, note: str) -> None:
+    if bool(mask.any()):
+        df.loc[mask, column] = df.loc[mask, column].fillna("").astype(str) + note
+
+
+def _finite_score(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").where(lambda value: np.isfinite(value))
+
+
+def _coerce_bool_evidence(series: pd.Series) -> pd.Series:
+    """Parse catalog/pipeline flags without treating the string ``False`` as true."""
+    out = pd.Series(False, index=series.index, dtype=bool)
+    text = series.astype("string").str.strip().str.lower()
+    out.loc[text.isin({"true", "t", "yes", "y", "1"})] = True
+    numeric = pd.to_numeric(series, errors="coerce")
+    out.loc[numeric.notna()] = numeric.loc[numeric.notna()].ne(0)
+    return out
+
+
 
 
 
@@ -68,71 +126,60 @@ def check_eb_contamination(df: pd.DataFrame) -> pd.DataFrame:
     Returns df with columns: P_eb, eb_notes
     """
     df = df.copy()
-    df['P_eb'] = 0.0
+    df['P_eb'] = np.nan
     df['eb_notes'] = ''
-    
-    # Get required columns
-    has_asymmetry = 'asymmetry' in df.columns or 'skewness' in df.columns
-    has_duration = 'event_duration_days' in df.columns or 'timescale_days' in df.columns
-    has_stellar = 'mass50' in df.columns or 'teff_gspphot' in df.columns
-    
-    if not has_duration:
-        df['eb_notes'] = 'No duration data'
-        return df
-    
-    # Get duration column
-    dur_col = 'event_duration_days' if 'event_duration_days' in df.columns else 'timescale_days'
-    duration_days = df[dur_col].fillna(1.0)
-    
-    # Estimate stellar mass (default to 1 M_sun)
-    if 'mass50' in df.columns:
-        M_star = df['mass50'].fillna(1.0)
-    else:
-        M_star = 1.0
-    
-    # Estimate stellar radius (default to 1 R_sun)
-    if 'radius' in df.columns:
-        R_star = df['radius'].fillna(1.0)
-    else:
-        R_star = 1.0
+    duration_days, duration_source = _coalesce_numeric(
+        df, CLASSIFIER_INPUT_ALIASES["duration_days"]
+    )
+    _record_input_source(df, "duration", duration_source)
+    valid_duration = duration_days.notna() & (duration_days > 0)
+    df["eb_classifier_status"] = np.where(valid_duration, "ok", "missing_duration")
+    _append_note(df, ~valid_duration, "eb_notes", "No valid duration data; ")
     
     # For EB with semimajor axis ~1.8 AU (to explain single eclipse in 2.5yr baseline)
     # Eclipse duration ~ 1.5 days for tangential velocity of 21 km/s
     # If observed duration >> 1.5 days, EB is unlikely
     
     # Expected EB duration for a = 1.8 AU
-    v_tang = 21  # km/s for 2.5yr period
-    expected_eb_duration = 2 * R_star * SOLAR_RADIUS_M / (v_tang * 1000) / DAY_S
+    # Retain the physically motivated scale in the documentation, but do not
+    # silently invent a stellar radius just to manufacture a score.
     
     # Dips lasting weeks-months require 10-10000 AU separations
     # Transit probability at such separations: 10^-4 to 10^-7
     
     # Simple heuristic: if duration > EB_SHORT_DIP_DAYS, unlikely to be EB
-    long_dip = duration_days > EB_SHORT_DIP_DAYS
-    very_long_dip = duration_days > EB_LONG_DIP_DAYS
+    long_dip = valid_duration & (duration_days > EB_SHORT_DIP_DAYS)
+    very_long_dip = valid_duration & (duration_days > EB_LONG_DIP_DAYS)
 
     # Assign probabilities
-    df.loc[~long_dip, 'P_eb'] = EB_SHORT_P  # Short dips could be EBs
+    df.loc[valid_duration & ~long_dip, 'P_eb'] = EB_SHORT_P  # Short dips could be EBs
     df.loc[long_dip, 'P_eb'] = EB_LONG_P  # Long dips unlikely EBs
     df.loc[very_long_dip, 'P_eb'] = EB_VERY_LONG_P  # Very long dips very unlikely EBs
     
     # Check for periodicity if available
     if 'is_periodic' in df.columns:
-        periodic = df['is_periodic'] == True
-        df.loc[periodic, 'P_eb'] = np.minimum(df.loc[periodic, 'P_eb'] + EB_PERIODIC_BONUS, 1.0)
-        df.loc[periodic, 'eb_notes'] += 'Periodic; '
+        periodic = _coerce_bool_evidence(df['is_periodic'])
+        base = df.loc[periodic, 'P_eb'].fillna(0.0)
+        df.loc[periodic, 'P_eb'] = np.minimum(base + EB_PERIODIC_BONUS, 1.0)
+        _append_note(df, periodic, 'eb_notes', 'Periodic; ')
+        df.loc[periodic & ~valid_duration, "eb_classifier_status"] = "partial_periodicity_only"
     
     # Check for symmetry if available
     if 'asymmetry' in df.columns:
-        symmetric = np.abs(df['asymmetry']) < EB_ASYMMETRY_THRESHOLD
-        df.loc[symmetric, 'P_eb'] = np.minimum(df.loc[symmetric, 'P_eb'] + EB_SYMMETRIC_BONUS, 1.0)
-        df.loc[symmetric, 'eb_notes'] += 'Symmetric; '
+        asymmetry = pd.to_numeric(df['asymmetry'], errors='coerce')
+        symmetric = asymmetry.notna() & (np.abs(asymmetry) < EB_ASYMMETRY_THRESHOLD)
+        base = df.loc[symmetric, 'P_eb'].fillna(0.0)
+        df.loc[symmetric, 'P_eb'] = np.minimum(base + EB_SYMMETRIC_BONUS, 1.0)
+        _append_note(df, symmetric, 'eb_notes', 'Symmetric; ')
+        df.loc[symmetric & ~valid_duration, "eb_classifier_status"] = "partial_symmetry_only"
     
     # Gaia binary flag
     if 'non_single_star' in df.columns:
-        binary = df['non_single_star'] > 0
-        df.loc[binary, 'P_eb'] = np.minimum(df.loc[binary, 'P_eb'] + EB_BINARY_BONUS, 1.0)
-        df.loc[binary, 'eb_notes'] += 'Gaia binary; '
+        binary = pd.to_numeric(df['non_single_star'], errors='coerce').fillna(0) > 0
+        base = df.loc[binary, 'P_eb'].fillna(0.0)
+        df.loc[binary, 'P_eb'] = np.minimum(base + EB_BINARY_BONUS, 1.0)
+        _append_note(df, binary, 'eb_notes', 'Gaia binary; ')
+        df.loc[binary & ~valid_duration, "eb_classifier_status"] = "partial_binary_only"
     
     return df
 
@@ -185,8 +232,12 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
     df['r_ha'] = np.nan
     df['r_i'] = np.nan
     df['ha_ew'] = np.nan
+    df['iphas_sep_arcsec'] = np.nan
+    df['iphas_match_status'] = 'not_queried'
 
     valid = df['ra'].notna() & df['dec'].notna()
+    df.loc[valid, 'iphas_match_status'] = 'no_match'
+    df.loc[~valid, 'iphas_match_status'] = 'missing_coordinates'
     if not valid.any():
         return df
 
@@ -231,6 +282,8 @@ def query_iphas_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_IPHA
                 df.loc[idx, 'iphas_ha'] = ha
                 df.loc[idx, 'r_i'] = r_i
                 df.loc[idx, 'r_ha'] = r_ha
+                df.loc[idx, 'iphas_sep_arcsec'] = _row_first_numeric(row, 'sep_arcsec')
+                df.loc[idx, 'iphas_match_status'] = 'matched'
 
     n_found = df['iphas_r'].notna().sum()
     print(f"Found IPHAS photometry for {n_found}/{len(df)} sources")
@@ -252,13 +305,17 @@ def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RA
     df = df.copy()
     for band in ['g', 'r', 'i', 'z', 'y']:
         df[f'ps1_{band}'] = np.nan
+    df['ps1_sep_arcsec'] = np.nan
+    df['ps1_match_status'] = 'not_queried'
 
     print(f"Querying PS1 for {len(df)} sources...")
     
     for idx in tqdm(df.index, desc="PS1"):
         ra, dec = df.loc[idx, 'ra'], df.loc[idx, 'dec']
         if pd.isna(ra) or pd.isna(dec):
+            df.loc[idx, 'ps1_match_status'] = 'missing_coordinates'
             continue
+        df.loc[idx, 'ps1_match_status'] = 'no_match'
             
         try:
             result = Catalogs.query_region(
@@ -268,13 +325,30 @@ def query_ps1_by_coords(df: pd.DataFrame, radius_arcsec: float = CLASSIFY_PS1_RA
                 table="mean"
             )
             
-            if result and len(result) > 0:
-                row = result[0]
+            if result is not None and len(result) > 0:
+                target = SkyCoord(float(ra) * u.deg, float(dec) * u.deg)
+                ra_col = next((name for name in ('raMean', 'raStack', 'ra') if name in result.colnames), None)
+                dec_col = next((name for name in ('decMean', 'decStack', 'dec') if name in result.colnames), None)
+                if ra_col and dec_col:
+                    catalog_coords = SkyCoord(
+                        np.asarray(result[ra_col], dtype=float) * u.deg,
+                        np.asarray(result[dec_col], dtype=float) * u.deg,
+                    )
+                    separations = target.separation(catalog_coords).arcsec
+                    best = int(np.nanargmin(separations))
+                    sep_arcsec = float(separations[best])
+                else:
+                    best = 0
+                    sep_arcsec = np.nan
+                row = result[best]
                 for band in ['g', 'r', 'i', 'z', 'y']:
                     col = f'{band}MeanPSFMag'
                     if col in row.colnames:
                         df.loc[idx, f'ps1_{band}'] = row[col]
+                df.loc[idx, 'ps1_sep_arcsec'] = sep_arcsec
+                df.loc[idx, 'ps1_match_status'] = 'matched'
         except Exception:
+            df.loc[idx, 'ps1_match_status'] = 'error'
             continue
     
     n_found = df['ps1_g'].notna().sum()
@@ -299,38 +373,47 @@ def check_cv_contamination(df: pd.DataFrame) -> pd.DataFrame:
     Returns df with columns: P_cv, cv_notes
     """
     df = df.copy()
-    df['P_cv'] = 0.0
+    df['P_cv'] = np.nan
     df['cv_notes'] = ''
-    
-    # Check Gaia CMD position
-    # CVs typically have: G_abs > 4 and BP-RP < 0.5 (blue, faint)
-    has_gaia = 'phot_g_mean_mag' in df.columns and 'bp_rp' in df.columns
-    
-    if has_gaia and 'distance_gspphot' in df.columns:
-        valid = df['distance_gspphot'].notna() & (df['distance_gspphot'] > 0)
-        dist_pc = df.loc[valid, 'distance_gspphot']
-        G_abs = df.loc[valid, 'phot_g_mean_mag'] - 5 * np.log10(dist_pc / 10)
-        bp_rp = df.loc[valid, 'bp_rp']
+    g_mag, g_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["g_mag"])
+    bp_rp, color_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["bp_rp"])
+    distance_pc, distance_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["distance_pc"])
+    _record_input_source(df, "g_mag", g_source)
+    _record_input_source(df, "bp_rp", color_source)
+    _record_input_source(df, "distance", distance_source)
+    valid = g_mag.notna() & bp_rp.notna() & distance_pc.notna() & (distance_pc > 0)
+    df['cv_classifier_status'] = np.where(valid, 'ok', 'missing_cmd_inputs')
+
+    if valid.any():
+        dist_pc = distance_pc.loc[valid]
+        G_abs = g_mag.loc[valid] - 5 * np.log10(dist_pc / 10)
+        bp_rp_valid = bp_rp.loc[valid]
         
         # CV region: blue (BP-RP < CV_BP_RP_THRESHOLD) and faint (G_abs > CV_G_ABS_THRESHOLD)
-        cv_like = (bp_rp < CV_BP_RP_THRESHOLD) & (G_abs > CV_G_ABS_THRESHOLD)
+        cv_like = (bp_rp_valid < CV_BP_RP_THRESHOLD) & (G_abs > CV_G_ABS_THRESHOLD)
         df.loc[valid, 'P_cv'] = np.where(cv_like, CV_BASE_P, 0.01)
 
         # cv_like is indexed only over the valid-distance subset; use its index
         # to avoid boolean mask shape mismatches when some rows are invalid.
         cv_like_idx = cv_like[cv_like].index
-        df.loc[cv_like_idx, 'cv_notes'] += 'Blue+faint in CMD; '
+        _append_note(df, df.index.to_series().isin(cv_like_idx), 'cv_notes', 'Blue+faint in CMD; ')
     
     # Check Hα if IPHAS data available
     if 'ha_ew' in df.columns:
-        ha_excess = df['ha_ew'] > CV_HA_EW_THRESHOLD  # Å
-        df.loc[ha_excess, 'P_cv'] = np.minimum(df.loc[ha_excess, 'P_cv'] + CV_HA_BONUS, 1.0)
-        df.loc[ha_excess, 'cv_notes'] += 'Hα excess; '
+        ha_ew = pd.to_numeric(df['ha_ew'], errors='coerce')
+        ha_measured = ha_ew.notna()
+        ha_excess = ha_measured & (ha_ew > CV_HA_EW_THRESHOLD)  # Å
+        df.loc[ha_measured & df['P_cv'].isna(), 'P_cv'] = 0.0
+        df.loc[ha_excess, 'P_cv'] = np.minimum(df.loc[ha_excess, 'P_cv'].fillna(0.0) + CV_HA_BONUS, 1.0)
+        _append_note(df, ha_excess, 'cv_notes', 'Hα excess; ')
+        df.loc[ha_measured & ~valid, 'cv_classifier_status'] = 'partial_halpha_only'
     
     # Check for known CV catalogs
     if 'is_known_cv' in df.columns:
-        df.loc[df['is_known_cv'], 'P_cv'] = CV_KNOWN_P
-        df.loc[df['is_known_cv'], 'cv_notes'] += 'Known CV; '
+        known = _coerce_bool_evidence(df['is_known_cv'])
+        df.loc[known, 'P_cv'] = CV_KNOWN_P
+        _append_note(df, known, 'cv_notes', 'Known CV; ')
+        df.loc[known, 'cv_classifier_status'] = 'known_catalog_cv'
     
     return df
 
@@ -350,24 +433,28 @@ def check_starspot_contamination(df: pd.DataFrame) -> pd.DataFrame:
     Returns df with columns: P_starspot, starspot_notes
     """
     df = df.copy()
-    df['P_starspot'] = 0.0
+    df['P_starspot'] = np.nan
     df['starspot_notes'] = ''
-    
-    # Get dip amplitude
-    if 'event_depth_mag' in df.columns:
-        depth = df['event_depth_mag'].fillna(0.1)
-    elif 'max_depth' in df.columns:
-        depth = df['max_depth'].fillna(0.1)
-    else:
-        df['starspot_notes'] = 'No depth data'
-        return df
+    depth, depth_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["depth_mag"])
+    fractional_depth, fractional_source = _coalesce_numeric(
+        df, CLASSIFIER_INPUT_ALIASES["depth_fraction"]
+    )
+    use_fraction = depth.isna() & fractional_depth.notna()
+    # Convert a fractional flux decrement to its equivalent magnitude depth.
+    valid_fraction = use_fraction & (fractional_depth > 0) & (fractional_depth < 1)
+    depth.loc[valid_fraction] = -2.5 * np.log10(1.0 - fractional_depth.loc[valid_fraction])
+    depth_source.loc[valid_fraction] = fractional_source.loc[valid_fraction] + ':fraction_to_mag'
+    _record_input_source(df, "depth", depth_source)
+    valid_depth = depth.notna() & (depth >= 0)
+    df['starspot_classifier_status'] = np.where(valid_depth, 'ok', 'missing_depth')
+    _append_note(df, ~valid_depth, 'starspot_notes', 'No valid depth data; ')
     
     # Starspots typically cause <0.05 mag variations
     # Dips >0.1 mag are unlikely to be starspots
     
-    small_amp = depth < STARSPOT_SMALL_AMP
-    medium_amp = (depth >= STARSPOT_SMALL_AMP) & (depth < STARSPOT_MEDIUM_AMP)
-    large_amp = depth >= STARSPOT_MEDIUM_AMP
+    small_amp = valid_depth & (depth < STARSPOT_SMALL_AMP)
+    medium_amp = valid_depth & (depth >= STARSPOT_SMALL_AMP) & (depth < STARSPOT_MEDIUM_AMP)
+    large_amp = valid_depth & (depth >= STARSPOT_MEDIUM_AMP)
 
     df.loc[small_amp, 'P_starspot'] = STARSPOT_SMALL_P
     df.loc[small_amp, 'starspot_notes'] += 'Small amplitude; '
@@ -376,19 +463,14 @@ def check_starspot_contamination(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[large_amp, 'P_starspot'] = STARSPOT_LARGE_P
     
     # Timescale check
-    dur_col = None
-    for col in ['event_duration_days', 'timescale_days', 'duration']:
-        if col in df.columns:
-            dur_col = col
-            break
-    
-    if dur_col:
-        duration = df[dur_col].fillna(10)
+    duration, duration_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["duration_days"])
+    if duration.notna().any():
         # Starspot rotation periods are typically hours to ~STARSPOT_ROTATION_PERIOD_DAYS days
-        short_timescale = duration < STARSPOT_ROTATION_PERIOD_DAYS
+        short_timescale = duration.notna() & (duration > 0) & (duration < STARSPOT_ROTATION_PERIOD_DAYS)
         df.loc[short_timescale, 'P_starspot'] = np.minimum(
-            df.loc[short_timescale, 'P_starspot'] + STARSPOT_MEDIUM_P, 1.0
+            df.loc[short_timescale, 'P_starspot'].fillna(0.0) + STARSPOT_MEDIUM_P, 1.0
         )
+        df.loc[short_timescale & ~valid_depth, 'starspot_classifier_status'] = 'partial_timescale_only'
     
     return df
 
@@ -406,49 +488,51 @@ def classify_yso(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     
-    # Map columns
-    col_map = {
-        'H': ['Hmag', 'tmass_h'], 
-        'K': ['Kmag', 'tmass_k'], 
-        'W1': ['w1', 'W1mag', 'w1mpro'], 
-        'W2': ['w2', 'W2mag', 'w2mpro']
-    }
-    
-    vals = {}
-    for bands, candidates in col_map.items():
-        found = None
-        for c in candidates:
-            if c in df.columns:
-                found = c
-                break
-        vals[bands] = found
-        
-    if not all(vals.values()):
-        df['yso_class'] = 'unknown'
-        return df
-        
-    H = df[vals['H']]
-    K = df[vals['K']]
-    W1 = df[vals['W1']]
-    W2 = df[vals['W2']]
+    H, h_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["h_mag"])
+    K, k_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["k_mag"])
+    W1, w1_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["w1_mag"])
+    W2, w2_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["w2_mag"])
+    for key, source in (
+        ("h_mag", h_source), ("k_mag", k_source),
+        ("w1_mag", w1_source), ("w2_mag", w2_source),
+    ):
+        _record_input_source(df, key, source)
         
     hk_color = H - K
     w1w2_color = W1 - W2
     
     # Dust correction if available
-    if 'A_v_3d' in df.columns and df['A_v_3d'].sum() > 0:
-        av = df['A_v_3d'].fillna(0.0)
-        hk_color = hk_color - (YSO_DUST_CORRECTION_HK * av)
-        w1w2_color = w1w2_color - (YSO_DUST_CORRECTION_W1W2 * av)
+    df['yso_extinction_status'] = 'not_available'
+    if 'A_v_3d' in df.columns:
+        av = pd.to_numeric(df['A_v_3d'], errors='coerce')
+        valid_av = av.notna() & np.isfinite(av) & (av >= 0)
+        hk_color.loc[valid_av] = hk_color.loc[valid_av] - (YSO_DUST_CORRECTION_HK * av.loc[valid_av])
+        w1w2_color.loc[valid_av] = w1w2_color.loc[valid_av] - (YSO_DUST_CORRECTION_W1W2 * av.loc[valid_av])
+        df.loc[valid_av, 'yso_extinction_status'] = np.where(
+            av.loc[valid_av] > 0, 'corrected', 'measured_zero'
+        )
+        df.loc[av.notna() & ~valid_av, 'yso_extinction_status'] = 'invalid'
     
     df['H_K'] = hk_color 
     df['w1_w2'] = w1w2_color
+    valid_colors = hk_color.notna() & w1w2_color.notna()
+    df['yso_classifier_status'] = np.where(valid_colors, 'ok', 'missing_ir_bands')
     
     # Classification
-    class_i = df['w1_w2'] > YSO_CLASS_I_W1W2
-    class_ii = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] > YSO_CLASS_II_HK))
-    trans = ((df['w1_w2'] > YSO_CLASS_II_W1W2_MIN) & (df['w1_w2'] < YSO_CLASS_I_W1W2) & (df['H_K'] < YSO_CLASS_II_HK))
-    ms = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN
+    class_i = valid_colors & (df['w1_w2'] >= YSO_CLASS_I_W1W2)
+    class_ii = (
+        valid_colors
+        & (df['w1_w2'] > YSO_CLASS_II_W1W2_MIN)
+        & (df['w1_w2'] < YSO_CLASS_I_W1W2)
+        & (df['H_K'] >= YSO_CLASS_II_HK)
+    )
+    trans = (
+        valid_colors
+        & (df['w1_w2'] > YSO_CLASS_II_W1W2_MIN)
+        & (df['w1_w2'] < YSO_CLASS_I_W1W2)
+        & (df['H_K'] < YSO_CLASS_II_HK)
+    )
+    ms = valid_colors & (df['w1_w2'] <= YSO_CLASS_II_W1W2_MIN)
     
     df['yso_class'] = 'unknown'
     df.loc[class_i, 'yso_class'] = 'Class I'
@@ -481,38 +565,48 @@ def estimate_semimajor_axis(df: pd.DataFrame) -> pd.DataFrame:
     df['a_circ_au'] = np.nan
     df['transit_prob'] = np.nan
     df['hill_radius_rsun'] = np.nan
+    df['semimajor_status'] = 'missing_inputs'
     
     # Get dip depth
-    if 'event_depth_mag' in df.columns:
-        tau = 1 - 10**(-0.4 * df['event_depth_mag'].fillna(0.1))
-    elif 'max_depth' in df.columns:
-        tau = df['max_depth'].fillna(0.1)
-    else:
-        return df
+    depth_mag, depth_mag_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["depth_mag"])
+    depth_fraction, depth_fraction_source = _coalesce_numeric(
+        df, CLASSIFIER_INPUT_ALIASES["depth_fraction"]
+    )
+    tau = pd.Series(np.nan, index=df.index, dtype=float)
+    valid_mag = depth_mag.notna() & (depth_mag >= 0)
+    tau.loc[valid_mag] = 1 - 10 ** (-0.4 * depth_mag.loc[valid_mag])
+    use_fraction = tau.isna() & depth_fraction.notna() & (depth_fraction > 0) & (depth_fraction < 1)
+    tau.loc[use_fraction] = depth_fraction.loc[use_fraction]
+    depth_source = depth_mag_source.copy()
+    depth_source.loc[use_fraction] = depth_fraction_source.loc[use_fraction] + ':fraction'
+    _record_input_source(df, "semimajor_depth", depth_source)
     
     # Get duration
-    dur_col = None
-    for col in ['event_duration_days', 'timescale_days', 'duration']:
-        if col in df.columns:
-            dur_col = col
-            break
-    
-    if dur_col is None:
-        return df
-        
-    dt_days = df[dur_col].fillna(10)
+    dt_days, duration_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["duration_days"])
+    _record_input_source(df, "semimajor_duration", duration_source)
     
     # Stellar mass (default 1 M_sun)
-    if 'mass50' in df.columns:
-        M_star = df['mass50'].fillna(1.0)
-    else:
-        M_star = 1.0
+    M_star, mass_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["mass_solar"])
+    assumed_mass = M_star.isna()
+    M_star = M_star.fillna(1.0)
+    mass_source.loc[assumed_mass] = 'assumed_solar'
+    _record_input_source(df, "mass", mass_source)
     
     # Stellar radius (default 1 R_sun)
-    if 'radius' in df.columns:
-        R_star = df['radius'].fillna(1.0)
-    else:
-        R_star = 1.0
+    R_star, radius_source = _coalesce_numeric(df, CLASSIFIER_INPUT_ALIASES["radius_solar"])
+    assumed_radius = R_star.isna()
+    R_star = R_star.fillna(1.0)
+    radius_source.loc[assumed_radius] = 'assumed_solar'
+    _record_input_source(df, "radius", radius_source)
+
+    valid = (
+        tau.notna() & (tau > 0) & (tau < 1)
+        & dt_days.notna() & (dt_days > 0)
+        & np.isfinite(M_star) & (M_star > 0)
+        & np.isfinite(R_star) & (R_star > 0)
+    )
+    df.loc[valid, 'semimajor_status'] = 'ok'
+    df.loc[valid & (assumed_mass | assumed_radius), 'semimajor_status'] = 'assumed_stellar_properties'
     
     # Occulter size estimate (assume S ~ R* * sqrt(tau))
     S = R_star * np.sqrt(tau)
@@ -534,15 +628,17 @@ def estimate_semimajor_axis(df: pd.DataFrame) -> pd.DataFrame:
     a_m = (GRAVITATIONAL_CONSTANT_SI * M_kg * dt_s**2) / ((S_m + R_m)**2)
     a_au = a_m / AU_M
     
-    df['a_circ_au'] = a_au
+    df.loc[valid, 'a_circ_au'] = a_au.loc[valid]
     
     # Transit probability: P ~ (R* + R_occulter) / a
-    df['transit_prob'] = (R_m + S_m) / a_m
+    transit_probability = ((R_m + S_m) / a_m).clip(lower=0.0, upper=1.0)
+    df.loc[valid, 'transit_prob'] = transit_probability.loc[valid]
     
     # Hill radius for 1 Earth mass at estimated a
     # R_H = a * (M_planet / 3*M_star)^(1/3)
     r_hill_m = a_m * (EARTH_MASS_KG / (3 * M_kg))**(1/3)
-    df['hill_radius_rsun'] = r_hill_m / SOLAR_RADIUS_M
+    hill_radius = r_hill_m / SOLAR_RADIUS_M
+    df.loc[valid, 'hill_radius_rsun'] = hill_radius.loc[valid]
     
     return df
 
@@ -564,26 +660,31 @@ def estimate_disk_probability(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
     df['P_disk'] = DISK_BASE_P  # Base probability
+    df['disk_classifier_status'] = 'prior_only'
 
     # Check semimajor axis
     if 'a_circ_au' in df.columns:
-        large_a = df['a_circ_au'] > DISK_LARGE_A_AU
-        very_large_a = df['a_circ_au'] > DISK_VERY_LARGE_A_AU
+        a_circ = pd.to_numeric(df['a_circ_au'], errors='coerce')
+        valid_a = a_circ.notna() & (a_circ > 0)
+        large_a = valid_a & (a_circ > DISK_LARGE_A_AU)
+        very_large_a = valid_a & (a_circ > DISK_VERY_LARGE_A_AU)
+        df.loc[valid_a, 'disk_classifier_status'] = 'ok'
 
         df.loc[large_a, 'P_disk'] = DISK_LARGE_A_P
         df.loc[very_large_a, 'P_disk'] = DISK_VERY_LARGE_A_P
 
     # Check Hill radius
     if 'hill_radius_rsun' in df.columns:
-        large_hill = df['hill_radius_rsun'] > 10
+        hill = pd.to_numeric(df['hill_radius_rsun'], errors='coerce')
+        large_hill = hill.notna() & (hill > 10)
         df.loc[large_hill, 'P_disk'] += DISK_LARGE_HILL_BONUS
 
     # Check WISE upper limits (no hot disk)
     # If W3/W4 not detected, consistent with cool/no disk
-    if 'w1' in df.columns and 'w2' in df.columns:
-        no_ir_excess = df['w1_w2'] < YSO_CLASS_II_W1W2_MIN if 'w1_w2' in df.columns else True
-        if isinstance(no_ir_excess, pd.Series):
-            df.loc[no_ir_excess, 'P_disk'] += DISK_NO_IR_EXCESS_BONUS
+    if 'w1_w2' in df.columns:
+        w1_w2 = pd.to_numeric(df['w1_w2'], errors='coerce')
+        no_ir_excess = w1_w2.notna() & (w1_w2 < YSO_CLASS_II_W1W2_MIN)
+        df.loc[no_ir_excess, 'P_disk'] += DISK_NO_IR_EXCESS_BONUS
 
     # Cap at DISK_P_CAP (never fully certain without RV confirmation)
     df['P_disk'] = df['P_disk'].clip(upper=DISK_P_CAP)
@@ -595,7 +696,13 @@ def estimate_disk_probability(df: pd.DataFrame) -> pd.DataFrame:
 # MASTER CLASSIFICATION
 # =============================================================================
 
-def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
+def compute_all_classifications(
+    df: pd.DataFrame,
+    *,
+    run_eb: bool = True,
+    run_cv: bool = True,
+    run_starspot: bool = True,
+) -> pd.DataFrame:
     """
     Run all classifiers and compute final classification.
     
@@ -605,14 +712,30 @@ def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
     - a_circ_au, transit_prob, hill_radius_rsun
     - final_class (most likely classification)
     """
+    df = df.copy()
     print("Running EB contamination check...")
-    df = check_eb_contamination(df)
+    if run_eb:
+        df = check_eb_contamination(df)
+    else:
+        df['P_eb'] = np.nan
+        df['eb_notes'] = 'Disabled; '
+        df['eb_classifier_status'] = 'disabled'
     
     print("Running CV contamination check...")
-    df = check_cv_contamination(df)
+    if run_cv:
+        df = check_cv_contamination(df)
+    else:
+        df['P_cv'] = np.nan
+        df['cv_notes'] = 'Disabled; '
+        df['cv_classifier_status'] = 'disabled'
     
     print("Running starspot check...")
-    df = check_starspot_contamination(df)
+    if run_starspot:
+        df = check_starspot_contamination(df)
+    else:
+        df['P_starspot'] = np.nan
+        df['starspot_notes'] = 'Disabled; '
+        df['starspot_classifier_status'] = 'disabled'
     
     print("Running YSO classification...")
     df = classify_yso(df)
@@ -627,24 +750,103 @@ def compute_all_classifications(df: pd.DataFrame) -> pd.DataFrame:
     # Priority: known classes > high-probability contaminants > disk/circumstellar
     
     df['final_class'] = 'Unknown Dipper'
-    
-    # YSO classes
+    df['classification_score'] = np.nan
+    df['classification_score_kind'] = 'uncalibrated_heuristic'
+    df['classification_version'] = CLASSIFIER_VERSION
+
+    score_frame = pd.DataFrame(
+        {
+            'Likely EB': _finite_score(df['P_eb']),
+            'Likely CV': _finite_score(df['P_cv']),
+            'Likely Starspot': _finite_score(df['P_starspot']),
+        },
+        index=df.index,
+    )
+    thresholds = pd.Series(
+        {
+            'Likely EB': CLASSIFY_EB_THRESHOLD,
+            'Likely CV': CLASSIFY_CV_THRESHOLD,
+            'Likely Starspot': CLASSIFY_STARSPOT_THRESHOLD,
+        }
+    )
+    eligible = score_frame.gt(thresholds, axis='columns')
+    winning_scores = score_frame.where(eligible).max(axis=1, skipna=True)
+    has_contaminant = eligible.any(axis=1)
+    winning_labels = pd.Series(pd.NA, index=df.index, dtype="string")
+    if has_contaminant.any():
+        winning_labels.loc[has_contaminant] = (
+            score_frame.loc[has_contaminant]
+            .where(eligible.loc[has_contaminant])
+            .idxmax(axis=1)
+            .astype("string")
+        )
+    df.loc[has_contaminant, 'final_class'] = winning_labels.loc[has_contaminant]
+    df.loc[has_contaminant, 'classification_score'] = winning_scores.loc[has_contaminant]
+
+    # YSO classes are assigned only when no contaminant score crossed its
+    # threshold.  This prevents iteration order from overwriting a stronger,
+    # contradictory contaminant score.
     yso_classes = ['Class I', 'Class II', 'Transition Disk']
     for yc in yso_classes:
-        df.loc[df['yso_class'] == yc, 'final_class'] = f'YSO ({yc})'
-    
-    # Contamination flags
-    df.loc[df['P_eb'] > CLASSIFY_EB_THRESHOLD, 'final_class'] = 'Likely EB'
-    df.loc[df['P_cv'] > CLASSIFY_CV_THRESHOLD, 'final_class'] = 'Likely CV'
-    df.loc[df['P_starspot'] > CLASSIFY_STARSPOT_THRESHOLD, 'final_class'] = 'Likely Starspot'
+        mask = (~has_contaminant) & (df['yso_class'] == yc)
+        df.loc[mask, 'final_class'] = f'YSO ({yc})'
 
     # Disk candidates
     disk_cand = (df['P_disk'] > CLASSIFY_DISK_THRESHOLD) & (df['final_class'] == 'Unknown Dipper')
     df.loc[disk_cand, 'final_class'] = 'Disk Occultation Candidate'
+    df.loc[disk_cand, 'classification_score'] = df.loc[disk_cand, 'P_disk']
 
     # Main sequence dippers
-    ms_dipper = (df['yso_class'] == 'Main Sequence') & (df['P_eb'] < CLASSIFY_MS_EB_REJECTION) & (df['P_cv'] < CLASSIFY_MS_CV_REJECTION)
+    eb_rejected = df['P_eb'].notna() & (df['P_eb'] < CLASSIFY_MS_EB_REJECTION)
+    cv_rejected = df['P_cv'].notna() & (df['P_cv'] < CLASSIFY_MS_CV_REJECTION)
+    ms_dipper = (
+        (df['final_class'] == 'Unknown Dipper')
+        & (df['yso_class'] == 'Main Sequence')
+        & eb_rejected
+        & cv_rejected
+    )
     df.loc[ms_dipper, 'final_class'] = 'Main Sequence Dipper'
+
+    component_status_columns = [
+        'eb_classifier_status', 'cv_classifier_status', 'starspot_classifier_status',
+        'yso_classifier_status', 'semimajor_status', 'disk_classifier_status',
+    ]
+    component_statuses = df[component_status_columns].fillna('unknown').astype(str)
+    df['classification_status'] = 'ok'
+    any_error = component_statuses.apply(lambda row: any(value == 'error' for value in row), axis=1)
+    any_missing = component_statuses.apply(
+        lambda row: any(value.startswith('missing') or value.startswith('partial') for value in row),
+        axis=1,
+    )
+    all_disabled_or_missing = component_statuses.apply(
+        lambda row: all(value == 'disabled' or value.startswith('missing') for value in row),
+        axis=1,
+    )
+    df.loc[any_missing, 'classification_status'] = 'partial_inputs'
+    df.loc[all_disabled_or_missing, 'classification_status'] = 'insufficient_inputs'
+    df.loc[any_error, 'classification_status'] = 'error'
+    df['classification_scores_json'] = [
+        json.dumps(
+            {
+                'P_eb': None if pd.isna(row.P_eb) else float(row.P_eb),
+                'P_cv': None if pd.isna(row.P_cv) else float(row.P_cv),
+                'P_starspot': None if pd.isna(row.P_starspot) else float(row.P_starspot),
+                'P_disk': None if pd.isna(row.P_disk) else float(row.P_disk),
+            },
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        for row in df[['P_eb', 'P_cv', 'P_starspot', 'P_disk']].itertuples(index=False)
+    ]
+    source_columns = sorted(col for col in df.columns if col.startswith('classification_') and col.endswith('_source'))
+    df['classification_input_map_json'] = [
+        json.dumps(
+            {col.removeprefix('classification_').removesuffix('_source'): str(value or '') for col, value in zip(source_columns, row)},
+            sort_keys=True,
+            separators=(',', ':'),
+        )
+        for row in df[source_columns].itertuples(index=False, name=None)
+    ]
     
     print("Classification complete.")
     return df
@@ -686,7 +888,12 @@ def main():
     
     # Classify
     print("\n=== Running Classification ===")
-    df = compute_all_classifications(df)
+    df = compute_all_classifications(
+        df,
+        run_eb=not args.skip_eb,
+        run_cv=not args.skip_cv,
+        run_starspot=not args.skip_starspot,
+    )
     
     # Summary
     print("\n=== Classification Summary ===")

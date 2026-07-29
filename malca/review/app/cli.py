@@ -58,12 +58,33 @@ def main():
     if mismatch_warning:
         print(f"Warning: {mismatch_warning}")
 
+    schema_migrated = ensure_review_db_schema(Path(DB_PATH))
+    if schema_migrated:
+        print(f"Initialized/migrated review DB schema: {Path(DB_PATH).resolve()}")
+
+    if PLOT_DIR:
+        run_dir = Path(PLOT_DIR).resolve().parent
+        score_path = (
+            run_dir
+            / "results"
+            / "dipper_feature_selection"
+            / "stats_plus_periodicity_dip_jump"
+            / "all_candidates_scores.parquet"
+        )
+        if score_path.exists():
+            try:
+                with closing(db_connect(Path(DB_PATH))) as conn:
+                    updated = merge_dipper_probability_scores(conn, score_path)
+                print(f"Updated ML dipper probabilities for {updated} review candidate(s) from {score_path}")
+            except Exception as exc:
+                print(f"Warning: could not merge ML dipper probabilities from {score_path}: {exc}")
+
     print(f"Starting MALCA Review App...")
     print(f"  Database:  {DB_PATH}")
     print(f"  Plot dir:  {PLOT_DIR}")
     print(f"  Server:    http://{args.host}:{args.port}")
     print(f"\nKeyboard shortcuts:")
-    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [?] Help")
+    print("  [D]ipper [M]icrolensing [F]lare [Y]so [U]nknown [I]nstrumental [O]ther | [1-4] Label confidence | [.] Save | [Enter] Done | [Backspace] Back | [Esc] Sidebar | [?] Help")
     print("")
 
     # Auto-open browser

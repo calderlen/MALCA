@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import Any
 
 __all__ = [
+    "dimming_window",
     "events",
     "filter",
     "periodicity_gate",

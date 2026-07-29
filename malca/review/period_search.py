@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ from malca.config import (
     BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
     CLEAN_LC_MAX_ERROR_SIGMA,
+    POST_FILTER_PDM_METHOD,
 )
 from malca.core.period_arbitration import (
     NATIVE_PERIOD_MIN_REL_IMPROVEMENT,
@@ -18,9 +20,10 @@ from malca.core.period_arbitration import (
     native_harmonic_period_candidates,
     period_alias_matches,
 )
+from malca.core.period_consensus import event_fold_quality
 from malca.core.phase import phase_template, resolve_phase_period, template_phase_lag
 from malca.core.periodogram import ce_find_period, lsp_find_period, pdm_find_period
-from malca.review.interactive_plot import (
+from malca.review.native_lightcurve import (
     _compute_baseline_bands,
     _load_cleaned_df,
     resolve_lightcurve_path,
@@ -30,6 +33,10 @@ from malca.review.interactive_plot import (
 REVIEW_PERIOD_HARMONIC_FACTORS: tuple[float, ...] = NATIVE_PERIOD_WITH_MULTIPLES_FACTORS
 REVIEW_HARMONIC_CHECK_DIVISORS: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
 REVIEW_HARMONIC_CHECK_SCORE_TOLERANCE = 0.03
+# Long-LS seeds with fewer than this many baseline cycles are kept intact.
+# Downward harmonic checks (P/2, P/3, ...) falsely prefer shorter aliases when
+# the true recurrence is only seen once or twice across the baseline.
+REVIEW_LONG_LS_MIN_CYCLES_FOR_SUBHARMONICS = 2.5
 AUTO_PERIOD_METHODS: tuple[str, ...] = ("pdm", "ce")
 _METHOD_LABELS: dict[str, str] = {
     "pdm": "PDM",
@@ -49,11 +56,103 @@ def has_external_period(payload: dict | None) -> bool:
 
 
 def resolve_stored_review_period(payload: dict | None) -> tuple[float | None, str]:
-    """Return the stored/precomputed period used as the review harmonic-check seed."""
-    period, source = resolve_phase_period(payload, include_periodogram_periods=False)
+    """Return the stored/precomputed period used as the review harmonic-check seed.
+
+    Prefers consensus / fold periods, then long-period LS when the stored short
+    period is missing or clearly sub-fundamental.
+    """
+    from malca.config import REVIEW_LONG_LS_SEED_MAX_STORED_DAYS
+
+    period, source = resolve_phase_period(
+        payload,
+        include_periodogram_periods=False,
+        include_long_ls=True,
+    )
     if period is None or not np.isfinite(period) or period <= 0:
         return None, ""
+
+    payload = payload or {}
+    long_ls = None
+    try:
+        long_ls_raw = payload.get("long_ls_period_days")
+        long_ls = float(long_ls_raw) if long_ls_raw is not None else None
+    except (TypeError, ValueError):
+        long_ls = None
+    long_ok = bool(payload.get("long_ls_is_significant")) and long_ls is not None and np.isfinite(long_ls) and long_ls > 0
+    if long_ok and float(period) < float(REVIEW_LONG_LS_SEED_MAX_STORED_DAYS) and float(long_ls) > float(period):
+        return float(long_ls), "long_ls_period_days"
     return float(period), str(source or "stored period")
+
+
+def payload_baseline_days(payload: dict | None) -> float | None:
+    """Return the candidate baseline span in days from review payload stats."""
+
+    payload = payload or {}
+    for key in ("stats_time_span_days", "baseline_days", "stats_baseline_days"):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value > 0:
+            return float(value)
+    try:
+        jd_start = float(payload.get("stats_jd_start"))
+        jd_end = float(payload.get("stats_jd_end"))
+    except (TypeError, ValueError):
+        return None
+    if np.isfinite(jd_start) and np.isfinite(jd_end) and jd_end > jd_start:
+        return float(jd_end - jd_start)
+    return None
+
+
+def adaptive_review_period_bounds(
+    payload: dict | None,
+    *,
+    long_p: bool = False,
+    user_min: float | None = None,
+    user_max: float | None = None,
+) -> tuple[float, float]:
+    """Baseline-adaptive review search bounds, shared by TUI and Dash."""
+
+    from malca.core.period_bounds import STAGE_LONG, STAGE_REVIEW, adaptive_period_bounds
+
+    baseline = payload_baseline_days(payload)
+    stage = STAGE_LONG if long_p else STAGE_REVIEW
+    return adaptive_period_bounds(
+        baseline_days=baseline,
+        stage=stage,
+        user_min_period=user_min,
+        user_max_period=user_max,
+    ).as_tuple()
+
+
+def _keep_long_ls_fundamental_for_review(
+    payload: dict | None,
+    base_period: float,
+    base_source: str,
+) -> bool:
+    """Skip P/2..P/4 checks for significant long-LS seeds with sparse coverage."""
+
+    baseline = payload_baseline_days(payload)
+    if baseline is None or not np.isfinite(base_period) or base_period <= 0:
+        return False
+    cycles = float(baseline) / float(base_period)
+    if cycles >= REVIEW_LONG_LS_MIN_CYCLES_FOR_SUBHARMONICS:
+        return False
+    source = str(base_source or "")
+    if source == "long_ls_period_days" or source.startswith("long_ls"):
+        return True
+    payload = payload or {}
+    if not bool(payload.get("long_ls_is_significant")):
+        return False
+    try:
+        long_ls = float(payload.get("long_ls_period_days"))
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(long_ls) or long_ls <= 0:
+        return False
+    tolerance = max(1.0, 0.02 * float(base_period))
+    return abs(long_ls - float(base_period)) <= tolerance
 
 
 def _harmonic_check_candidate_periods(
@@ -108,6 +207,18 @@ def _robust_sigma(values: np.ndarray) -> float:
     return sigma if np.isfinite(sigma) and sigma > 0 else np.nan
 
 
+def _dip_epochs_from_payload(payload: dict | None) -> list[float]:
+    """Parse dip center JDs from review payload when available."""
+    payload = payload or {}
+    try:
+        from malca.core.event_epochs import parse_run_epochs_json
+
+        parsed = parse_run_epochs_json(payload.get("dip_run_epochs_json"))
+        return [float(e.center_jd) for e in parsed if np.isfinite(e.center_jd)]
+    except Exception:
+        return []
+
+
 def _score_period_harmonic_candidate(
     band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
     period: float,
@@ -115,6 +226,7 @@ def _score_period_harmonic_candidate(
     n_bins: int = 48,
     lag_weight: float = 2.5,
     alias_penalty: float = 0.2,
+    event_epochs: Sequence[float] | None = None,
 ) -> dict[str, object]:
     if not np.isfinite(period) or period <= 0:
         return {
@@ -124,6 +236,7 @@ def _score_period_harmonic_candidate(
             "lag_phase": np.nan,
             "alias_flag": False,
             "alias_matches": [],
+            "event_fold_quality": {},
         }
 
     all_jd = [jd for jd, _ in band_resid.values() if jd.size > 0]
@@ -135,6 +248,7 @@ def _score_period_harmonic_candidate(
             "lag_phase": np.nan,
             "alias_flag": False,
             "alias_matches": [],
+            "event_fold_quality": {},
         }
     jd0 = float(min(np.min(jd) for jd in all_jd))
 
@@ -181,6 +295,7 @@ def _score_period_harmonic_candidate(
             "lag_phase": np.nan,
             "alias_flag": False,
             "alias_matches": [],
+            "event_fold_quality": {},
         }
 
     scatter_ratio = float(np.mean(scatter_ratios))
@@ -191,14 +306,27 @@ def _score_period_harmonic_candidate(
     raw_objective = float(scatter_ratio + lag_weight * lag_term)
     alias_matches = period_alias_matches(period)
     alias_flag = bool(alias_matches)
+
+    fold_q: dict[str, float] = {}
+    event_penalty = 0.0
+    if event_epochs is not None:
+        epochs = [float(v) for v in event_epochs if np.isfinite(float(v))]
+        if len(epochs) >= 2:
+            fold_q = event_fold_quality(epochs, period, reference_epoch=jd0)
+            penalty = fold_q.get("objective_penalty")
+            if penalty is not None and np.isfinite(float(penalty)):
+                event_penalty = float(penalty)
+
     return {
-        "objective": float(raw_objective + (alias_penalty if alias_flag else 0.0)),
+        "objective": float(raw_objective + (alias_penalty if alias_flag else 0.0) + event_penalty),
         "raw_objective": raw_objective,
         "scatter_ratio": scatter_ratio,
         "lag_phase": lag_phase,
         "n_bins_used": n_bins_used,
         "alias_flag": alias_flag,
         "alias_matches": alias_matches,
+        "event_fold_quality": fold_q,
+        "event_objective_penalty": event_penalty,
     }
 
 
@@ -253,6 +381,7 @@ def check_stored_period_harmonics(
     min_period: float,
     max_period: float,
     score_tolerance: float = REVIEW_HARMONIC_CHECK_SCORE_TOLERANCE,
+    event_epochs: Sequence[float] | None = None,
 ) -> tuple[float, float, dict[str, object]]:
     """Score P0, P0/2, P0/3, and P0/4, preferring shorter comparable harmonics."""
     try:
@@ -272,7 +401,14 @@ def check_stored_period_harmonics(
 
     scored_candidates: list[dict[str, object]] = []
     for candidate in candidate_periods:
-        score = dict(_score_period_harmonic_candidate(band_resid, candidate["period"], alias_penalty=0.0))
+        score = dict(
+            _score_period_harmonic_candidate(
+                band_resid,
+                candidate["period"],
+                alias_penalty=0.0,
+                event_epochs=event_epochs,
+            )
+        )
         selection_objective = float(score.get("raw_objective", score.get("objective", np.inf)))
         scored_candidates.append(
             {
@@ -438,6 +574,36 @@ def run_harmonic_check_for_payload(
     if base_period is None:
         return None, "No stored period; use Find Period."
 
+    if _keep_long_ls_fundamental_for_review(payload, base_period, base_source):
+        baseline = payload_baseline_days(payload)
+        cycles = (
+            float(baseline) / float(base_period)
+            if baseline is not None and np.isfinite(baseline)
+            else float("nan")
+        )
+        summary = (
+            f"Auto harmonic check: kept P={base_period:.5f} d "
+            f"({base_source}; {cycles:.1f} baseline cycles)"
+        )
+        return {
+            "best_period": float(base_period),
+            "method": "Harmonic check",
+            "searched_methods": ["alias_check"],
+            "auto": True,
+            "harmonic_factor": 1.0,
+            "harmonic_divisor": 1.0,
+            "base_period": float(base_period),
+            "base_period_source": str(base_source),
+            "harmonic_objective": np.nan,
+            "harmonic_selection_objective": np.nan,
+            "harmonic_raw_objective": np.nan,
+            "harmonic_lag_phase": np.nan,
+            "harmonic_scatter_ratio": np.nan,
+            "alias_flag": False,
+            "alias_matches": [],
+            "method_candidates": [],
+        }, summary
+
     lc_path = resolve_lightcurve_path(payload, Path(plot_dir) if plot_dir else None)
     if lc_path is None:
         return None, "No LC file for harmonic check"
@@ -472,6 +638,7 @@ def run_harmonic_check_for_payload(
         base_period,
         min_period=min_period,
         max_period=max_period,
+        event_epochs=_dip_epochs_from_payload(payload),
     )
     if not np.isfinite(best_period) or best_period <= 0:
         return None, "No valid harmonic candidate"
@@ -504,6 +671,214 @@ def run_harmonic_check_for_payload(
         "alias_flag": bool(harmonic_diag.get("alias_flag", False)),
         "alias_matches": alias_matches,
         "method_candidates": list(harmonic_diag.get("candidates", [])),
+    }, summary
+
+
+def _prepare_pipeline_periodicity_frame(
+    payload: dict,
+    *,
+    plot_dir: Path | None,
+    filter_bad_cameras: bool,
+    scatter_ratio: float,
+    clean_max_error_absolute: float,
+    clean_max_error_sigma: float,
+) -> pd.DataFrame | None:
+    """Load and prepare one light curve the same way the STV filter does."""
+
+    from malca.core.phase import align_v_to_g_magnitude
+    from malca.stv.periodicity_gate import prepare_periodicity_lightcurve
+
+    lc_path = resolve_lightcurve_path(payload, Path(plot_dir) if plot_dir else None)
+    if lc_path is None:
+        return None
+
+    df, _, _ = _load_cleaned_df(
+        lc_path,
+        filter_bad_cameras=bool(filter_bad_cameras),
+        scatter_ratio=float(scatter_ratio),
+        clean_max_error_absolute=float(clean_max_error_absolute),
+        clean_max_error_sigma=float(clean_max_error_sigma),
+    )
+    if df is None or df.empty:
+        return None
+
+    df = prepare_periodicity_lightcurve(df)
+    if len(df) < 50:
+        return None
+    sort_cols = [col for col in ("v_g_band", "JD") if col in df.columns]
+    if sort_cols:
+        df = df.sort_values(sort_cols, kind="stable").reset_index(drop=True)
+    df_aligned, _ = align_v_to_g_magnitude(df)
+    return df_aligned
+
+
+def _bounded_review_period_candidate(
+    pdm_result: dict | None,
+    ce_result: dict | None,
+    *,
+    min_period: float,
+    max_period: float,
+) -> tuple[float | None, str]:
+    """Return a reviewable in-window peak when consensus gates reject both.
+
+    The TUI's recompute action is an inspection tool: even a weak periodogram
+    peak must remain foldable so the reviewer can judge it. PDM retains
+    priority because the control and selected window are explicitly labeled
+    PDM; CE is the fallback when PDM did not produce a finite in-window peak.
+    """
+
+    for method, result, keys in (
+        ("pdm", pdm_result, ("pdm_corrected_period", "pdm_period")),
+        ("ce", ce_result, ("ce_corrected_period", "ce_period")),
+    ):
+        result = result or {}
+        for key in keys:
+            try:
+                period = float(result.get(key))
+            except (TypeError, ValueError):
+                continue
+            if (
+                np.isfinite(period)
+                and period > 0
+                and float(min_period) <= period <= float(max_period)
+            ):
+                return float(period), method
+    return None, ""
+
+
+def run_pipeline_period_search_for_payload(
+    payload: dict,
+    *,
+    plot_dir: Path | None,
+    min_period: float,
+    max_period: float,
+    filter_bad_cameras: bool = True,
+    scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
+    clean_max_error_absolute: float = CLEAN_LC_MAX_ERROR_ABSOLUTE,
+    clean_max_error_sigma: float = CLEAN_LC_MAX_ERROR_SIGMA,
+    n_bootstrap: int = 0,
+) -> tuple[dict | None, str]:
+    """Run STV-grade short PDM/CE + long LS consensus for review folding."""
+
+    from malca.core.period_pipeline import compute_period_consensus_for_lc
+    from malca.core.stats import compute_ce_stats, compute_pdm_stats
+    from malca.stv.event_period import event_based_period
+
+    df = _prepare_pipeline_periodicity_frame(
+        payload,
+        plot_dir=plot_dir,
+        filter_bad_cameras=filter_bad_cameras,
+        scatter_ratio=scatter_ratio,
+        clean_max_error_absolute=clean_max_error_absolute,
+        clean_max_error_sigma=clean_max_error_sigma,
+    )
+    if df is None or df.empty:
+        return None, "No LC for pipeline period search"
+
+    jd = df["JD"].to_numpy(dtype=float)
+    mag = df["mag"].to_numpy(dtype=float)
+    err = df["error"].to_numpy(dtype=float) if "error" in df.columns else None
+    if err is None:
+        err = np.full_like(mag, 0.02, dtype=float)
+
+    dip_epochs = _dip_epochs_from_payload(payload)
+    baseline_days = float(np.nanmax(jd) - np.nanmin(jd)) if jd.size else float("nan")
+    event_period_result = None
+    if dip_epochs:
+        event_period_result = event_based_period(
+            dip_epochs,
+            baseline_days=baseline_days if np.isfinite(baseline_days) else None,
+        )
+
+    pdm_result = compute_pdm_stats(
+        jd,
+        mag,
+        err,
+        min_period=float(min_period),
+        max_period=float(max_period),
+        pdm_method=str(POST_FILTER_PDM_METHOD),
+        n_bootstrap=int(n_bootstrap),
+    )
+    ce_result = compute_ce_stats(
+        jd,
+        mag,
+        err,
+        min_period=float(min_period),
+        max_period=float(max_period),
+        n_bootstrap=int(n_bootstrap),
+    )
+    consensus = compute_period_consensus_for_lc(
+        jd,
+        mag,
+        err,
+        pdm_result=pdm_result,
+        ce_result=ce_result,
+        dip_epochs_json=payload.get("dip_run_epochs_json"),
+        dip_epochs_override=dip_epochs or None,
+        detect_dip_epochs_fallback=True,
+        long_ls_kwargs={
+            "n_bootstrap": int(n_bootstrap),
+            "min_period_days": float(min_period),
+            "max_period_days": float(max_period),
+        },
+        event_period_result=event_period_result,
+        min_period_days=float(min_period),
+        max_period_days=float(max_period),
+    )
+
+    best_period = consensus.get("period_consensus_days")
+    try:
+        best_period = float(best_period)
+    except (TypeError, ValueError):
+        best_period = float("nan")
+    if not np.isfinite(best_period) or best_period <= 0:
+        best_period, fallback_method = _bounded_review_period_candidate(
+            pdm_result,
+            ce_result,
+            min_period=float(min_period),
+            max_period=float(max_period),
+        )
+        if best_period is None:
+            return None, "Pipeline consensus: no valid in-window period"
+        method_label = fallback_method.upper()
+        return {
+            "best_period": float(best_period),
+            "method": f"{fallback_method}_review_candidate",
+            "searched_methods": ["pipeline_consensus", fallback_method],
+            "auto": True,
+            "period_confidence": "none",
+            "period_method": f"{fallback_method}_review_candidate",
+            "long_ls_period_days": consensus.get("long_ls_period_days"),
+            "long_ls_is_significant": bool(
+                consensus.get("long_ls_is_significant")
+            ),
+            "pdm_period": pdm_result.get("pdm_period"),
+            "ce_period": ce_result.get("ce_period"),
+            "consensus": consensus,
+        }, (
+            f"Pipeline {method_label} candidate: P={best_period:.5f} d "
+            "(below consensus significance gates)"
+        )
+
+    method = str(consensus.get("period_method") or "consensus").strip() or "consensus"
+    confidence = str(consensus.get("period_confidence") or "none").strip() or "none"
+    long_ls_period = consensus.get("long_ls_period_days")
+    summary = f"Pipeline {method}: P={best_period:.5f} d ({confidence})"
+    if long_ls_period is not None and np.isfinite(float(long_ls_period)):
+        summary += f"; long LS {float(long_ls_period):.2f} d"
+
+    return {
+        "best_period": float(best_period),
+        "method": method,
+        "searched_methods": ["pipeline_consensus"],
+        "auto": True,
+        "period_confidence": confidence,
+        "period_method": method,
+        "long_ls_period_days": consensus.get("long_ls_period_days"),
+        "long_ls_is_significant": bool(consensus.get("long_ls_is_significant")),
+        "pdm_period": pdm_result.get("pdm_period"),
+        "ce_period": ce_result.get("ce_period"),
+        "consensus": consensus,
     }, summary
 
 
