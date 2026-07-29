@@ -72,11 +72,35 @@ def apply_config(
 
     Keys use argparse dest names, not CLI spellings.
     """
-    data = load_config(getattr(args, "config", None))
-    if not data:
+    merged = config_values(
+        getattr(args, "config", None),
+        command=command,
+        profile=getattr(args, "profile", None),
+        valid_keys=valid_keys,
+    )
+    if not merged:
         return args
 
-    profile = getattr(args, "profile", None)
+    for key, value in merged.items():
+        if path_keys is not None and key in path_keys and value is not None:
+            setattr(args, key, Path(value).expanduser())
+            continue
+        setattr(args, key, _coerce_like(value, getattr(args, key, None)))
+    return args
+
+
+def config_values(
+    path: Path | str | None,
+    *,
+    command: str,
+    profile: str | None = None,
+    valid_keys: set[str] | None = None,
+) -> dict[str, Any]:
+    """Return merged config/profile values without mutating a namespace."""
+    data = load_config(path)
+    if not data:
+        return {}
+
     merged: dict[str, Any] = {}
 
     for key in ("defaults", "global"):
@@ -120,13 +144,46 @@ def apply_config(
             raise SystemExit(
                 f"Unknown config option(s) for {command}: {', '.join(unknown)}"
             )
+    return merged
 
+
+
+def parse_args_with_config(
+    parser: argparse.ArgumentParser,
+    *,
+    command: str,
+    argv: list[str] | None = None,
+    valid_keys: set[str] | None = None,
+    path_keys: set[str] | None = None,
+) -> argparse.Namespace:
+    """Parse config as defaults, then parse the full CLI so CLI always wins.
+
+    The previous pattern parsed CLI first and then mutated the namespace from a
+    config file, forcing each command to maintain an incomplete hand-written
+    list of CLI overrides.  This two-pass parser gives argparse its normal,
+    predictable precedence for every option, including future ones.
+    """
+    raw_argv = list(argv) if argv is not None else None
+    probe = argparse.ArgumentParser(add_help=False)
+    add_config_args(probe)
+    config_ns, _ = probe.parse_known_args(raw_argv)
+    keys = valid_keys if valid_keys is not None else namespace_keys(parser)
+    merged = config_values(
+        config_ns.config,
+        command=command,
+        profile=config_ns.profile,
+        valid_keys=keys,
+    )
+    defaults: dict[str, Any] = {}
     for key, value in merged.items():
         if path_keys is not None and key in path_keys and value is not None:
-            setattr(args, key, Path(value).expanduser())
+            defaults[key] = Path(value).expanduser()
             continue
-        setattr(args, key, _coerce_like(value, getattr(args, key, None)))
-    return args
+        current = parser.get_default(key)
+        defaults[key] = _coerce_like(value, current)
+    if defaults:
+        parser.set_defaults(**defaults)
+    return parser.parse_args(raw_argv)
 
 
 def namespace_keys(parser: argparse.ArgumentParser, extra: Mapping[str, Any] | None = None) -> set[str]:
