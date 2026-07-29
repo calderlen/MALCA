@@ -40,6 +40,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 - `march18_periodicity_pregate_gate_only.ipynb`: lightweight gate-only variant of the March 18 pregate benchmark.
 - `periodic_branch_simulation_benchmark.ipynb`: synthetic periodic-branch simulation benchmark.
 - `periodic_branch_trigger_mode_benchmark.ipynb`: trigger-mode comparison for periodic-branch simulations.
+- `period_arbitration_injection_recovery.ipynb`: current PDM/CE harmonic correction, LS diagnostics, long-period/event-consensus injection-recovery and null-calibration benchmark.
 - `periodicity_gate_injection_benchmark.ipynb`: periodicity gate injection benchmark.
 
 ### Review
@@ -47,6 +48,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 - `march18_paper_candidates.ipynb`: paper-focused March 18 reviewed-candidate audit, full feature missingness, separability tables, LC/CMD exports (canonical migrated paths via `malca.review.paper_candidates`).
 - `compare_db_to_brayden_candidates.ipynb`: compare a review database against Brayden candidates.
 - `dipper_review_label_separability.ipynb`: separability analysis for dipper review labels.
+- `july1_dipper_wavelet_atlas.ipynb`: live Review-DB dipper selection with irregular-sampling WWZ light-curve, time-scale, and global-power atlas exports.
 - `ltv_candidate_label_separability.ipynb`: separability analysis for LTV candidate review labels.
 - `ltv_review_inspection.ipynb`: LTV review database inspection.
 - `march18_other_eb_triage.ipynb`: March 18 `other`-pool EB triage.
@@ -67,6 +69,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 - `analyze_microlensing_results.ipynb`: comprehensive EDA for microlensing result products.
 - `bayes_output_analysis.ipynb`: EDA for Bayesian light-curve excursion outputs.
 - `contamination_analysis.ipynb`: GP residual analysis for a possible contaminating source.
+- `july1_triggered_dip_systematics.ipynb`: July 1 best-dip night, physical-distance, sky-pair, field, and camera systematics audit with stratified permutation nulls and optional raw event-window attribution proxies.
 - `march18_anomalous_fields.ipynb`: March 18 anomalous ASAS-SN fields audit.
 
 ## Generated Outputs
