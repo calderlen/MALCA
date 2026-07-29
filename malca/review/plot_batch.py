@@ -9,7 +9,9 @@ from datetime import datetime
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 import argparse
+import hashlib
 import json
+import os
 import shlex
 import sys
 
@@ -29,6 +31,9 @@ from malca.core.phase import resolve_phase_period
 from malca.stv.plot import plot_bayes_results, plot_phase_folded_lightcurve, BASELINE_FUNCTIONS
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_df, normalize_vsx_record
 from malca.io.table_io import read_feature_table, write_parquet_table
+from malca.products.candidates import coerce_strict_bool_series, select_passing_candidates, validate_candidate_ids
+from malca.products.feature_layers import expand_feature_layers
+from malca.products.stage_state import file_signature
 
 
 
@@ -67,53 +72,62 @@ def load_passing_candidates(
         filtered_path = Path(filtered_path)
         df = read_feature_table(filtered_path)
 
+    df = expand_feature_layers(df)
     df = normalize_vsx_df(df)
 
     # Filter to passing candidates
-    if require_failed_any_false and "failed_any" in df.columns:
-        df = df[~df["failed_any"]].copy()
-    elif require_failed_any_false:
-        print("Warning: 'failed_any' column not found, using all rows")
+    if require_failed_any_false:
+        df = select_passing_candidates(df, require_failed_col=True)
 
     # Include only rows where all required flags are True
     if require_flags:
         for flag_col in require_flags:
             if flag_col not in df.columns:
-                print(f"Warning: required flag column '{flag_col}' not found; skipping this requirement")
-                continue
-            df = df[df[flag_col].fillna(False)].copy()
+                raise ValueError(f"Required plot-selection flag is missing: {flag_col}")
+            df = df[coerce_strict_bool_series(df[flag_col], field_name=flag_col)].copy()
 
     # Exclude rows where any exclude flag is True
     if exclude_flags:
         for flag_col in exclude_flags:
             if flag_col not in df.columns:
-                print(f"Warning: exclude flag column '{flag_col}' not found; skipping this exclusion")
-                continue
-            df = df[~df[flag_col].fillna(False)].copy()
+                raise ValueError(f"Required exclusion flag is missing: {flag_col}")
+            df = df[~coerce_strict_bool_series(df[flag_col], field_name=flag_col)].copy()
 
     # Optional quantitative periodicity filters
     if min_lsp_power is not None:
         if "lsp_power" in df.columns:
-            df = df[df["lsp_power"].fillna(-np.inf) >= float(min_lsp_power)].copy()
+            values = pd.to_numeric(df["lsp_power"], errors="coerce")
+            df = df[values.fillna(-np.inf) >= float(min_lsp_power)].copy()
         else:
-            print("Warning: 'lsp_power' column not found; skipping --min-lsp-power")
+            raise ValueError("Requested --min-lsp-power but lsp_power is missing")
 
     if max_lsp_bootstrap_sig is not None:
         sig_col = "periodicity_bootstrap_sig" if "periodicity_bootstrap_sig" in df.columns else "lsp_bootstrap_sig"
         if sig_col in df.columns:
-            df = df[df[sig_col].fillna(np.inf) <= float(max_lsp_bootstrap_sig)].copy()
+            values = pd.to_numeric(df[sig_col], errors="coerce")
+            df = df[values.fillna(np.inf) <= float(max_lsp_bootstrap_sig)].copy()
         else:
-            print("Warning: no periodicity bootstrap significance column found; skipping --max-lsp-bootstrap-sig")
+            raise ValueError("Requested periodicity significance cut but no significance field is present")
 
     if min_periodicity_score is not None:
         if "periodicity_score" in df.columns:
-            df = df[df["periodicity_score"].fillna(-np.inf) >= float(min_periodicity_score)].copy()
+            values = pd.to_numeric(df["periodicity_score"], errors="coerce")
+            df = df[values.fillna(-np.inf) >= float(min_periodicity_score)].copy()
         else:
-            print("Warning: 'periodicity_score' column not found; skipping --min-periodicity-score")
+            raise ValueError("Requested --min-periodicity-score but periodicity_score is missing")
 
-    # Deduplicate by path
-    if "path" in df.columns:
-        df = df.drop_duplicates(subset=["path"])
+    if "candidate_id" not in df.columns:
+        raise ValueError("Plot input is missing canonical candidate_id")
+    df["candidate_id"] = validate_candidate_ids(df, key_col="candidate_id", require_unique=True)
+    lc_col = "lc_path" if "lc_path" in df.columns else "path" if "path" in df.columns else None
+    if lc_col is None:
+        raise ValueError("Plot input is missing canonical lc_path")
+    if bool(df[lc_col].isna().any()) or bool(df[lc_col].astype("string").str.strip().eq("").any()):
+        raise ValueError("Plot input contains blank/null light-curve paths")
+    normalized_paths = df[lc_col].astype("string").str.strip()
+    if bool(normalized_paths.duplicated(keep=False).any()):
+        examples = normalized_paths[normalized_paths.duplicated(keep=False)].drop_duplicates().head(5).tolist()
+        raise ValueError(f"Plot input contains duplicate light-curve paths: {examples}")
 
     if max_plots is not None:
         df = df.head(max_plots)
@@ -139,7 +153,7 @@ def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str, str |
         return (lc_path_str, out_path_str, False, "file not found", "", phase_out_path_str, False, "missing input file")
 
     try:
-        baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
+        baseline_func = BASELINE_FUNCTIONS[baseline]
         filtered_cams = plot_bayes_results(
             lc_path,
             out_path=out_path,
@@ -191,11 +205,73 @@ def _plot_single_candidate(args: tuple) -> tuple[str, str, bool, str, str, str |
 def _as_bool(v: object) -> bool:
     if isinstance(v, (bool, np.bool_)):
         return bool(v)
-    if isinstance(v, (int, np.integer, float, np.floating)):
+    if isinstance(v, (int, np.integer)):
         return bool(v)
+    if isinstance(v, (float, np.floating)):
+        return bool(v) if np.isfinite(float(v)) else False
     if isinstance(v, str):
         return v.strip().lower() in {"1", "true", "t", "yes", "y"}
     return False
+
+
+def _optional_bool(v: object) -> bool | None:
+    if v is None or v is pd.NA:
+        return None
+    if isinstance(v, (float, np.floating)) and not np.isfinite(float(v)):
+        return None
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)) and int(v) in {0, 1}:
+        return bool(v)
+    if isinstance(v, str):
+        normalized = v.strip().lower()
+        if normalized in {"1", "true", "t", "yes", "y"}:
+            return True
+        if normalized in {"0", "false", "f", "no", "n"}:
+            return False
+    return None
+
+
+def _candidate_filename_token(candidate_id: str, *, max_length: int = 120) -> str:
+    """Return a deterministic, collision-resistant filesystem token."""
+    raw = str(candidate_id).strip()
+    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in raw)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+    if not safe:
+        return f"candidate-{digest}"
+    if safe != raw or len(safe) > max_length:
+        safe = safe[: max(1, max_length - len(digest) - 1)].rstrip("._-") or "candidate"
+        return f"{safe}-{digest}"
+    return safe
+
+
+def _resolve_filtered_result(results_dir: Path) -> Path:
+    """Resolve one filtered product without filesystem-order ambiguity."""
+    canonical = results_dir / "lc_events_filtered.parquet"
+    if canonical.exists():
+        return canonical
+    candidates = sorted(set(results_dir.glob("*_filtered.parquet")) | set(results_dir.glob("*filtered*.parquet")))
+    if not candidates:
+        raise FileNotFoundError(f"No filtered results found in {results_dir}")
+    if len(candidates) > 1:
+        raise ValueError(
+            f"Multiple filtered products found in {results_dir}; pass --input explicitly: "
+            f"{[path.name for path in candidates]}"
+        )
+    return candidates[0]
+
+
+def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(
+            json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _candidate_bucket(row: pd.Series) -> str:
@@ -225,7 +301,7 @@ def plot_passing_candidates(
     max_lsp_bootstrap_sig: float | None = None,
     min_periodicity_score: float | None = None,
     max_plots: int | None = None,
-    baseline: str = "per_camera_gp",
+    baseline: str | None = None,
     baseline_kwargs: dict | None = None,
     skip_events: bool = False,
     plot_fits: bool = False,
@@ -243,6 +319,7 @@ def plot_passing_candidates(
     filter_bad_cameras: bool = True,
     bad_camera_scatter_ratio: float = BAD_CAMERA_SCATTER_RATIO_THRESHOLD,
     show_tqdm: bool = True,
+    allow_partial: bool = False,
 ) -> dict[str, object]:
     """
     Plot all candidates that passed filters.
@@ -300,6 +377,15 @@ def plot_passing_candidates(
 
     total_selected = len(df)
 
+    if baseline is None:
+        baseline = str((run_params or {}).get("baseline_func") or "").strip() or None
+    if baseline is None:
+        raise ValueError(
+            "Audit plots require the detection baseline from run_params or an explicit --baseline"
+        )
+    if baseline not in BASELINE_FUNCTIONS:
+        raise ValueError(f"Unknown detection baseline for plot replay: {baseline}")
+
     if df.empty:
         print("No passing candidates found")
         return {
@@ -332,12 +418,18 @@ def plot_passing_candidates(
     # Build work items
     work_items = []
     manifest_rows: list[dict[str, object]] = []
+    filename_tokens: set[str] = set()
     for _, row in df.iterrows():
         row_dict = normalize_vsx_record({k: row[k] for k in row.index})
-        lc_path = Path(row["path"])
-        asas_sn_id = lc_path.stem.split("-")[0]
+        lc_path = Path(row.get("lc_path") or row.get("path"))
+        candidate_id = str(row_dict["candidate_id"])
+        safe_candidate_id = _candidate_filename_token(candidate_id)
+        if safe_candidate_id in filename_tokens:
+            raise ValueError(f"Candidate filename token collision: {safe_candidate_id}")
+        filename_tokens.add(safe_candidate_id)
+        asas_sn_id = str(row_dict.get("asas_sn_id") or lc_path.stem)
         bucket = _candidate_bucket(row)
-        out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate.{format}"
+        out_path = bucket_dirs[bucket] / f"{safe_candidate_id}_candidate.{format}"
 
         phase_ready_raw = row.get("phase_plot_ready", False)
         phase_period_raw, _phase_source = resolve_phase_period(row_dict)
@@ -347,7 +439,7 @@ def plot_passing_candidates(
         except Exception:
             phase_period = np.nan
             phase_ready = False
-        phase_out_path = bucket_dirs[bucket] / f"{asas_sn_id}_candidate_phase.{format}" if phase_ready else None
+        phase_out_path = bucket_dirs[bucket] / f"{safe_candidate_id}_candidate_phase.{format}" if phase_ready else None
 
         # Build annotations from filter results
         annotations = {}
@@ -358,7 +450,8 @@ def plot_passing_candidates(
         if "ruwe" in row.index and pd.notna(row["ruwe"]):
             annotations["RUWE"] = f"{row['ruwe']:.2f}"
         if "catalog_match" in row.index:
-            annotations["periodic"] = "Yes" if row["catalog_match"] else "No"
+            catalog_match = _optional_bool(row["catalog_match"])
+            annotations["periodic"] = "Unknown" if catalog_match is None else ("Yes" if catalog_match else "No")
         if "periodicity_period" in row.index and pd.notna(row["periodicity_period"]):
             annotations["periodicity_period_d"] = f"{row['periodicity_period']:.4f}"
         elif "lsp_period" in row.index and pd.notna(row["lsp_period"]):
@@ -420,7 +513,7 @@ def plot_passing_candidates(
         ))
         manifest_rows.append(
             {
-                "candidate_id": row_dict.get("candidate_id", asas_sn_id),
+                "candidate_id": candidate_id,
                 "asas_sn_id": row_dict.get("asas_sn_id", asas_sn_id),
                 "path": str(lc_path),
                 "plot_bucket": bucket,
@@ -428,6 +521,32 @@ def plot_passing_candidates(
                 "phase_plot_ready": bool(phase_ready),
                 "phase_period_days": phase_period if phase_ready else np.nan,
                 "phase_plot_path": str(phase_out_path) if phase_out_path else "",
+                "input_signature_json": json.dumps(file_signature(lc_path, content_hash=True), sort_keys=True),
+                "plot_config_json": json.dumps(
+                    {
+                        "baseline": baseline,
+                        "baseline_kwargs": baseline_kwargs,
+                        "logbf_threshold_dip": logbf_threshold_dip,
+                        "logbf_threshold_jump": logbf_threshold_jump,
+                        "jd_offset": jd_offset,
+                        "clean_max_error_absolute": clean_max_error_absolute,
+                        "clean_max_error_sigma": clean_max_error_sigma,
+                        "skip_events": bool(skip_events),
+                        "plot_fits": bool(plot_fits),
+                        "format": str(format),
+                        "filter_bad_cameras": bool(filter_bad_cameras),
+                        "bad_camera_scatter_ratio": float(bad_camera_scatter_ratio),
+                        "phase_plot_ready": bool(phase_ready),
+                        "phase_period_days": phase_period if phase_ready else None,
+                        "detection_results_signature": (
+                            file_signature(detection_results_csv, content_hash=True)
+                            if detection_results_csv is not None else None
+                        ),
+                        "run_params": run_params or {},
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
             }
         )
 
@@ -509,6 +628,25 @@ def plot_passing_candidates(
         for bucket in ("dip", "jump", "both"):
             bucket_manifest = manifest_df[manifest_df["plot_bucket"] == bucket].copy()
             write_parquet_table(bucket_manifest, out_dir / f"manifest_{bucket}.parquet")
+        for record in manifest_df.to_dict("records"):
+            if not bool(record.get("plot_success")):
+                continue
+            plot_path = Path(str(record["plot_path"]))
+            provenance = {
+                "candidate_id": str(record["candidate_id"]),
+                "input_signature": json.loads(str(record["input_signature_json"])),
+                "plot_signature": file_signature(plot_path, content_hash=True),
+                "plot_config": json.loads(str(record["plot_config_json"])),
+                "plot_success": True,
+                "phase_plot_success": bool(record.get("phase_plot_success")),
+            }
+            phase_plot_path = Path(str(record.get("phase_plot_path") or ""))
+            if bool(record.get("phase_plot_success")) and str(phase_plot_path):
+                provenance["phase_plot_signature"] = file_signature(phase_plot_path, content_hash=True)
+            _write_json_atomic(
+                plot_path.with_suffix(plot_path.suffix + ".provenance.json"),
+                provenance,
+            )
 
     plotted_by_bucket: dict[str, int] = {"dip": 0, "jump": 0, "both": 0}
     if not manifest_df.empty:
@@ -516,7 +654,7 @@ def plot_passing_candidates(
         for bucket, count in bucket_counts.items():
             plotted_by_bucket[str(bucket)] = int(count)
 
-    return {
+    summary = {
         "total_selected": total_selected,
         "plotted": n_plotted,
         "failed": n_failed,
@@ -532,6 +670,12 @@ def plot_passing_candidates(
             "both": str(out_dir / "manifest_both.parquet"),
         },
     }
+    if (n_failed or n_phase_failed) and not allow_partial:
+        raise RuntimeError(
+            f"Plot batch incomplete: {n_failed} candidate plot failure(s), "
+            f"{n_phase_failed} phase plot failure(s). Manifests were written for diagnosis."
+        )
+    return summary
 
 
 def main():
@@ -610,8 +754,8 @@ Example usage:
         "--baseline",
         type=str,
         choices=list(BASELINE_FUNCTIONS.keys()),
-        default="per_camera_gp",
-        help="Baseline function to use (default: per_camera_gp)",
+        default=None,
+        help="Baseline function to use; defaults to the exact baseline in run_params.json",
     )
     parser.add_argument(
         "--skip-events",
@@ -632,14 +776,14 @@ Example usage:
     parser.add_argument(
         "--logbf-threshold-dip",
         type=float,
-        default=LOGBF_THRESHOLD_DIP,
-        help="Log BF threshold for dips (default: 5.0)",
+        default=None,
+        help="Override the detection-run dip log-BF threshold",
     )
     parser.add_argument(
         "--logbf-threshold-jump",
         type=float,
-        default=LOGBF_THRESHOLD_JUMP,
-        help="Log BF threshold for jumps (default: 5.0)",
+        default=None,
+        help="Override the detection-run jump log-BF threshold",
     )
     parser.add_argument(
         "--jd-offset",
@@ -699,6 +843,11 @@ Example usage:
         help="Print detailed progress",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Return success despite individual plotting failures (diagnostic use only)",
+    )
     # Bad camera filtering
     parser.add_argument(
         "--no-filter-bad-cameras",
@@ -723,16 +872,7 @@ Example usage:
         detect_run = args.detect_run.expanduser()
         results_dir = detect_run / "results"
 
-        # Look for filtered results
-        candidates = (
-            list(results_dir.glob("*_filtered.parquet")) +
-            list(results_dir.glob("*filtered*.parquet"))
-        )
-
-        if not candidates:
-            raise FileNotFoundError(f"No filtered results found in {results_dir}")
-
-        input_path = candidates[0]
+        input_path = _resolve_filtered_result(results_dir)
         print(f"Using filtered results: {input_path}")
     else:
         raise ValueError("Must specify either --input or --detect-run")
@@ -745,7 +885,44 @@ Example usage:
     else:
         out_dir = Path("plots/candidates")
 
-    # Build baseline kwargs
+    # Load the detection configuration before resolving the replay baseline.
+    run_params = None
+    if args.detect_run:
+        run_params_path = args.detect_run.expanduser() / "run_params.json"
+        if run_params_path.exists():
+            try:
+                with open(run_params_path) as f:
+                    run_params = json.load(f)
+                print(f"Loaded run params from: {run_params_path}")
+            except Exception as e:
+                raise ValueError(f"Could not load detection run params from {run_params_path}: {e}") from e
+
+    effective_baseline = args.baseline or str((run_params or {}).get("baseline_func") or "").strip() or None
+    if effective_baseline is not None and effective_baseline not in BASELINE_FUNCTIONS:
+        raise ValueError(f"Unknown detection baseline in run parameters: {effective_baseline}")
+    args.baseline = effective_baseline
+
+    effective_run_params = dict(run_params or {})
+    if args.logbf_threshold_dip is None:
+        stored_dip_threshold = effective_run_params.get("logbf_threshold_dip")
+        args.logbf_threshold_dip = float(
+            LOGBF_THRESHOLD_DIP if stored_dip_threshold is None else stored_dip_threshold
+        )
+    else:
+        effective_run_params["logbf_threshold_dip"] = float(args.logbf_threshold_dip)
+    if args.logbf_threshold_jump is None:
+        stored_jump_threshold = effective_run_params.get("logbf_threshold_jump")
+        args.logbf_threshold_jump = float(
+            LOGBF_THRESHOLD_JUMP if stored_jump_threshold is None else stored_jump_threshold
+        )
+    else:
+        effective_run_params["logbf_threshold_jump"] = float(args.logbf_threshold_jump)
+    if args.baseline is not None:
+        effective_run_params["baseline_func"] = args.baseline
+    run_params = effective_run_params or None
+
+    # Build explicit overrides; all unspecified hyperparameters are replayed
+    # from run_params inside plot_bayes_results.
     baseline_kwargs = {}
     gp_params = {
         "sigma": args.gp_sigma,
@@ -760,21 +937,10 @@ Example usage:
         "min_floor_points": args.gp_min_floor_points,
     }
     gp_params = {k: v for k, v in gp_params.items() if v is not None}
-    if gp_params and args.baseline.startswith("per_camera_gp"):
+    if gp_params:
+        if args.baseline not in {"per_camera_gp", "gp", "gp_masked"}:
+            raise ValueError("GP parameters require an explicit GP detection baseline")
         baseline_kwargs.update(gp_params)
-
-    # Load run_params.json if available from detect_run
-    run_params = None
-    if args.detect_run:
-
-        run_params_path = args.detect_run.expanduser() / "run_params.json"
-        if run_params_path.exists():
-            try:
-                with open(run_params_path) as f:
-                    run_params = json.load(f)
-                print(f"Loaded run params from: {run_params_path}")
-            except Exception as e:
-                print(f"Warning: Could not load run_params.json: {e}")
 
     # Plot
     summary = plot_passing_candidates(
@@ -805,6 +971,7 @@ Example usage:
         filter_bad_cameras=args.filter_bad_cameras,
         bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
         show_tqdm=not args.no_progress,
+        allow_partial=bool(args.allow_partial),
     )
 
     # Write run config next to generated plots

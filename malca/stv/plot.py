@@ -22,8 +22,10 @@ import pandas as pd
 
 from malca.core.baseline import (
     global_median_baseline,
+    phase_template_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
 from malca.config import (
     CLEAN_LC_MAX_ERROR_ABSOLUTE,
@@ -52,12 +54,13 @@ apply_publication_rcparams(plt)
 from malca.core.phase import camera_labels
 from malca.review.metadata import REVIEW_METADATA_FIELDS, normalize_vsx_record
 from malca.io.table_io import read_feature_table
+from malca.products.feature_layers import expand_feature_layers, is_layer_first_frame
 from malca.io.lightcurve_io import (
     load_lightcurve_df as _canonical_load_lightcurve_df,
     read_asassn_dat as _read_asassn_dat,
     to_asassn_algorithm_frame,
 )
-from malca.core.utils import clean_lc
+from malca.core.utils import clean_lc, filter_bad_cameras as filter_bad_camera_observations
 from malca.core.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
 
 read_skypatrol_csv = _read_skypatrol_csv
@@ -221,6 +224,7 @@ def plot_phase_folded_lightcurve(
     df["camera_label"] = camera_labels(df)
 
     asas_sn_id = csv_path.stem.split("-")[0]
+
     with plt.rc_context(PUBLICATION_STYLE):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         phase_plot = plot_phase_panel(
@@ -296,9 +300,14 @@ def load_detection_results(table_path):
         raise FileNotFoundError(f"detection_results file not found: {table_path}")
 
     df = read_feature_table(table_path)
+    if is_layer_first_frame(df):
+        df = expand_feature_layers(df)
     df = df.fillna("")
     df = df.apply(lambda x: x.astype(str).str.strip() if x.dtype == "object" else x)
-    path_col = "DAT_Path" if "DAT_Path" in df.columns else "path" if "path" in df.columns else None
+    path_col = next(
+        (column for column in ("lc_path", "path", "DAT_Path") if column in df.columns),
+        None,
+    )
     if path_col is not None:
         df["Match_ID"] = df[path_col].apply(lambda p: Path(str(p)).stem if p else "")
     return df
@@ -314,23 +323,58 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
     df = load_detection_results(csv_path)
     if df is None:
         return None
-    matches = pd.DataFrame()
+    matches = pd.DataFrame(columns=df.columns)
 
-    if asassn_id:
-        matches = df[df["Match_ID"] == str(asassn_id).strip()]
-    if matches.empty and dat_path:
-        matches = df[df["DAT_Path"] == str(dat_path).strip()]
-    if matches.empty and source_name:
-        matches = df[df["Source"].str.lower() == str(source_name).strip().lower()]
+    # An exact path is the strongest identity available. Identifier fallback
+    # is intentionally later because alternate reductions can share a stem.
+    if dat_path:
+        requested_path = str(dat_path).strip()
+        for column in ("lc_path", "path", "DAT_Path"):
+            if column not in df.columns:
+                continue
+            path_matches = df[column].astype("string").str.strip().eq(requested_path).fillna(False)
+            if bool(path_matches.any()):
+                matches = df.loc[path_matches]
+                break
+    if matches.empty and asassn_id:
+        requested_id = str(asassn_id).strip()
+        for column in ("Match_ID", "asas_sn_id"):
+            if column not in df.columns:
+                continue
+            id_matches = df[column].astype("string").str.strip().eq(requested_id).fillna(False)
+            if bool(id_matches.any()):
+                matches = df.loc[id_matches]
+                break
+    if matches.empty and source_name and "Source" in df.columns:
+        source_matches = (
+            df["Source"].astype("string").str.strip().str.lower()
+            .eq(str(source_name).strip().lower())
+            .fillna(False)
+        )
+        matches = df.loc[source_matches]
 
     if matches.empty:
         return None
 
-    row = matches.iloc[0]
+    row = matches.iloc[-1]
+    matched_path = next(
+        (
+            row.get(column)
+            for column in ("lc_path", "path", "DAT_Path")
+            if column in row.index and not _is_missing_scalar(row.get(column))
+        ),
+        None,
+    )
+    stored_asas_sn_id = row.get("asas_sn_id")
+    source_id = (
+        row.get("Match_ID")
+        if _is_missing_scalar(stored_asas_sn_id)
+        else stored_asas_sn_id
+    )
     return {
-        "dat_path": row.get("DAT_Path"),
+        "dat_path": matched_path,
         "source": row.get("Source"),
-        "source_id": row.get("Match_ID"),
+        "source_id": source_id,
         "category": row.get("Category"),
         "vsx_class": row.get("VSX_Class"),
     }
@@ -389,17 +433,246 @@ BASELINE_FUNCTIONS = {
     "global_median": global_median_baseline,
     "per_camera_median": per_camera_median_baseline,
     "per_camera_gp": per_camera_gp_baseline,
+    "gp": per_camera_gp_baseline,
+    "gp_masked": per_camera_gp_baseline_masked,
+    "phase_template": phase_template_baseline,
 }
 
 PER_CAMERA_BASELINES = {
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+    phase_template_baseline,
 }
 
 PER_CAMERA_BASELINE_NAMES = {
     "per_camera_median",
     "per_camera_gp",
+    "gp",
+    "gp_masked",
+    "phase_template",
 }
+
+
+def _is_missing_scalar(value: object) -> bool:
+    """Return whether a table/config scalar carries no usable value."""
+    if value is None or value is pd.NA:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
+def _optional_bool(value: object, *, field_name: str) -> bool | None:
+    """Parse a persisted optional boolean without truthifying non-empty strings."""
+    if _is_missing_scalar(value):
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and int(value) in {0, 1}:
+        return bool(value)
+    if isinstance(value, (float, np.floating)) and np.isfinite(float(value)) and float(value) in {0.0, 1.0}:
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "t", "1", "yes", "y"}:
+            return True
+        if lowered in {"false", "f", "0", "no", "n"}:
+            return False
+    raise ValueError(f"Invalid boolean value for {field_name}: {value!r}")
+
+
+def _match_detection_result_row(
+    stored_results: pd.DataFrame,
+    csv_path: Path,
+    *,
+    asas_sn_id: str | None = None,
+) -> pd.Series | None:
+    """Match a persisted result, preferring the exact LC path over identifiers."""
+    if stored_results is None or stored_results.empty:
+        return None
+
+    requested_path = str(csv_path).strip()
+    for column in ("lc_path", "path", "DAT_Path"):
+        if column not in stored_results.columns:
+            continue
+        values = stored_results[column].astype("string").str.strip()
+        matches = values.eq(requested_path).fillna(False)
+        if bool(matches.any()):
+            return stored_results.loc[matches].iloc[-1]
+
+    # Identifier matching is deliberately a fallback. Two files can share an
+    # ASAS-SN identifier (for example, alternate reductions), so it must never
+    # override an exact-path row.
+    stem = Path(csv_path).stem
+    identifier_checks: list[tuple[str, str]] = []
+    if "Match_ID" in stored_results.columns:
+        identifier_checks.append(("Match_ID", stem))
+    if asas_sn_id and "asas_sn_id" in stored_results.columns:
+        identifier_checks.append(("asas_sn_id", str(asas_sn_id).strip()))
+    for column, requested_id in identifier_checks:
+        values = stored_results[column].astype("string").str.strip()
+        matches = values.eq(requested_id).fillna(False)
+        if bool(matches.any()):
+            return stored_results.loc[matches].iloc[-1]
+    return None
+
+
+def _resolve_replay_baseline(
+    baseline_func,
+    baseline_name: str | None,
+    baseline_kwargs: dict | None,
+    stored_row: pd.Series | dict | None,
+):
+    """Resolve the candidate-level production baseline and its row-level inputs."""
+    kwargs = dict(baseline_kwargs or {})
+    source = ""
+    if stored_row is not None:
+        source_value = stored_row.get("baseline_source")
+        baseline_value = stored_row.get("baseline_func")
+        source = "" if _is_missing_scalar(source_value) else str(source_value).strip().lower()
+        stored_baseline = "" if _is_missing_scalar(baseline_value) else str(baseline_value).strip().lower()
+        if "phase_template" in source or stored_baseline == "phase_template":
+            baseline_func = phase_template_baseline
+            baseline_name = "phase_template"
+
+    if baseline_func is phase_template_baseline or baseline_name == "phase_template":
+        # The production periodic branch uses this exact row-level period. A
+        # missing/invalid value intentionally reproduces its median fallback.
+        if stored_row is not None:
+            period_value = stored_row.get("pre_periodicity_selected_period")
+            try:
+                kwargs["period_days"] = float(period_value)
+            except (TypeError, ValueError):
+                kwargs["period_days"] = np.nan
+    return baseline_func, baseline_name, kwargs
+
+
+def _build_replay_score_kwargs(
+    run_params: dict | None,
+    *,
+    logbf_threshold_dip: float,
+    logbf_threshold_jump: float,
+    filter_bad_cameras: bool,
+    bad_camera_scatter_ratio: float,
+) -> dict[str, object]:
+    """Build the exact event-scoring arguments persisted by the detection run."""
+    params = dict(run_params or {})
+    score_kwargs: dict[str, object] = {
+        "logbf_threshold_dip": params.get("logbf_threshold_dip", logbf_threshold_dip),
+        "logbf_threshold_jump": params.get("logbf_threshold_jump", logbf_threshold_jump),
+        "compute_event_prob": True,
+        "filter_residual_bad_cameras_enabled": filter_bad_cameras,
+        "bad_camera_scatter_ratio": bad_camera_scatter_ratio,
+    }
+    for key in (
+        "p_points",
+        "mag_points",
+        "trigger_mode",
+        "significance_threshold",
+        "run_min_points",
+        "max_gap_points",
+        "run_max_gap_days",
+        "run_min_duration_days",
+        "p_min_dip",
+        "p_max_dip",
+        "p_min_jump",
+        "p_max_jump",
+    ):
+        if key in params and params[key] is not None:
+            score_kwargs[key] = params[key]
+    if params.get("run_max_gap_points") is not None:
+        score_kwargs["max_gap_points"] = params["run_max_gap_points"]
+
+    if "compute_event_prob" in params:
+        parsed = _optional_bool(params["compute_event_prob"], field_name="compute_event_prob")
+        if parsed is not None:
+            score_kwargs["compute_event_prob"] = parsed
+    elif "no_event_prob" in params:
+        parsed = _optional_bool(params["no_event_prob"], field_name="no_event_prob")
+        if parsed is not None:
+            score_kwargs["compute_event_prob"] = not parsed
+
+    mag_points = int(score_kwargs.get("mag_points", 12))
+    if mag_points <= 0:
+        raise ValueError(f"mag_points must be positive for replay, got {mag_points}")
+    for kind in ("dip", "jump"):
+        direct_key = f"mag_grid_{kind}"
+        if direct_key in params and not _is_missing_scalar(params[direct_key]):
+            grid = np.asarray(params[direct_key], dtype=float)
+            if grid.ndim != 1 or grid.size == 0 or not np.isfinite(grid).all():
+                raise ValueError(f"Invalid configured {direct_key}: {params[direct_key]!r}")
+            score_kwargs[direct_key] = grid
+            continue
+        lower = params.get(f"mag_min_{kind}")
+        upper = params.get(f"mag_max_{kind}")
+        if not _is_missing_scalar(lower) and not _is_missing_scalar(upper):
+            score_kwargs[direct_key] = np.linspace(float(lower), float(upper), mag_points)
+    return score_kwargs
+
+
+def compare_detection_replay(
+    stored: pd.Series | dict,
+    replay: dict,
+    *,
+    atol: float = 1e-6,
+) -> list[str]:
+    """Return material differences between a stored event row and plot replay."""
+    mismatches: list[str] = []
+    for kind in ("dip", "jump"):
+        stored_sig = stored.get(f"{kind}_significant")
+        replay_kind = replay.get(kind) if isinstance(replay, dict) else None
+        replay_kind = replay_kind if isinstance(replay_kind, dict) else {}
+        replay_sig = replay_kind.get("significant")
+        stored_sig_available = not _is_missing_scalar(stored_sig)
+        replay_sig_available = not _is_missing_scalar(replay_sig)
+        if stored_sig_available and not replay_sig_available:
+            mismatches.append(f"{kind}_significant_replay_unavailable")
+        elif replay_sig_available and not stored_sig_available:
+            mismatches.append(f"{kind}_significant_stored_unavailable")
+        elif stored_sig_available and replay_sig_available:
+            try:
+                stored_bool = _optional_bool(stored_sig, field_name=f"{kind}_significant")
+                replay_bool = _optional_bool(replay_sig, field_name=f"replay.{kind}.significant")
+                if stored_bool != replay_bool:
+                    mismatches.append(f"{kind}_significant")
+            except ValueError:
+                mismatches.append(f"{kind}_significant_invalid")
+
+        stored_delta = stored.get(f"{kind}_best_delta_mag")
+        if _is_missing_scalar(stored_delta):
+            stored_delta = stored.get(f"{kind}_best_mag_event")
+        replay_delta = replay_kind.get("best_delta_mag")
+        if _is_missing_scalar(replay_delta):
+            replay_delta = replay_kind.get("best_mag_event")
+        stored_delta_available = not _is_missing_scalar(stored_delta)
+        replay_delta_available = not _is_missing_scalar(replay_delta)
+        if stored_delta_available and not replay_delta_available:
+            mismatches.append(f"{kind}_best_delta_mag_replay_unavailable")
+            continue
+        if replay_delta_available and not stored_delta_available:
+            mismatches.append(f"{kind}_best_delta_mag_stored_unavailable")
+            continue
+        if not stored_delta_available and not replay_delta_available:
+            continue
+        try:
+            stored_float = float(stored_delta)
+            replay_float = float(replay_delta)
+            if not np.isfinite(stored_float) and not np.isfinite(replay_float):
+                continue
+            if not np.isfinite(stored_float):
+                mismatches.append(f"{kind}_best_delta_mag_stored_unavailable")
+            elif not np.isfinite(replay_float):
+                mismatches.append(f"{kind}_best_delta_mag_replay_unavailable")
+            elif not np.isclose(stored_float, replay_float, atol=atol, rtol=1e-6):
+                mismatches.append(f"{kind}_best_delta_mag")
+        except (TypeError, ValueError):
+            mismatches.append(f"{kind}_best_delta_mag_invalid")
+    return mismatches
 
 
 def plot_bayes_results(
@@ -441,7 +714,7 @@ def plot_bayes_results(
                       
     df, filtered_cameras = load_lightcurve_df(
         csv_path,
-        filter_bad_cameras_enabled=filter_bad_cameras,
+        filter_bad_cameras_enabled=False,
         bad_camera_scatter_ratio=bad_camera_scatter_ratio,
         return_filtered_info=True,
     )
@@ -452,25 +725,87 @@ def plot_bayes_results(
     )
     if df.empty:
         raise ValueError(f"Light curve file is empty: {csv_path.name}")
+    if filter_bad_cameras and "camera#" in df.columns:
+        df, pre_baseline_bad = filter_bad_camera_observations(
+            df,
+            lc_path=str(csv_path),
+            filter_scatter=False,
+            filter_offset=False,
+            filter_catastrophic=True,
+            scatter_ratio_threshold=bad_camera_scatter_ratio,
+        )
+        filtered_cameras = set(filtered_cameras or set()) | set(pre_baseline_bad)
 
 
     asas_sn_id = csv_path.stem.split("-")[0]
+
+    # Load the persisted candidate row before resolving the baseline: a single
+    # run can contain both the stochastic branch and row-level phase-template
+    # branch, while run_params.json records only the run-wide default.
+    replay_results_path = results_csv if results_csv is not None else detection_results_csv
+    stored_result_row: pd.Series | None = None
+    if not skip_events and replay_results_path is not None:
+        replay_path = Path(replay_results_path)
+        if not replay_path.exists():
+            annotations = dict(annotations or {})
+            annotations["replay_unavailable"] = f"stored results file not found: {replay_path}"
+        else:
+            try:
+                stored_results = load_detection_results(replay_path)
+                stored_result_row = _match_detection_result_row(
+                    stored_results,
+                    csv_path,
+                    asas_sn_id=asas_sn_id,
+                )
+                if stored_result_row is None:
+                    annotations = dict(annotations or {})
+                    annotations["replay_unavailable"] = "no stored result row matched this light-curve path or identifier"
+            except Exception as exc:
+                annotations = dict(annotations or {})
+                annotations["replay_unavailable"] = f"could not read stored result row ({type(exc).__name__}: {exc})"
     
                                                                    
     baseline_name = None
     if baseline_func is None:
-        baseline_func = per_camera_gp_baseline
-    if baseline_kwargs is None:
-        baseline_kwargs = {}
+        requested_baseline = None
+        if run_params:
+            requested_baseline = run_params.get("baseline_func", run_params.get("baseline"))
+        baseline_func = BASELINE_FUNCTIONS.get(str(requested_baseline), per_camera_gp_baseline_masked)
+    baseline_kwargs = dict(baseline_kwargs or {})
+    if run_params:
+        for source_key, target_key in (
+            ("baseline_s0", "S0"),
+            ("baseline_w0", "w0"),
+            ("baseline_q", "q"),
+            ("baseline_jitter", "jitter"),
+            ("baseline_sigma_floor", "sigma_floor"),
+        ):
+            if source_key in run_params and run_params[source_key] is not None:
+                baseline_kwargs.setdefault(target_key, run_params[source_key])
     # allow alias strings for baseline selection
     if isinstance(baseline_func, str):
         baseline_name = baseline_func
         baseline_func = BASELINE_FUNCTIONS.get(baseline_func, per_camera_gp_baseline)
+    if baseline_func is per_camera_gp_baseline_masked and run_params:
+        for key in (
+            "allow_cross_band_consensus",
+            "cross_band_min_overlap_points",
+            "cross_band_min_overlap_days",
+            "cross_band_clip_sigma",
+        ):
+            if key in run_params and run_params[key] is not None:
+                baseline_kwargs.setdefault(key, run_params[key])
     if baseline_name is None:
         for name, func in BASELINE_FUNCTIONS.items():
             if func is baseline_func:
                 baseline_name = name
                 break
+    baseline_func, baseline_name, baseline_kwargs = _resolve_replay_baseline(
+        baseline_func,
+        baseline_name,
+        baseline_kwargs,
+        stored_result_row,
+    )
     per_camera_baseline = (
         baseline_func in PER_CAMERA_BASELINES
         or (baseline_name in PER_CAMERA_BASELINE_NAMES)
@@ -479,37 +814,45 @@ def plot_bayes_results(
     print(f"Analyzing {asas_sn_id}...")
     
                                              
-    df_g = df[df["v_g_band"] == 0].copy()
-    df_v = df[df["v_g_band"] == 1].copy()
-    
+    combined_result = None
     if skip_events:
         empty_res = {"significant": False, "run_summaries": [], "n_runs": 0}
         band_results = {0: {"dip": empty_res, "jump": empty_res}, 1: {"dip": empty_res, "jump": empty_res}}
+        shared_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
     else:
-        # For GP baselines, ensure add_sigma_eff_col is enabled for sigma_eff computation
-        if baseline_func is per_camera_gp_baseline:
+        # Replay the production decision on the combined, cleaned light curve.
+        # Splitting bands here used to produce figures that could not reproduce
+        # the stored candidate-level event decision.
+        if baseline_func in {per_camera_gp_baseline, per_camera_gp_baseline_masked}:
             baseline_kwargs.setdefault("add_sigma_eff_col", True)
-        
-        res_g = score_lightcurve(
-            df_g,
-            baseline_func=baseline_func,
-            baseline_kwargs=baseline_kwargs,
-            logbf_threshold_dip=logbf_threshold_dip,
-            logbf_threshold_jump=logbf_threshold_jump,
-            compute_event_prob=True,
-        ) if not df_g.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
-        
-        res_v = score_lightcurve(
-            df_v,
-            baseline_func=baseline_func,
-            baseline_kwargs=baseline_kwargs,
-            logbf_threshold_dip=logbf_threshold_dip,
-            logbf_threshold_jump=logbf_threshold_jump,
-            compute_event_prob=True,
-        ) if not df_v.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
 
-        
-        band_results = {0: res_g, 1: res_v}
+        score_kwargs = _build_replay_score_kwargs(
+            run_params,
+            logbf_threshold_dip=logbf_threshold_dip,
+            logbf_threshold_jump=logbf_threshold_jump,
+            filter_bad_cameras=filter_bad_cameras,
+            bad_camera_scatter_ratio=bad_camera_scatter_ratio,
+        )
+
+        combined_result = score_lightcurve(
+            df,
+            baseline_func=baseline_func,
+            baseline_kwargs=baseline_kwargs,
+            **score_kwargs,
+        )
+        df = combined_result["df"].copy()
+        shared_base = combined_result.get("df_base")
+        replay_payload = {"dip": combined_result["dip"], "jump": combined_result["jump"]}
+        band_results = {0: replay_payload, 1: replay_payload}
+        filtered_cameras = set(filtered_cameras or set()) | set(
+            combined_result.get("bad_cameras_filtered", set()) or set()
+        )
+
+        if stored_result_row is not None:
+            mismatches = compare_detection_replay(stored_result_row, replay_payload)
+            if mismatches:
+                annotations = dict(annotations or {})
+                annotations["replay_warning"] = ", ".join(mismatches)
     
                                
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
@@ -536,19 +879,24 @@ def plot_bayes_results(
     camera_ids = sorted(df["camera_label"].dropna().unique())
     camera_colors = {cam: _stable_camera_color(cam) for cam in camera_ids}
 
-    # Compute baselines and residuals for each band
+    # Use the exact baseline frame used for event replay.
+    if shared_base is not None:
+        if len(shared_base) != len(df):
+            raise RuntimeError("Plot replay baseline is not aligned with the prepared light curve")
+        shared_base = shared_base.reset_index(drop=True)
+        df = df.reset_index(drop=True)
+        df["baseline"] = pd.to_numeric(shared_base["baseline"], errors="coerce")
+        df["resid"] = df["mag"] - df["baseline"]
+
+    # Split only for rendering after the combined scientific decision is fixed.
     band_dfs = {}
     all_resids = []
     for band in bands:
         band_df = df[df["v_g_band"] == band].copy()
         if band_df.empty:
             continue
-        if baseline_func:
-            band_df_baseline = baseline_func(band_df, **baseline_kwargs)
-            if "baseline" in band_df_baseline.columns:
-                band_df["baseline"] = band_df_baseline["baseline"]
-                band_df["resid"] = band_df["mag"] - band_df["baseline"]
-                all_resids.extend(band_df["resid"].dropna().tolist())
+        if "resid" in band_df.columns:
+            all_resids.extend(band_df["resid"].dropna().tolist())
         band_dfs[band] = band_df
 
     # Compute robust 3-sigma threshold from all residuals
@@ -932,17 +1280,13 @@ def plot_bayes_results(
     title_parts.append(jd_label)
 
     if not skip_events:
-        g_dip = band_results[0]["dip"]
-        g_jump = band_results[0]["jump"]
-        v_dip = band_results[1]["dip"]
-        v_jump = band_results[1]["jump"]
+        combined_dip = band_results[0]["dip"]
+        combined_jump = band_results[0]["jump"]
 
-        if g_dip["significant"] or v_dip["significant"]:
-            total_dips = g_dip.get("n_runs", 0) + v_dip.get("n_runs", 0)
-            title_parts.append(f"Dips: {total_dips} runs (g:{g_dip.get('n_runs', 0)}, V:{v_dip.get('n_runs', 0)})")
-        if g_jump["significant"] or v_jump["significant"]:
-            total_jumps = g_jump.get("n_runs", 0) + v_jump.get("n_runs", 0)
-            title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
+        if combined_dip["significant"]:
+            title_parts.append(f"Dips: {combined_dip.get('n_runs', 0)} combined-band runs")
+        if combined_jump["significant"]:
+            title_parts.append(f"Jumps: {combined_jump.get('n_runs', 0)} combined-band runs")
 
     fig.suptitle(" – ".join(title_parts), fontsize=14)
 
@@ -973,6 +1317,10 @@ def plot_bayes_results(
 
     # Scores and filter results from annotations
     if annotations:
+        if annotations.get("replay_unavailable") is not None:
+            info_lines.append(f"REPLAY UNAVAILABLE: {annotations['replay_unavailable']}")
+        if annotations.get("replay_warning") is not None:
+            info_lines.append(f"REPLAY MISMATCH: {annotations['replay_warning']}")
         # Dipper/jumper scores
         if annotations.get("dipper_score") is not None:
             info_lines.append(f"Dipper score: {annotations['dipper_score']}")
@@ -1058,6 +1406,97 @@ def plot_bayes_results(
     if return_filtered_cameras:
         return filtered_cameras
     return fig
+
+
+def _prepare_results_mode_input(
+    results_path: Path,
+    *,
+    path_col: str,
+    only_significant: bool,
+) -> pd.DataFrame:
+    """Apply results-mode CLI selection while preserving the complete rows."""
+    df = read_feature_table(Path(results_path))
+    if is_layer_first_frame(df):
+        df = expand_feature_layers(df)
+
+    effective_path_col = str(path_col)
+    if effective_path_col not in df.columns:
+        # Canonical products use lc_path; keep the historical default usable.
+        if effective_path_col == "path" and "lc_path" in df.columns:
+            effective_path_col = "lc_path"
+        else:
+            raise KeyError(f"Missing '{path_col}' column in {results_path}")
+
+    if only_significant:
+        significance_columns = [
+            column for column in ("dip_significant", "jump_significant") if column in df.columns
+        ]
+        if not significance_columns:
+            raise KeyError(
+                "--only-significant requires dip_significant and/or jump_significant in the results table"
+            )
+        significant = pd.Series(False, index=df.index, dtype=bool)
+        for column in significance_columns:
+            parsed = df[column].map(
+                lambda value: _optional_bool(value, field_name=column)
+            )
+            significant |= parsed.eq(True).fillna(False)
+        df = df.loc[significant].copy()
+    else:
+        df = df.copy()
+
+    # plot_passing_candidates consumes canonical lc_path. Always overwrite it
+    # so an explicit --path-col cannot be shadowed by a stale existing column.
+    df["lc_path"] = df[effective_path_col]
+    return df
+
+
+def _write_plot_log(
+    args: argparse.Namespace,
+    *,
+    gp_kwargs: dict[str, object],
+    total_plots: int,
+    summary: dict[str, object] | None = None,
+) -> None:
+    """Write the detect-run plot log on every successful CLI exit path."""
+    if not args.detect_run:
+        return
+    detect_run = Path(args.detect_run).expanduser()
+    plot_log_file = detect_run / "plot_log.json"
+    orig_argv = getattr(sys, "orig_argv", None)
+    cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+    plot_log: dict[str, object] = {
+        "timestamp": datetime.now().isoformat(),
+        "command": cmd,
+        "results_file": str(args.results) if args.results else None,
+        "output_dir": str(args.out_dir),
+        "plot_params": {
+            "baseline": args.baseline,
+            "logbf_threshold_dip": args.logbf_threshold_dip,
+            "logbf_threshold_jump": args.logbf_threshold_jump,
+            "skip_events": args.skip_events,
+            "plot_fits": args.plot_fits,
+            "format": args.format,
+            "only_significant": args.only_significant,
+            "path_col": args.path_col,
+            "jd_offset": args.jd_offset,
+            "clean_max_error_absolute": args.clean_max_error_absolute,
+            "clean_max_error_sigma": args.clean_max_error_sigma,
+        },
+        "results": {
+            "total_plots": int(total_plots),
+            "max_plots_limit": args.max_plots,
+        },
+    }
+    if gp_kwargs:
+        plot_log["plot_params"]["gp_params"] = gp_kwargs
+    if summary is not None:
+        plot_log["results"]["batch_summary"] = summary
+    plot_log_file.parent.mkdir(parents=True, exist_ok=True)
+    plot_log_file.write_text(
+        json.dumps(plot_log, indent=2, default=str) + "\n",
+        encoding="utf-8",
+    )
 
 
 def main():
@@ -1149,20 +1588,20 @@ def main():
         "--baseline",
         type=str,
         choices=list(BASELINE_FUNCTIONS.keys()),
-        default="per_camera_gp",
-        help="Baseline function to use",
+        default=None,
+        help="Override the detection baseline (otherwise read from --detect-run)",
     )
     g_baseline.add_argument(
         "--logbf-threshold-dip",
         type=float,
-        default=5.0,
-        help="Log BF threshold for dips",
+        default=None,
+        help="Override the detection-run dip log-BF threshold",
     )
     g_baseline.add_argument(
         "--logbf-threshold-jump",
         type=float,
-        default=5.0,
-        help="Log BF threshold for jumps",
+        default=None,
+        help="Override the detection-run jump log-BF threshold",
     )
     g_baseline.add_argument(
         "--skip-events",
@@ -1228,21 +1667,33 @@ def main():
 
     args = parser.parse_args()
 
+    run_params: dict = {}
+
     # Handle --detect-run for events and output directory
     if args.detect_run:
         detect_run = args.detect_run.expanduser()
 
+        run_params_path = detect_run / "run_params.json"
+        if not run_params_path.exists():
+            raise FileNotFoundError(
+                f"Detection run is missing run_params.json required for exact plot replay: {run_params_path}"
+            )
+        try:
+            with run_params_path.open() as handle:
+                loaded_params = json.load(handle)
+        except Exception as exc:
+            raise ValueError(f"Could not read detection run parameters from {run_params_path}: {exc}") from exc
+        if not isinstance(loaded_params, dict):
+            raise ValueError(f"Detection run parameters are not a JSON object: {run_params_path}")
+        run_params = dict(loaded_params)
+
         # Set events path if not explicitly provided
         if not args.results:
             results_dir = detect_run / "results"
-            # Look for filtered results first, then raw results
-            candidates = (
-                list(results_dir.glob("*filtered.parquet")) +
-                list(results_dir.glob("*events_results.parquet"))
-            )
-            if candidates:
-                args.results = candidates[0]
-                print(f"Using results from: {args.results}")
+            from malca.review.plot_batch import _resolve_filtered_result
+
+            args.results = _resolve_filtered_result(results_dir)
+            print(f"Using results from: {args.results}")
 
         # Set out_dir if not explicitly provided
         if not args.out_dir:
@@ -1251,6 +1702,27 @@ def main():
     # Validate that we have an output directory
     if not args.out_dir:
         raise ValueError("Must specify either --output-dir or --detect-run")
+
+    effective_baseline = args.baseline or str(run_params.get("baseline_func") or "").strip() or None
+    if effective_baseline is None:
+        raise ValueError(
+            "Exact plot replay requires --baseline when --detect-run is not provided"
+        )
+    if effective_baseline not in BASELINE_FUNCTIONS:
+        raise ValueError(f"Unknown detection baseline: {effective_baseline}")
+    args.baseline = effective_baseline
+    run_params["baseline_func"] = effective_baseline
+
+    if args.logbf_threshold_dip is None:
+        stored = run_params.get("logbf_threshold_dip")
+        args.logbf_threshold_dip = float(LOGBF_THRESHOLD_DIP if stored is None else stored)
+    else:
+        run_params["logbf_threshold_dip"] = float(args.logbf_threshold_dip)
+    if args.logbf_threshold_jump is None:
+        stored = run_params.get("logbf_threshold_jump")
+        args.logbf_threshold_jump = float(LOGBF_THRESHOLD_JUMP if stored is None else stored)
+    else:
+        run_params["logbf_threshold_jump"] = float(args.logbf_threshold_jump)
 
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     baseline_kwargs = {}
@@ -1269,7 +1741,7 @@ def main():
     }
     gp_kwargs = {k: v for k, v in gp_kwargs.items() if v is not None}
     if gp_kwargs:
-        if baseline_func is per_camera_gp_baseline:
+        if baseline_func in {per_camera_gp_baseline, per_camera_gp_baseline_masked}:
             baseline_kwargs.update(gp_kwargs)
         else:
             print("Warning: GP parameters were provided but baseline is not a GP baseline; ignoring.", flush=True)
@@ -1278,8 +1750,13 @@ def main():
 
 
     if args.results:
-        summary = plot_passing_candidates(
+        plot_input = _prepare_results_mode_input(
             args.results,
+            path_col=args.path_col,
+            only_significant=bool(args.only_significant),
+        )
+        summary = plot_passing_candidates(
+            plot_input,
             args.out_dir,
             require_failed_any_false=not args.ignore_failed_any,
             require_flags=args.require_flag,
@@ -1302,11 +1779,18 @@ def main():
             clean_max_error_absolute=args.clean_max_error_absolute,
             clean_max_error_sigma=args.clean_max_error_sigma,
             detection_results_csv=args.results,
+            run_params=run_params,
             filter_bad_cameras=args.filter_bad_cameras,
             bad_camera_scatter_ratio=args.bad_camera_scatter_ratio,
             show_tqdm=not args.no_progress,
         )
         print(f"Generated {summary.get('plotted', 0)} candidate plots in {args.out_dir}")
+        _write_plot_log(
+            args,
+            gp_kwargs=gp_kwargs,
+            total_plots=int(summary.get("plotted", 0)),
+            summary=summary,
+        )
         return
     elif args.input:
         csv_paths = [Path(p) for p in args.input]
@@ -1350,57 +1834,16 @@ def main():
             plot_fits=args.plot_fits,
             jd_offset=args.jd_offset,
             detection_results_csv=args.results,
+            run_params=run_params,
             clean_max_error_absolute=args.clean_max_error_absolute,
             clean_max_error_sigma=args.clean_max_error_sigma,
         )
 
-    # Generate plot log with comprehensive statistics
-    if args.detect_run:
-        try:
-
-
-
-
-
-            detect_run = args.detect_run.expanduser()
-            plot_log_file = detect_run / "plot_log.json"
-
-            orig_argv = getattr(sys, "orig_argv", None)
-            cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
-
-            plot_log = {
-                "timestamp": datetime.now().isoformat(),
-                "command": cmd,
-                "results_file": str(args.results) if args.results else None,
-                "output_dir": str(args.out_dir),
-                "plot_params": {
-                    "baseline": args.baseline,
-                    "logbf_threshold_dip": args.logbf_threshold_dip,
-                    "logbf_threshold_jump": args.logbf_threshold_jump,
-                    "skip_events": args.skip_events,
-                    "plot_fits": args.plot_fits,
-                    "format": args.format,
-                    "only_significant": args.only_significant,
-                    "jd_offset": args.jd_offset,
-                    "clean_max_error_absolute": args.clean_max_error_absolute,
-                    "clean_max_error_sigma": args.clean_max_error_sigma,
-                },
-                "results": {
-                    "total_plots": len(csv_paths),
-                    "max_plots_limit": args.max_plots,
-                },
-            }
-
-            # Add GP parameters if used
-            if gp_kwargs:
-                plot_log["plot_params"]["gp_params"] = gp_kwargs
-
-            with open(plot_log_file, "w") as f:
-                json.dump(plot_log, f, indent=2, default=str)
-
-        except Exception as e:
-            if args.verbose:
-                print(f"Warning: could not write plot log: {e}")
+    _write_plot_log(
+        args,
+        gp_kwargs=gp_kwargs,
+        total_plots=len(csv_paths),
+    )
 
 
 if __name__ == "__main__":
