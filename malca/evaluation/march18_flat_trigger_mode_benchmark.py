@@ -537,6 +537,7 @@ def summarize_trigger_results(df: pd.DataFrame) -> pd.DataFrame:
         row = {col: val for col, val in zip(group_cols, key)}
         ok = sub_all[sub_all["status"].eq("ok")].copy()
         sig = ok["significant"].fillna(False).astype(bool) if len(ok) else pd.Series(dtype=bool)
+        ci_low, ci_high = _wilson_interval(int(sig.sum()), int(len(ok)))
         row.update(
             {
                 "n": int(len(sub_all)),
@@ -544,6 +545,8 @@ def summarize_trigger_results(df: pd.DataFrame) -> pd.DataFrame:
                 "status_error_rate": float(1.0 - len(ok) / max(1, len(sub_all))),
                 "significant_count": int(sig.sum()) if len(ok) else 0,
                 "significant_rate": float(sig.mean()) if len(ok) else np.nan,
+                "significant_rate_ci95_low": ci_low,
+                "significant_rate_ci95_high": ci_high,
                 "median_raw_trigger_points": float(ok["raw_trigger_points"].median()) if len(ok) else np.nan,
                 "median_event_points": float(ok["event_points"].median()) if len(ok) else np.nan,
                 "median_trigger_max": float(ok["trigger_max"].median()) if len(ok) else np.nan,
@@ -555,6 +558,16 @@ def summarize_trigger_results(df: pd.DataFrame) -> pd.DataFrame:
         )
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    if trials <= 0:
+        return np.nan, np.nan
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denominator
+    half = z * np.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
 
 
 def build_pairwise_production_comparison(df: pd.DataFrame) -> pd.DataFrame:

@@ -16,10 +16,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 import argparse
+import hashlib
 import json
 
-from scipy.stats import skewnorm, skew
-from scipy.ndimage import gaussian_filter
+from scipy.stats import norm, skewnorm, skew
+from scipy.optimize import minimize_scalar
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
@@ -44,7 +45,7 @@ from malca.core.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
 )
-from malca.cli_config import add_config_args, apply_config, namespace_keys
+from malca.cli_config import add_config_args, namespace_keys, parse_args_with_config
 from malca.config import INJECTION_CHUNK_SIZE
 from malca.config import (
     WORKERS,
@@ -116,6 +117,18 @@ INJECTION_CONFIG_DEFAULTS = {
 _GLOBAL: dict[str, object] = {}
 
 BASELINE_CHOICES = ("gp", "gp_masked", "global_median", "per_camera_median")
+MIN_EFFICIENCY_BIN_TRIALS = 5
+
+
+def _skewnormal_mode_standardized(skewness: float) -> float:
+    result = minimize_scalar(
+        lambda x: -float(skewnorm.pdf(x, a=float(skewness))),
+        bounds=(-10.0, 10.0),
+        method="bounded",
+    )
+    if not result.success:
+        raise RuntimeError("Could not determine skew-normal mode")
+    return float(result.x)
 
 
 def skewnormal_dip(
@@ -150,11 +163,20 @@ def skewnormal_dip(
     np.ndarray
         Magnitude perturbation (positive = fainter)
     """
-    sigma = duration / 2.355
-    dip = amplitude * skewnorm.pdf(t, a=skewness, loc=t_center, scale=sigma)
-    if dip.size and dip.max() > 0:
-        dip = dip * (amplitude / dip.max())
-    return dip + offset
+    if not np.isfinite(duration) or float(duration) <= 0:
+        raise ValueError("duration must be positive and finite")
+    if not np.isfinite(amplitude) or float(amplitude) < 0:
+        raise ValueError("amplitude must be non-negative and finite")
+    sigma = float(duration) / 2.355
+    # Normalize against the continuous skew-normal mode, never against the
+    # maximum sampled data point.  Sample-dependent normalization would force
+    # a full-depth point even when cadence misses the peak and erase the window
+    # function this experiment is intended to measure.
+    mode = _skewnormal_mode_standardized(float(skewness))
+    peak_pdf = float(skewnorm.pdf(mode, a=float(skewness)))
+    standardized = (np.asarray(t, dtype=float) - float(t_center)) / sigma
+    profile = float(amplitude) * skewnorm.pdf(standardized, a=float(skewness)) / peak_pdf
+    return profile + float(offset)
 
 
 def estimate_magnitude_error_polynomial(
@@ -200,35 +222,185 @@ def inject_dip(
     """
     Inject synthetic dip into light curve.
 
-    Adds dip to original observed magnitudes, preserving real cadence,
-    systematics, and noise. Adds per-point noise based on measurement errors.
+    Adds a dip to the *observed* magnitudes, preserving the actual cadence,
+    systematics, and measurement-noise realization already present in the
+    light curve.
+
+    ``mag_err_poly`` and ``rng`` are retained for API compatibility, but no
+    additional random noise is drawn.  Adding another error draw to observed
+    photometry would broaden the noise by roughly ``sqrt(2)`` and bias the
+    recovery efficiency low.
     """
     df_out = df_lc.copy()
     if df_out.empty:
         return df_out
 
     t = df_out[time_col].values
-    mag_old = df_out[mag_col].values
+    mag_old = df_out[mag_col].values.astype(float)
     dip_profile = skewnormal_dip(t, t_center, duration, amplitude, skewness)
-
-    # Per-point measurement noise based on errors
-    if mag_err_poly is not None:
-        sigma_i = np.asarray(mag_err_poly(mag_old), dtype=float)
-    else:
-        sigma_i = df_out[err_col].values.astype(float)
-
-    # Handle invalid error values
-    valid_mask = np.isfinite(sigma_i) & (sigma_i > 0)
-    if valid_mask.any():
-        fallback = np.nanmedian(sigma_i[valid_mask])
-    else:
-        fallback = 0.01
-    sigma_i = np.where(valid_mask, sigma_i, fallback)
-
-    rng = np.random.default_rng() if rng is None else rng
-    noise = rng.normal(0.0, sigma_i, size=len(t))
-    df_out[mag_col] = mag_old + dip_profile + noise
+    df_out[mag_col] = mag_old + dip_profile
     return df_out
+
+
+def deterministic_trial_seed(seed: int, trial_index: int) -> int:
+    """Return a stable per-trial seed independent of scheduling and resume order."""
+    if int(trial_index) < 0:
+        raise ValueError("trial_index must be non-negative")
+    # SeedSequence avoids the simple ``seed + trial_index`` collision pattern
+    # and defines the random stream solely from immutable trial identity.
+    seed_u64 = int(seed) & ((1 << 64) - 1)
+    sequence = np.random.SeedSequence(
+        [seed_u64 & 0xFFFFFFFF, seed_u64 >> 32, int(trial_index)]
+    )
+    return int(sequence.generate_state(1, dtype=np.uint64)[0])
+
+
+def trial_rng(seed: int, trial_index: int) -> np.random.Generator:
+    return np.random.default_rng(deterministic_trial_seed(seed, trial_index))
+
+
+def _jsonable_experiment_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            str(key): _jsonable_experiment_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_experiment_value(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [_jsonable_experiment_value(item) for item in value.tolist()]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if callable(value):
+        return f"{getattr(value, '__module__', '')}.{getattr(value, '__qualname__', repr(value))}"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def experiment_fingerprint(config: dict) -> str:
+    canonical = json.dumps(
+        _jsonable_experiment_value(config),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _assert_resume_fingerprint(output_path: Path | None, expected: str) -> None:
+    if output_path is None or not output_path.exists() or output_path.stat().st_size == 0:
+        return
+    try:
+        existing = pd.read_parquet(output_path, columns=["experiment_fingerprint"])
+    except Exception as exc:
+        raise ValueError(
+            "Existing injection output has no experiment fingerprint and cannot be safely resumed"
+        ) from exc
+    values = set(existing["experiment_fingerprint"].dropna().astype(str))
+    if existing["experiment_fingerprint"].isna().any() or values != {str(expected)}:
+        raise ValueError(
+            "Existing injection output was produced by a different experiment configuration"
+        )
+
+
+def binomial_confidence_interval(
+    successes: int,
+    trials: int,
+    *,
+    confidence: float = 0.95,
+) -> tuple[float | None, float | None]:
+    """Wilson score interval for a binomial proportion.
+
+    Empty samples return ``(None, None)`` rather than a fabricated zero or a
+    value interpolated from neighboring bins.
+    """
+    k = int(successes)
+    n = int(trials)
+    if n < 0 or k < 0 or k > n:
+        raise ValueError("Expected 0 <= successes <= trials")
+    if n == 0:
+        return None, None
+    if not (0.0 < float(confidence) < 1.0):
+        raise ValueError("confidence must be between 0 and 1")
+    z = float(norm.ppf(0.5 + confidence / 2.0))
+    p = k / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2.0 * n)) / denom
+    half = z * np.sqrt((p * (1.0 - p) + z * z / (4.0 * n)) / n) / denom
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
+
+
+def _efficiency_record(successes: int, trials: int, confidence: float) -> dict:
+    low, high = binomial_confidence_interval(successes, trials, confidence=confidence)
+    return {
+        "successes": int(successes),
+        "trials": int(trials),
+        "efficiency": (float(successes / trials) if trials else None),
+        "ci_low": low,
+        "ci_high": high,
+        "confidence": float(confidence),
+        "ci_method": "wilson_score",
+    }
+
+
+def summarize_injection_efficiency(
+    results_df: pd.DataFrame,
+    *,
+    detected_col: str = "detected",
+    confidence: float = 0.95,
+) -> dict:
+    """Report operational and science efficiency without conflating errors.
+
+    ``end_to_end`` uses every designed trial as its denominator. ``completed``
+    excludes processing errors. ``conditional_observable`` additionally
+    requires the injected signal to have the recorded minimum cadence support.
+    """
+    total = int(len(results_df))
+    status = results_df.get(
+        "trial_status", pd.Series("completed", index=results_df.index, dtype="object")
+    ).astype("string").fillna("completed")
+    processing_error = status.eq("processing_error").fillna(False)
+    if "processing_error" in results_df.columns:
+        processing_error |= results_df["processing_error"].fillna(False).astype(bool)
+    elif "error" in results_df.columns:
+        processing_error |= results_df["error"].notna()
+
+    detected = results_df.get(
+        detected_col, pd.Series(False, index=results_df.index, dtype="boolean")
+    ).astype("boolean")
+    completed_mask = ~processing_error & detected.notna()
+    observable = results_df.get(
+        "observable", pd.Series(True, index=results_df.index, dtype="boolean")
+    ).fillna(False).astype(bool)
+    observable_mask = completed_mask & observable
+
+    n_recovered_all = int(detected.fillna(False).sum())
+    n_recovered_completed = int(detected.loc[completed_mask].fillna(False).sum())
+    n_recovered_observable = int(detected.loc[observable_mask].fillna(False).sum())
+    paired_evaluated = results_df.get(
+        "paired_control_evaluated", pd.Series(False, index=results_df.index)
+    )
+    paired_evaluated = int(
+        pd.Series(paired_evaluated, index=results_df.index).fillna(False).astype(bool).sum()
+    )
+    return {
+        "total_designed_trials": total,
+        "processing_error_trials": int(processing_error.sum()),
+        "completed_trials": int(completed_mask.sum()),
+        "observable_trials": int(observable_mask.sum()),
+        "unobservable_completed_trials": int((completed_mask & ~observable).sum()),
+        "paired_control_evaluated_trials": paired_evaluated,
+        "end_to_end": _efficiency_record(n_recovered_all, total, confidence),
+        "completed": _efficiency_record(
+            n_recovered_completed, int(completed_mask.sum()), confidence
+        ),
+        "conditional_observable": _efficiency_record(
+            n_recovered_observable, int(observable_mask.sum()), confidence
+        ),
+    }
 
 
 def _baseline_func_from_name(name: str):
@@ -349,6 +521,8 @@ def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_of
     baseline_mag = float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan)))
     dip_best_mag_event = float(dip.get("best_mag_event", np.nan))
     jump_best_mag_event = float(jump.get("best_mag_event", np.nan))
+    dip_best_t0 = float(dip.get("best_t0", np.nan))
+    jump_best_t0 = float(jump.get("best_t0", np.nan))
 
     # Apply signal amplitude filter if min_mag_offset > 0
     dip_significant = bool(dip["significant"])
@@ -372,7 +546,33 @@ def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_of
         baseline_mag=baseline_mag,
         dip_best_mag_event=dip_best_mag_event,
         jump_best_mag_event=jump_best_mag_event,
+        dip_best_t0=dip_best_t0,
+        jump_best_t0=jump_best_t0,
     )
+
+
+def _processing_error_result(
+    trial_index: int,
+    trial_seed: int,
+    *,
+    error_stage: str,
+    error: object,
+    detected_key: str = "detected",
+    **values: object,
+) -> dict:
+    """Build an error row that cannot be mistaken for a nondetection."""
+    return {
+        "trial_index": int(trial_index),
+        "trial_seed": int(trial_seed),
+        "trial_status": "processing_error",
+        "processing_error": True,
+        "injection_performed": False,
+        "observable": False,
+        detected_key: None,
+        "error_stage": str(error_stage),
+        "error": str(error),
+        **values,
+    }
 
 
 def _simulate_trial(
@@ -389,8 +589,10 @@ def _simulate_trial(
     measure_pre_injection: bool,
     seed: int,
     file_ext: str | None = None,
+    experiment_id: str | None = None,
 ) -> dict:
-    rng = np.random.default_rng(seed + int(trial_index))
+    per_trial_seed = deterministic_trial_seed(seed, trial_index)
+    rng = np.random.default_rng(per_trial_seed)
     
     # improved random sampling for MC coverage
     # Sample uniformly in fractional depth: 1.0 - 10 ** (-0.4 * amplitude)
@@ -417,13 +619,21 @@ def _simulate_trial(
             df = _load_lc(asas_sn_id, lc_dir, file_ext=file_ext)
             if df.empty or len(df) < 10:
                 if attempt == max_attempts - 1:
-                    return dict(
-                        trial_index=trial_index,
-                        amplitude=amplitude,
-                        duration=duration,
-                        asas_sn_id=asas_sn_id,
-                        detected=False,
+                    return _processing_error_result(
+                        trial_index,
+                        per_trial_seed,
+                        error_stage="load_control",
                         error="empty_or_short_lc_max_retries",
+                        experiment_seed=int(seed),
+                        experiment_fingerprint=experiment_id,
+                        amplitude=float(amplitude),
+                        designed_amplitude_mag=float(amplitude),
+                        fractional_depth=float(fd),
+                        designed_fractional_depth=float(fd),
+                        duration=float(duration),
+                        designed_duration_days=float(duration),
+                        asas_sn_id=asas_sn_id,
+                        control_attempts=int(attempt + 1),
                     )
                 continue
 
@@ -432,14 +642,22 @@ def _simulate_trial(
             # Only inject into stars with median magnitude between 12 and 15
             if median_mag < INJECTION_MAG_LO or median_mag > INJECTION_MAG_HI:
                 if attempt == max_attempts - 1:
-                     return dict(
-                        trial_index=trial_index,
-                        amplitude=amplitude,
-                        duration=duration,
+                     return _processing_error_result(
+                        trial_index,
+                        per_trial_seed,
+                        error_stage="select_control",
+                        error="magnitude_out_of_range",
+                        experiment_seed=int(seed),
+                        experiment_fingerprint=experiment_id,
+                        amplitude=float(amplitude),
+                        designed_amplitude_mag=float(amplitude),
+                        fractional_depth=float(fd),
+                        designed_fractional_depth=float(fd),
+                        duration=float(duration),
+                        designed_duration_days=float(duration),
                         median_mag=median_mag,
                         asas_sn_id=asas_sn_id,
-                        detected=False,
-                        error="magnitude_out_of_range",
+                        control_attempts=int(attempt + 1),
                     )
                 continue
             
@@ -448,34 +666,104 @@ def _simulate_trial(
             
         except Exception as exc:
             if attempt == max_attempts - 1:
-                return dict(
-                    trial_index=trial_index,
-                    amplitude=amplitude,
-                    duration=duration,
+                return _processing_error_result(
+                    trial_index,
+                    per_trial_seed,
+                    error_stage="load_control",
+                    error=exc,
+                    experiment_seed=int(seed),
+                    experiment_fingerprint=experiment_id,
+                    amplitude=float(amplitude),
+                    designed_amplitude_mag=float(amplitude),
+                    fractional_depth=float(fd),
+                    designed_fractional_depth=float(fd),
+                    duration=float(duration),
+                    designed_duration_days=float(duration),
                     asas_sn_id=asas_sn_id,
-                    detected=False,
-                    error=str(exc),
+                    control_attempts=int(attempt + 1),
                 )
             continue
 
+    injection_performed = False
+    error_context: dict[str, object] = {
+        "median_mag": median_mag,
+        "control_attempts": int(attempt + 1),
+        "n_points": int(len(df)),
+    }
     try:
         t_min = float(df["JD"].min())
         t_max = float(df["JD"].max())
-        if not np.isfinite(t_min) or not np.isfinite(t_max) or (t_max - t_min <= 2 * duration):
-            return dict(
-                trial_index=trial_index,
-                amplitude=amplitude,
-                duration=duration,
-                asas_sn_id=asas_sn_id,
-                detected=False,
+        if not np.isfinite(t_min) or not np.isfinite(t_max) or t_max <= t_min:
+            return _processing_error_result(
+                trial_index,
+                per_trial_seed,
+                error_stage="validate_control",
                 error="invalid_time_range",
+                experiment_seed=int(seed),
+                experiment_fingerprint=experiment_id,
+                amplitude=float(amplitude),
+                designed_amplitude_mag=float(amplitude),
+                fractional_depth=float(fd),
+                designed_fractional_depth=float(fd),
+                duration=float(duration),
+                designed_duration_days=float(duration),
+                asas_sn_id=asas_sn_id,
+                control_attempts=int(attempt + 1),
             )
 
-        t_center = rng.uniform(t_min + duration, t_max - duration)
+        # Draw the event center over the actual survey window.  We do not trim
+        # the edges to force every injection to be easy to observe; cadence and
+        # window losses are part of the end-to-end experiment.
+        t_center = rng.uniform(t_min, t_max)
         skewness = rng.uniform(skew_range[0], skew_range[1])
+        injected_scale_days = float(duration / 2.355)
+        injected_peak_time = float(
+            t_center + injected_scale_days * _skewnormal_mode_standardized(skewness)
+        )
+
+        times = pd.to_numeric(df["JD"], errors="coerce").to_numpy(dtype=float)
+        injected_profile = skewnormal_dip(
+            times, t_center, duration, amplitude, skewness
+        )
+        peak_observed = float(np.nanmax(injected_profile)) if injected_profile.size else 0.0
+        observed_peak_fraction = (
+            float(peak_observed / amplitude) if amplitude > 0 else np.nan
+        )
+        fwhm_mask = injected_profile >= (0.5 * amplitude)
+        support_mask = injected_profile >= (0.1 * amplitude)
+        n_fwhm_points = int(np.count_nonzero(fwhm_mask))
+        n_support_points = int(np.count_nonzero(support_mask))
+        support_start = t_center - duration
+        support_end = t_center + duration
+        overlap = max(0.0, min(t_max, support_end) - max(t_min, support_start))
+        window_coverage_fraction = float(min(1.0, overlap / (2.0 * duration)))
+        observable = bool(n_fwhm_points >= 1 and n_support_points >= 3)
+        error_context.update(
+            {
+                "t_center": float(t_center),
+                "designed_t0_jd": float(t_center),
+                "designed_location_jd": float(t_center),
+                "designed_peak_time_jd": injected_peak_time,
+                "skewness": float(skewness),
+                "injected_skewness": float(skewness),
+                "time_min_jd": t_min,
+                "time_max_jd": t_max,
+                "time_span_days": float(t_max - t_min),
+                "n_fwhm_points": n_fwhm_points,
+                "n_support_points": n_support_points,
+                "observed_peak_fraction": observed_peak_fraction,
+                "window_coverage_fraction": window_coverage_fraction,
+                "window_coverage_definition": "fraction_of_location_plusminus_duration_inside_observed_span",
+                "observable": observable,
+                "observable_definition": "at_least_1_fwhm_point_and_3_points_above_10pct_depth",
+            }
+        )
         
         # Measure pre-injection detection rate if requested
-        pre_injection_result = {}
+        pre_injection_result = {
+            "paired_control_evaluated": False,
+            "pre_injection_detected": None,
+        }
         if measure_pre_injection:
             pre_inj = _default_detection_func(
                 df,
@@ -484,6 +772,7 @@ def _simulate_trial(
             )
             # Prefix all keys with pre_injection_
             pre_injection_result = {f"pre_injection_{k}": v for k, v in pre_inj.items()}
+            pre_injection_result["paired_control_evaluated"] = True
 
         df_injected = inject_dip(
             df,
@@ -494,6 +783,20 @@ def _simulate_trial(
             mag_err_poly,
             rng=rng,
         )
+        injection_performed = True
+        error_context.update(
+            {
+                "injected_amplitude_mag": float(amplitude),
+                "injected_fractional_depth": float(fd),
+                "injected_duration_days": float(duration),
+                "injected_scale_days": injected_scale_days,
+                "injected_t0_jd": float(t_center),
+                "injected_location_jd": float(t_center),
+                "injected_peak_time_jd": injected_peak_time,
+                "injected_skewness": float(skewness),
+                "duration_parameter_definition": "2.355_times_skewnormal_scale",
+            }
+        )
         detection_result = _default_detection_func(
             df_injected,
             detection_kwargs,
@@ -502,27 +805,101 @@ def _simulate_trial(
 
         # Convert amplitude (mag) to fractional transit depth
         fractional_depth = 1.0 - 10 ** (-0.4 * amplitude)
+        pre_detected = pre_injection_result.get("pre_injection_detected")
+        post_triggered = bool(detection_result["detected"])
+        recovered_t0 = float(detection_result.get("dip_best_t0", np.nan))
+        recovery_time_offset_days = (
+            float(abs(recovered_t0 - injected_peak_time))
+            if np.isfinite(recovered_t0)
+            else np.nan
+        )
+        recovery_time_tolerance_days = float(duration)
+        localization_matched = bool(
+            post_triggered
+            and np.isfinite(recovery_time_offset_days)
+            and recovery_time_offset_days <= recovery_time_tolerance_days
+        )
+        post_detected = localization_matched
+        paired_detected = (
+            post_detected and not bool(pre_detected)
+            if pre_detected is not None
+            else post_detected
+        )
 
-        return dict(
-            trial_index=trial_index,
-            amplitude=amplitude,
-            fractional_depth=fractional_depth,
-            duration=duration,
-            skewness=float(skewness),
-            t_center=float(t_center),
-            median_mag=median_mag,
-            asas_sn_id=asas_sn_id,
+        return {
+            "trial_index": int(trial_index),
+            "trial_seed": int(per_trial_seed),
+            "experiment_seed": int(seed),
+            "experiment_fingerprint": experiment_id,
+            "trial_status": "completed",
+            "processing_error": False,
+            "injection_performed": True,
+            "error_stage": None,
+            "error": None,
+            "amplitude": float(amplitude),
+            "designed_amplitude_mag": float(amplitude),
+            "injected_amplitude_mag": float(amplitude),
+            "fractional_depth": float(fractional_depth),
+            "designed_fractional_depth": float(fractional_depth),
+            "injected_fractional_depth": float(fractional_depth),
+            "duration": float(duration),
+            "designed_duration_days": float(duration),
+            "injected_duration_days": float(duration),
+            "injected_scale_days": injected_scale_days,
+            "duration_parameter_definition": "2.355_times_skewnormal_scale",
+            "parameter_sampling": "uniform_fractional_depth_log_uniform_duration_uniform_skewness",
+            "t0_sampling": "uniform_observed_time_span",
+            "skewness": float(skewness),
+            "injected_skewness": float(skewness),
+            "t_center": float(t_center),
+            "designed_t0_jd": float(t_center),
+            "designed_location_jd": float(t_center),
+            "designed_peak_time_jd": injected_peak_time,
+            "injected_t0_jd": float(t_center),
+            "injected_location_jd": float(t_center),
+            "injected_peak_time_jd": injected_peak_time,
+            "median_mag": median_mag,
+            "asas_sn_id": asas_sn_id,
+            "control_attempts": int(attempt + 1),
+            "n_points": int(len(df)),
+            "time_min_jd": t_min,
+            "time_max_jd": t_max,
+            "time_span_days": float(t_max - t_min),
+            "n_fwhm_points": n_fwhm_points,
+            "n_support_points": n_support_points,
+            "observed_peak_fraction": observed_peak_fraction,
+            "window_coverage_fraction": window_coverage_fraction,
+            "window_coverage_definition": "fraction_of_location_plusminus_duration_inside_observed_span",
+            "observable": observable,
+            "observable_definition": "at_least_1_fwhm_point_and_3_points_above_10pct_depth",
             **detection_result,
             **pre_injection_result,
-        )
+            "post_injection_detected": post_detected,
+            "post_injection_triggered": post_triggered,
+            "post_injection_localization_matched": localization_matched,
+            "recovery_time_offset_days": recovery_time_offset_days,
+            "recovery_time_tolerance_days": recovery_time_tolerance_days,
+            "recovery_definition": "dip_trigger_within_one_duration_of_injected_peak_and_not_control_detection",
+            "detected": paired_detected,
+            "detected_above_paired_control": paired_detected,
+        }
     except Exception as exc:
-        return dict(
-            trial_index=trial_index,
-            amplitude=amplitude,
-            duration=duration,
+        return _processing_error_result(
+            trial_index,
+            per_trial_seed,
+            error_stage="inject_or_detect",
+            error=exc,
+            experiment_seed=int(seed),
+            experiment_fingerprint=experiment_id,
+            injection_performed=injection_performed,
+            amplitude=float(amplitude),
+            designed_amplitude_mag=float(amplitude),
+            fractional_depth=float(fd),
+            designed_fractional_depth=float(fd),
+            duration=float(duration),
+            designed_duration_days=float(duration),
             asas_sn_id=asas_sn_id,
-            detected=False,
-            error=str(exc),
+            **error_context,
         )
 
 
@@ -538,6 +915,7 @@ def _init_worker(
     measure_pre_injection: bool,
     seed: int,
     file_ext: str | None = None,
+    experiment_id: str | None = None,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
     _GLOBAL["control_dirs"] = control_dirs
@@ -550,6 +928,7 @@ def _init_worker(
     _GLOBAL["measure_pre_injection"] = measure_pre_injection
     _GLOBAL["seed"] = seed
     _GLOBAL["file_ext"] = file_ext
+    _GLOBAL["experiment_id"] = experiment_id
 
 
 def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
@@ -569,6 +948,7 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 measure_pre_injection=bool(_GLOBAL["measure_pre_injection"]),
                 seed=int(_GLOBAL["seed"]),
                 file_ext=_GLOBAL.get("file_ext"),
+                experiment_id=_GLOBAL.get("experiment_id"),
             )
         )
     return results
@@ -589,14 +969,25 @@ class ParquetAppendWriter:
         if not chunk_results:
             return
         df_chunk = pd.DataFrame(chunk_results)
-        if self.columns is None:
-            self.columns = list(df_chunk.columns)
-        df_chunk = df_chunk.reindex(columns=self.columns)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists() and self.path.stat().st_size > 0:
-            df_chunk = pd.concat([pd.read_parquet(self.path), df_chunk], ignore_index=True, sort=False)
-            df_chunk = df_chunk.reindex(columns=self.columns)
-        df_chunk.to_parquet(self.path, index=False, compression="zstd")
+            existing = pd.read_parquet(self.path)
+            df_chunk = pd.concat([existing, df_chunk], ignore_index=True, sort=False)
+        # A first chunk made entirely of errors must not permanently discard
+        # science columns appearing in later chunks.  Union the schema and make
+        # retries idempotent by trial identity.
+        self.columns = list(dict.fromkeys([*(self.columns or []), *df_chunk.columns.tolist()]))
+        df_chunk = df_chunk.reindex(columns=self.columns)
+        if "trial_index" in df_chunk.columns:
+            df_chunk["trial_index"] = pd.to_numeric(df_chunk["trial_index"], errors="raise").astype(int)
+            df_chunk = (
+                df_chunk.drop_duplicates(subset=["trial_index"], keep="last")
+                .sort_values("trial_index", kind="stable")
+                .reset_index(drop=True)
+            )
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        df_chunk.to_parquet(tmp_path, index=False, compression="zstd")
+        tmp_path.replace(self.path)
 
     def close(self) -> None:
         return
@@ -618,13 +1009,23 @@ def _read_checkpoint(path: Path) -> int | None:
     return None
 
 
+def _completed_trial_indices(output_path: Path | None) -> set[int]:
+    if output_path is None or not output_path.exists() or output_path.stat().st_size == 0:
+        return set()
+    existing = pd.read_parquet(output_path, columns=["trial_index"])
+    values = pd.to_numeric(existing["trial_index"], errors="raise").astype(int)
+    if values.duplicated().any():
+        raise ValueError(f"Duplicate trial_index values in resumable output: {output_path}")
+    return set(values.tolist())
+
+
 
 def run_injection_recovery(
     control_sample: pd.DataFrame,
     *,
     detection_kwargs: dict,
     min_mag_offset: float = 0.0,
-    measure_pre_injection: bool = False,
+    measure_pre_injection: bool = True,
     total_trials: int = INJECTION_TOTAL_TRIALS,
     amplitude_range: tuple[float, float] = (0.05, 5.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
@@ -649,28 +1050,37 @@ def run_injection_recovery(
     """
     if output_path is not None:
         output_path = Path(output_path)
-        if output_path.exists() and overwrite and not resume:
+        if output_path.exists() and overwrite:
             output_path.unlink()
         if output_path.exists() and not resume and not overwrite:
             raise SystemExit(f"Output exists: {output_path} (use --overwrite or --no-resume)")
+    if overwrite:
+        resume = False
 
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
     elif output_path is not None:
         checkpoint_path = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
 
-    if checkpoint_path and checkpoint_path.exists() and overwrite and not resume:
+    if checkpoint_path and checkpoint_path.exists() and overwrite:
         checkpoint_path.unlink()
 
-    start_index = 0
-    if resume and checkpoint_path and checkpoint_path.exists():
-        last = _read_checkpoint(checkpoint_path)
-        if last is not None:
-            start_index = int(last) + 1
-
-    if start_index >= total_trials:
-        print("All trials already completed per checkpoint.")
-        return None
+    if int(total_trials) < 1:
+        raise ValueError("total_trials must be positive")
+    if not (0.0 < float(amplitude_range[0]) <= float(amplitude_range[1])):
+        raise ValueError("amplitude_range must be positive and increasing")
+    if not (0.0 < float(duration_range[0]) <= float(duration_range[1])):
+        raise ValueError("duration_range must be positive and increasing")
+    if not (
+        np.isfinite(skewness_range[0])
+        and np.isfinite(skewness_range[1])
+        and float(skewness_range[0]) <= float(skewness_range[1])
+    ):
+        raise ValueError("skewness_range must be finite and increasing")
+    if int(workers) < 1 or int(task_size) < 1 or int(checkpoint_interval) < 1:
+        raise ValueError("workers, task_size, and checkpoint_interval must be positive")
+    if int(INJECTION_MAX_ATTEMPTS) < 1:
+        raise ValueError("INJECTION_MAX_ATTEMPTS must be positive")
 
     id_col = _get_id_col(control_sample)
     control_ids = control_sample[id_col].astype(str).to_numpy()
@@ -686,35 +1096,51 @@ def run_injection_recovery(
     if len(control_ids) == 0:
         raise SystemExit("Control sample is empty.")
 
-    print("Loading control sample light curves for error polynomial...")
-    lc_sample = []
-    for idx, row in control_sample.iterrows():
-        if idx >= mag_err_sample:
-            break
-        asas_sn_id = str(row[id_col])
-        lc_dir = _resolve_lc_path(row)
-        if lc_dir is None:
-            continue
-        try:
-            df = _load_lc(asas_sn_id, lc_dir, file_ext=file_ext)
-            if not df.empty:
-                lc_sample.append(df)
-        except Exception:
-            continue
+    # Observed light curves already contain measurement noise.  The historical
+    # error-polynomial fit is intentionally not used for injection because a
+    # second draw would double-count that uncertainty.
+    mag_err_poly = None
 
-    print(f"Fitting {mag_err_order}th-order polynomial to magnitude errors...")
-    mag_err_poly = estimate_magnitude_error_polynomial(lc_sample, order=mag_err_order)
+    amp_range = (float(amplitude_range[0]), float(amplitude_range[1]))
+    dur_range = (float(duration_range[0]), float(duration_range[1]))
+    skew_range = (float(skewness_range[0]), float(skewness_range[1]))
+    experiment_id = experiment_fingerprint(
+        {
+            "contract_version": 2,
+            "family": "skewnormal_dip",
+            "seed": int(seed),
+            "amplitude_range": amp_range,
+            "duration_range": dur_range,
+            "skewness_range": skew_range,
+            "control_ids": control_ids,
+            "control_paths": control_dirs,
+            "detection_kwargs": detection_kwargs,
+            "min_mag_offset": float(min_mag_offset),
+            "paired_control": bool(measure_pre_injection),
+            "file_ext": file_ext,
+            "max_attempts": int(INJECTION_MAX_ATTEMPTS),
+            "magnitude_limits": [float(INJECTION_MAG_LO), float(INJECTION_MAG_HI)],
+        }
+    )
+    if resume:
+        _assert_resume_fingerprint(output_path, experiment_id)
+    completed_indices = _completed_trial_indices(output_path) if resume else set()
+    invalid_indices = sorted(i for i in completed_indices if i < 0 or i >= int(total_trials))
+    if invalid_indices:
+        raise ValueError(
+            "Resumable output contains trial indices outside the requested design: "
+            f"{invalid_indices[:10]}"
+        )
+    pending_indices = [i for i in range(int(total_trials)) if i not in completed_indices]
+    if not pending_indices:
+        print("All designed trials are already present in the output table.")
+        return None
 
     writer = ParquetAppendWriter(output_path) if output_path else None
     results: list[dict] = []
 
-    pbar = tqdm(total=total_trials, initial=start_index, disable=not show_progress)
+    pbar = tqdm(total=total_trials, initial=len(completed_indices), disable=not show_progress)
     
-    # Ranges
-    amp_range = (float(amplitude_range[0]), float(amplitude_range[1]))
-    dur_range = (float(duration_range[0]), float(duration_range[1]))
-    skew_range = (float(skewness_range[0]), float(skewness_range[1]))
-
     def flush_results(is_final: bool = False) -> None:
         nonlocal results
         if not results:
@@ -727,7 +1153,7 @@ def run_injection_recovery(
         results = []
 
     if workers <= 1:
-        for trial_index in range(start_index, total_trials):
+        for trial_index in pending_indices:
             res = _simulate_trial(
                 trial_index,
                 control_ids=control_ids,
@@ -741,6 +1167,7 @@ def run_injection_recovery(
                 measure_pre_injection=measure_pre_injection,
                 seed=seed,
                 file_ext=file_ext,
+                experiment_id=experiment_id,
             )
             results.append(res)
             pbar.update(1)
@@ -753,7 +1180,9 @@ def run_injection_recovery(
         if checkpoint_path:
             _write_checkpoint(checkpoint_path, total_trials - 1)
         pbar.close()
-        return None if output_path else pd.DataFrame(results)
+        if output_path:
+            return None
+        return pd.DataFrame(results).sort_values("trial_index", kind="stable").reset_index(drop=True)
 
 
 
@@ -772,16 +1201,16 @@ def run_injection_recovery(
             measure_pre_injection,
             seed,
             file_ext,
+            experiment_id,
         ),
     ) as ex:
-        for batch_start in range(start_index, total_trials, checkpoint_interval):
-            batch_end = min(batch_start + checkpoint_interval, total_trials)
-            batch_indices = list(range(batch_start, batch_end))
+        for offset in range(0, len(pending_indices), checkpoint_interval):
+            batch_indices = pending_indices[offset:offset + checkpoint_interval]
             tasks = [batch_indices[i:i + task_size] for i in range(0, len(batch_indices), task_size)]
 
             futures = {ex.submit(_process_trial_batch, task): task for task in tasks}
             for fut in as_completed(futures):
-                batch_results = fut.result()
+                batch_results = sorted(fut.result(), key=lambda row: int(row["trial_index"]))
                 results.extend(batch_results)
                 pbar.update(len(batch_results))
                 if chunk_size and len(results) >= chunk_size:
@@ -789,16 +1218,18 @@ def run_injection_recovery(
 
             flush_results()
             if checkpoint_path:
-                _write_checkpoint(checkpoint_path, batch_end - 1)
+                _write_checkpoint(checkpoint_path, max(batch_indices))
 
     flush_results(is_final=True)
     if checkpoint_path:
         _write_checkpoint(checkpoint_path, total_trials - 1)
     pbar.close()
-    return None if output_path else pd.DataFrame(results)
+    if output_path:
+        return None
+    return pd.DataFrame(results).sort_values("trial_index", kind="stable").reset_index(drop=True)
 
 
-def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
+def compute_quality_metrics(results_df: pd.DataFrame, *, confidence: float = 0.95) -> dict:
     """
     Compute quality metrics from injection-recovery results.
     
@@ -813,18 +1244,36 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
     """
     total = len(results_df)
     if total == 0:
+        empty_efficiency = summarize_injection_efficiency(
+            results_df, detected_col="detected", confidence=confidence
+        )
         return {
             "total_trials": 0,
             "successful_trials": 0,
             "failed_trials": 0,
             "failure_rate": 0.0,
             "detection_rate": 0.0,
+            "pre_injection_detection_rate": None,
+            "post_injection_detection_rate": None,
+            "net_completeness": None,
+            "efficiency": empty_efficiency,
+            "end_to_end_efficiency": None,
+            "end_to_end_ci_low": None,
+            "end_to_end_ci_high": None,
+            "conditional_observable_efficiency": None,
+            "conditional_observable_ci_low": None,
+            "conditional_observable_ci_high": None,
             "error_breakdown": {},
             "error_percentages": {},
         }
     
-    # Identify failures (rows with non-null 'error' column)
-    has_error = results_df.get("error", pd.Series([None] * total)).notna()
+    # Identify processing failures separately from genuine, completed
+    # nondetections.  Older result files without trial_status remain readable.
+    has_error = results_df.get(
+        "processing_error",
+        results_df.get("error", pd.Series([None] * total)).notna(),
+    )
+    has_error = pd.Series(has_error, index=results_df.index).fillna(False).astype(bool)
     failed = has_error.sum()
     successful = total - failed
     
@@ -840,19 +1289,46 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
         # Pre-injection detection rate if available
         pre_inj_col = "pre_injection_detected"
         if pre_inj_col in results_df.columns:
-            pre_inj_rate = results_df.loc[successful_mask, pre_inj_col].sum() / successful
-            pre_injection_detection_rate = float(pre_inj_rate) if np.isfinite(pre_inj_rate) else None
-            # Net completeness = post-injection rate - pre-injection rate
-            if np.isfinite(detection_rate) and np.isfinite(pre_inj_rate):
+            pre_values = results_df.loc[successful_mask, pre_inj_col].astype("boolean")
+            pre_denominator = int(pre_values.notna().sum())
+            pre_inj_rate = (
+                float(pre_values.dropna().sum() / pre_denominator)
+                if pre_denominator
+                else np.nan
+            )
+            pre_injection_detection_rate = (
+                float(pre_inj_rate) if np.isfinite(pre_inj_rate) else None
+            )
+            if "post_injection_detected" in results_df.columns:
+                post_rate = (
+                    results_df.loc[successful_mask, "post_injection_detected"].sum()
+                    / successful
+                )
+                post_injection_detection_rate = (
+                    float(post_rate) if np.isfinite(post_rate) else None
+                )
+                # New-schema ``detected`` is already the paired recovery
+                # outcome, so it must not have the control rate subtracted a
+                # second time.
+                net_completeness = (
+                    float(detection_rate)
+                    if pre_denominator and np.isfinite(detection_rate)
+                    else None
+                )
+            elif np.isfinite(detection_rate) and np.isfinite(pre_inj_rate):
+                post_injection_detection_rate = float(detection_rate)
                 net_completeness = float(detection_rate - pre_inj_rate)
             else:
+                post_injection_detection_rate = None
                 net_completeness = None
         else:
             pre_injection_detection_rate = None
+            post_injection_detection_rate = None
             net_completeness = None
     else:
         detection_rate = np.nan
         pre_injection_detection_rate = None
+        post_injection_detection_rate = None
         net_completeness = None
     
     # Error breakdown
@@ -864,6 +1340,11 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
             error_breakdown[str(error_type)] = int(count)
             error_percentages[str(error_type)] = float(count / total * 100)
     
+    efficiency = summarize_injection_efficiency(
+        results_df, detected_col=("detected" if "detected" in results_df.columns else "dip_significant"),
+        confidence=confidence,
+    )
+
     return {
         "total_trials": int(total),
         "successful_trials": int(successful),
@@ -871,7 +1352,15 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
         "failure_rate": float(failed / total) if total > 0 else 0.0,
         "detection_rate": float(detection_rate) if np.isfinite(detection_rate) else None,
         "pre_injection_detection_rate": pre_injection_detection_rate,
+        "post_injection_detection_rate": post_injection_detection_rate,
         "net_completeness": net_completeness,
+        "efficiency": efficiency,
+        "end_to_end_efficiency": efficiency["end_to_end"]["efficiency"],
+        "end_to_end_ci_low": efficiency["end_to_end"]["ci_low"],
+        "end_to_end_ci_high": efficiency["end_to_end"]["ci_high"],
+        "conditional_observable_efficiency": efficiency["conditional_observable"]["efficiency"],
+        "conditional_observable_ci_low": efficiency["conditional_observable"]["ci_low"],
+        "conditional_observable_ci_high": efficiency["conditional_observable"]["ci_high"],
         "error_breakdown": error_breakdown,
         "error_percentages": error_percentages,
     }
@@ -894,6 +1383,7 @@ def print_quality_summary(metrics: dict, output_path: Path | None = None) -> Non
     detection_rate = metrics.get("detection_rate")
     pre_inj_rate = metrics.get("pre_injection_detection_rate")
     net_compl = metrics.get("net_completeness")
+    efficiency = metrics.get("efficiency", {})
     
     success_pct = (successful / total * 100) if total > 0 else 0.0
     fail_pct = (failed / total * 100) if total > 0 else 0.0
@@ -907,6 +1397,23 @@ def print_quality_summary(metrics: dict, output_path: Path | None = None) -> Non
         lines.append(f"Detection rate:    {det_pct:.1f}% (of successful trials)")
     else:
         lines.append("Detection rate:    N/A")
+
+    end_to_end = efficiency.get("end_to_end")
+    if end_to_end and end_to_end.get("efficiency") is not None:
+        lines.append(
+            "End-to-end:       "
+            f"{100 * end_to_end['efficiency']:.1f}% "
+            f"({100 * end_to_end['confidence']:.0f}% CI {100 * end_to_end['ci_low']:.1f}--{100 * end_to_end['ci_high']:.1f}%; "
+            f"{end_to_end['successes']}/{end_to_end['trials']})"
+        )
+    observable = efficiency.get("conditional_observable")
+    if observable and observable.get("efficiency") is not None:
+        lines.append(
+            "Observable-only:  "
+            f"{100 * observable['efficiency']:.1f}% "
+            f"({100 * observable['confidence']:.0f}% CI {100 * observable['ci_low']:.1f}--{100 * observable['ci_high']:.1f}%; "
+            f"{observable['successes']}/{observable['trials']})"
+        )
     
     # Show pre-injection and net completeness if available
     if pre_inj_rate is not None:
@@ -953,33 +1460,140 @@ def compute_detection_efficiency(
     """
     Compute detection efficiency grid.
     """
-    amp_edges = np.linspace(
-        results_df["amplitude"].min(),
-        results_df["amplitude"].max(),
-        amplitude_bins + 1,
+    details = compute_detection_efficiency_details(
+        results_df,
+        amplitude_bins=amplitude_bins,
+        duration_bins=duration_bins,
+        detected_col=detected_col,
     )
-    dur_edges = np.logspace(
-        np.log10(results_df["duration"].min()),
-        np.log10(results_df["duration"].max()),
-        duration_bins + 1,
+    return details["amplitude_centers"], details["duration_centers"], details["efficiency_end_to_end"]
+
+
+def _safe_linear_edges(values: np.ndarray, bins: int) -> np.ndarray:
+    if int(bins) < 1:
+        raise ValueError("bins must be positive")
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        raise ValueError("Cannot bin an empty/non-finite parameter column")
+    lo, hi = float(np.min(finite)), float(np.max(finite))
+    if lo == hi:
+        pad = max(abs(lo) * 1e-6, 1e-9)
+        lo, hi = lo - pad, hi + pad
+    return np.linspace(lo, hi, int(bins) + 1)
+
+
+def _safe_log_edges(values: np.ndarray, bins: int) -> np.ndarray:
+    if int(bins) < 1:
+        raise ValueError("bins must be positive")
+    finite = values[np.isfinite(values) & (values > 0)]
+    if finite.size == 0:
+        raise ValueError("Cannot log-bin a column without positive finite values")
+    lo, hi = float(np.min(finite)), float(np.max(finite))
+    if lo == hi:
+        factor = 1.0 + 1e-6
+        lo, hi = lo / factor, hi * factor
+    return np.logspace(np.log10(lo), np.log10(hi), int(bins) + 1)
+
+
+def _binned_efficiency_arrays(
+    sample: np.ndarray,
+    detected: pd.Series,
+    processing_error: np.ndarray,
+    observable: np.ndarray,
+    bins: list[np.ndarray],
+    *,
+    confidence: float = 0.95,
+) -> dict:
+    finite = np.all(np.isfinite(sample), axis=1)
+    detected_bool = detected.fillna(False).astype(bool).to_numpy()
+    detected_known = detected.notna().to_numpy()
+    completed = finite & ~processing_error & detected_known
+    observable_mask = completed & observable
+
+    def hist(mask: np.ndarray) -> np.ndarray:
+        return np.histogramdd(sample[mask], bins=bins)[0].astype(int)
+
+    n_designed = hist(finite)
+    n_completed = hist(completed)
+    n_observable = hist(observable_mask)
+    recovered_all = hist(finite & detected_bool)
+    recovered_completed = hist(completed & detected_bool)
+    recovered_observable = hist(observable_mask & detected_bool)
+
+    def rate(success: np.ndarray, count: np.ndarray) -> np.ndarray:
+        out = np.full(count.shape, np.nan, dtype=float)
+        np.divide(success, count, out=out, where=count > 0)
+        return out
+
+    def intervals(success: np.ndarray, count: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        low = np.full(count.shape, np.nan, dtype=float)
+        high = np.full(count.shape, np.nan, dtype=float)
+        for index in np.ndindex(count.shape):
+            if count[index] > 0:
+                lo, hi = binomial_confidence_interval(
+                    int(success[index]), int(count[index]), confidence=confidence
+                )
+                low[index], high[index] = float(lo), float(hi)
+        return low, high
+
+    e2e_low, e2e_high = intervals(recovered_all, n_designed)
+    obs_low, obs_high = intervals(recovered_observable, n_observable)
+    return {
+        "n_input_trials": int(len(sample)),
+        "n_unbinned_trials": int(len(sample) - finite.sum()),
+        "bin_denominator_definition": "all_designed_trials_with_finite_bin_coordinates",
+        "n_designed": n_designed,
+        "n_completed": n_completed,
+        "n_observable": n_observable,
+        "n_recovered_end_to_end": recovered_all,
+        "n_recovered_completed": recovered_completed,
+        "n_recovered_observable": recovered_observable,
+        "efficiency_end_to_end": rate(recovered_all, n_designed),
+        "efficiency_completed": rate(recovered_completed, n_completed),
+        "efficiency_observable": rate(recovered_observable, n_observable),
+        "end_to_end_ci_low": e2e_low,
+        "end_to_end_ci_high": e2e_high,
+        "observable_ci_low": obs_low,
+        "observable_ci_high": obs_high,
+        "confidence": float(confidence),
+        "ci_method": "wilson_score",
+    }
+
+
+def compute_detection_efficiency_details(
+    results_df: pd.DataFrame,
+    amplitude_bins: int = 20,
+    duration_bins: int = 20,
+    detected_col: str = "detected",
+    confidence: float = 0.95,
+) -> dict:
+    """Return counts, intervals, and both required efficiency estimands."""
+    amp = pd.to_numeric(results_df["amplitude"], errors="coerce").to_numpy(dtype=float)
+    duration = pd.to_numeric(results_df["duration"], errors="coerce").to_numpy(dtype=float)
+    amp_edges = _safe_linear_edges(amp, amplitude_bins)
+    dur_edges = _safe_log_edges(duration, duration_bins)
+    detected = results_df[detected_col].astype("boolean")
+    processing_error = results_df.get(
+        "processing_error", results_df.get("error", pd.Series(None, index=results_df.index)).notna()
     )
-
-    amp_centers = (amp_edges[:-1] + amp_edges[1:]) / 2
-    dur_centers = np.sqrt(dur_edges[:-1] * dur_edges[1:])
-
-    efficiency_grid = np.zeros((amplitude_bins, duration_bins))
-
-    for i in range(amplitude_bins):
-        for j in range(duration_bins):
-            mask = (
-                (results_df["amplitude"] >= amp_edges[i])
-                & (results_df["amplitude"] < amp_edges[i + 1])
-                & (results_df["duration"] >= dur_edges[j])
-                & (results_df["duration"] < dur_edges[j + 1])
-            )
-            efficiency_grid[i, j] = results_df.loc[mask, detected_col].mean() if mask.sum() else np.nan
-
-    return amp_centers, dur_centers, efficiency_grid
+    processing_error = pd.Series(processing_error, index=results_df.index).fillna(False).astype(bool).to_numpy()
+    observable = results_df.get("observable", pd.Series(True, index=results_df.index))
+    observable = pd.Series(observable, index=results_df.index).fillna(False).astype(bool).to_numpy()
+    arrays = _binned_efficiency_arrays(
+        np.column_stack([amp, duration]),
+        detected,
+        processing_error,
+        observable,
+        [amp_edges, dur_edges],
+        confidence=confidence,
+    )
+    return {
+        **arrays,
+        "amplitude_edges": amp_edges,
+        "duration_edges": dur_edges,
+        "amplitude_centers": (amp_edges[:-1] + amp_edges[1:]) / 2.0,
+        "duration_centers": np.sqrt(dur_edges[:-1] * dur_edges[1:]),
+    }
 
 
 def compute_detection_efficiency_3d(
@@ -1017,43 +1631,43 @@ def compute_detection_efficiency_3d(
         duration_edges : np.ndarray
         mag_edges : np.ndarray
     """
-    depth_edges = np.linspace(
-        0.0,
-        1.0,
-        depth_bins + 1,
-    )
-    dur_edges = np.logspace(
-        np.log10(results_df["duration"].min()),
-        np.log10(results_df["duration"].max()),
-        duration_bins + 1,
-    )
-    mag_edges = np.linspace(
-        results_df["median_mag"].min(),
-        results_df["median_mag"].max(),
-        mag_bins + 1,
-    )
+    if min(int(depth_bins), int(duration_bins), int(mag_bins)) < 1:
+        raise ValueError("All efficiency-cube bin counts must be positive")
+    depth_edges = np.linspace(0.0, 1.0, depth_bins + 1)
+    duration_values = pd.to_numeric(results_df["duration"], errors="coerce").to_numpy(dtype=float)
+    mag_values = pd.to_numeric(results_df["median_mag"], errors="coerce").to_numpy(dtype=float)
+    dur_edges = _safe_log_edges(duration_values, duration_bins)
+    mag_edges = _safe_linear_edges(mag_values, mag_bins)
 
     depth_centers = (depth_edges[:-1] + depth_edges[1:]) / 2
     dur_centers = np.sqrt(dur_edges[:-1] * dur_edges[1:])
     mag_centers = (mag_edges[:-1] + mag_edges[1:]) / 2
 
-    from scipy.stats import binned_statistic_dd
-    
     sample = np.column_stack([
-        results_df["fractional_depth"].values,
-        results_df["duration"].values,
-        results_df["median_mag"].values
+        pd.to_numeric(results_df["fractional_depth"], errors="coerce").to_numpy(dtype=float),
+        duration_values,
+        mag_values,
     ])
-    
-    efficiency, _, _ = binned_statistic_dd(
+    detected = results_df[detected_col].astype("boolean")
+    processing_error = results_df.get(
+        "processing_error", results_df.get("error", pd.Series(None, index=results_df.index)).notna()
+    )
+    processing_error = pd.Series(processing_error, index=results_df.index).fillna(False).astype(bool).to_numpy()
+    observable = results_df.get("observable", pd.Series(True, index=results_df.index))
+    observable = pd.Series(observable, index=results_df.index).fillna(False).astype(bool).to_numpy()
+    arrays = _binned_efficiency_arrays(
         sample,
-        results_df[detected_col].values,
-        statistic='mean',
-        bins=[depth_edges, dur_edges, mag_edges]
+        detected,
+        processing_error,
+        observable,
+        [depth_edges, dur_edges, mag_edges],
     )
 
     return dict(
-        efficiency=efficiency,
+        **arrays,
+        # Backwards-compatible plotting alias.  Its estimand is explicit.
+        efficiency=arrays["efficiency_end_to_end"],
+        efficiency_estimand="end_to_end",
         depth_centers=depth_centers,
         duration_centers=dur_centers,
         mag_centers=mag_centers,
@@ -1070,16 +1684,12 @@ def save_efficiency_cube(
     """
     Save 3D efficiency cube to .npz file.
     """
-    np.savez(
-        output_path,
-        efficiency=cube_dict["efficiency"],
-        depth_centers=cube_dict["depth_centers"],
-        duration_centers=cube_dict["duration_centers"],
-        mag_centers=cube_dict["mag_centers"],
-        depth_edges=cube_dict["depth_edges"],
-        duration_edges=cube_dict["duration_edges"],
-        mag_edges=cube_dict["mag_edges"],
-    )
+    serializable = {
+        key: value
+        for key, value in cube_dict.items()
+        if isinstance(value, (np.ndarray, str, int, float, bool, np.number))
+    }
+    np.savez(output_path, **serializable)
 
 
 def load_efficiency_cube(input_path: Path | str) -> dict:
@@ -1088,6 +1698,87 @@ def load_efficiency_cube(input_path: Path | str) -> dict:
     """
     data = np.load(input_path)
     return {k: data[k] for k in data.files}
+
+
+def _efficiency_for_plot(cube: dict, *, min_bin_trials: int = MIN_EFFICIENCY_BIN_TRIALS) -> np.ndarray:
+    """Mask bins too sparse to support a plotted efficiency measurement."""
+    efficiency = np.asarray(cube["efficiency"], dtype=float).copy()
+    if "n_designed" in cube:
+        counts = np.asarray(cube["n_designed"], dtype=int)
+        efficiency[counts < max(1, int(min_bin_trials))] = np.nan
+    return efficiency
+
+
+def _marginal_efficiency_over_axis(cube: dict, axis_index: int) -> np.ndarray:
+    if "n_designed" in cube and "n_recovered_end_to_end" in cube:
+        counts = np.asarray(cube["n_designed"], dtype=float).sum(axis=axis_index)
+        recovered = np.asarray(cube["n_recovered_end_to_end"], dtype=float).sum(axis=axis_index)
+        output = np.full(counts.shape, np.nan, dtype=float)
+        np.divide(recovered, counts, out=output, where=counts > 0)
+        return output
+    return np.nanmean(_efficiency_for_plot(cube), axis=axis_index)
+
+
+def efficiency_grid_depth_timescale(
+    cube: dict,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(duration_centers, depth_centers, efficiency_2d)`` marginalized over magnitude."""
+    eff = _efficiency_for_plot(cube)
+    if eff.ndim == 3:
+        eff_2d = _marginal_efficiency_over_axis(cube, 2)
+        if "n_designed" in cube:
+            marginalized_counts = np.asarray(cube["n_designed"], dtype=int).sum(axis=2)
+            eff_2d = np.asarray(eff_2d, dtype=float)
+            eff_2d[marginalized_counts < MIN_EFFICIENCY_BIN_TRIALS] = np.nan
+    elif eff.ndim == 2:
+        eff_2d = eff
+    else:
+        raise ValueError(f"Unexpected efficiency rank: {eff.ndim}")
+
+    if "duration_centers" in cube:
+        dur_centers = np.asarray(cube["duration_centers"], dtype=float)
+    elif "dur_centers" in cube:
+        dur_centers = np.asarray(cube["dur_centers"], dtype=float)
+    else:
+        raise KeyError("Missing duration axis in efficiency cube")
+
+    if "depth_centers" in cube:
+        depth_centers = np.asarray(cube["depth_centers"], dtype=float)
+    elif "amp_centers" in cube:
+        amp_centers = np.asarray(cube["amp_centers"], dtype=float)
+        depth_centers = 1.0 - np.power(10.0, -0.4 * amp_centers)
+    else:
+        raise KeyError("Missing depth/amplitude axis in efficiency cube")
+
+    return dur_centers, depth_centers, np.asarray(eff_2d, dtype=float)
+
+
+def load_efficiency_grid_depth_timescale(
+    source: Path | str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load or compute the depth–timescale efficiency grid used for completeness overlays."""
+    source = Path(source)
+    if source.suffix == ".parquet":
+        results_df = pd.read_parquet(source)
+        if {"fractional_depth", "median_mag", "duration"}.issubset(results_df.columns):
+            cube = compute_detection_efficiency_3d(results_df)
+            return efficiency_grid_depth_timescale(cube)
+        if {"amplitude", "duration"}.issubset(results_df.columns):
+            details = compute_detection_efficiency_details(results_df)
+            amp_centers = np.asarray(details["amplitude_centers"], dtype=float)
+            depth_centers = 1.0 - np.power(10.0, -0.4 * amp_centers)
+            return (
+                np.asarray(details["duration_centers"], dtype=float),
+                depth_centers,
+                np.asarray(details["efficiency_end_to_end"], dtype=float),
+            )
+        raise ValueError(
+            f"Unsupported injection results columns in {source}; "
+            "expected fractional_depth/median_mag/duration or amplitude/duration"
+        )
+    if source.suffix == ".npz":
+        return efficiency_grid_depth_timescale(load_efficiency_cube(source))
+    raise ValueError(f"Unsupported efficiency source: {source}")
 
 
 def plot_detection_efficiency(
@@ -1163,7 +1854,7 @@ def plot_efficiency_mag_slices(
 
     figs = []
     for k, mag in enumerate(cube["mag_centers"]):
-        eff_slice = cube["efficiency"][:, :, k]
+        eff_slice = _efficiency_for_plot(cube)[:, :, k]
         out_path = output_dir / f"efficiency_mag_{mag:.2f}.pdf" if output_dir else None
 
         fig = plot_detection_efficiency(
@@ -1210,32 +1901,20 @@ def plot_efficiency_jointplot(
     text["label"] = 10.0
     fig, ax = plt.subplots(figsize=figsize)
     
-    from astropy.convolution import convolve, Gaussian2DKernel
+    # Never interpolate or smooth across empty bins: that would turn an
+    # unevaluated part of parameter space into an apparent measurement.
+    plotted_eff = np.ma.masked_invalid(np.clip(efficiency_grid, vmin, vmax))
     
-    # Smooth with NaN handling to avoid edge banding artifacts
-    kernel = Gaussian2DKernel(x_stddev=1.0)
-    # Set preserve_nan=False so empty bins (NaNs) are smoothly interpolated from their neighbors
-    smoothed_eff = convolve(efficiency_grid, kernel, boundary='extend', preserve_nan=False)
-    smoothed_eff = np.clip(smoothed_eff, vmin, vmax)
-    
-    levels_contourf = np.linspace(vmin, vmax, 100)
-    im = ax.contourf(
-        x_centers,
-        y_centers,
-        smoothed_eff,
-        levels=levels_contourf,
+    im = ax.pcolormesh(
+        x_edges,
+        y_edges,
+        plotted_eff,
         cmap=cmap,
-        extend='neither'
+        vmin=vmin,
+        vmax=vmax,
+        shading="flat",
+        rasterized=True,
     )
-    
-    # Rasterize and prevent PDF rendering gaps between contour bands
-    try:
-        for c in im.collections:
-            c.set_edgecolor("face")
-            c.set_rasterized(True)
-    except AttributeError:
-        im.set_edgecolor("face")
-        im.set_rasterized(True)
     
     # Contours
     if contour_kwargs is None:
@@ -1248,7 +1927,7 @@ def plot_efficiency_jointplot(
         }
         
     try:
-        cs = ax.contour(x_centers, y_centers, smoothed_eff, levels=contour_kwargs["levels"], colors='black', alpha=0.9, linewidths=0.6)
+        cs = ax.contour(x_centers, y_centers, plotted_eff, levels=contour_kwargs["levels"], colors='black', alpha=0.9, linewidths=0.6)
         texts1 = []
         texts2 = []
         if contour_kwargs.get("manual1"):
@@ -1356,9 +2035,22 @@ def plot_efficiency_marginalized(
         Axis to marginalize over: "mag", "duration", or "depth"
     """
     ylog = False
+
+    def marginal_efficiency(axis_index: int) -> np.ndarray:
+        if "n_designed" in cube and "n_recovered_end_to_end" in cube:
+            counts = np.asarray(cube["n_designed"], dtype=float).sum(axis=axis_index)
+            recovered = np.asarray(
+                cube["n_recovered_end_to_end"], dtype=float
+            ).sum(axis=axis_index)
+            output = np.full(counts.shape, np.nan, dtype=float)
+            np.divide(recovered, counts, out=output, where=counts > 0)
+            return output
+        # Legacy cubes lack counts; preserve readability without inventing
+        # values for wholly empty slices.
+        return np.nanmean(_efficiency_for_plot(cube), axis=axis_index)
     
     if axis == "mag":
-        eff_2d = np.nanmean(cube["efficiency"], axis=2)
+        eff_2d = marginal_efficiency(2)
         x_centers = cube["duration_centers"]
         y_centers = cube["depth_centers"]
         x_edges = cube["duration_edges"]
@@ -1374,7 +2066,7 @@ def plot_efficiency_marginalized(
             "inline_spacing2": 8
         }
     elif axis == "duration":
-        eff_2d = np.nanmean(cube["efficiency"], axis=1)
+        eff_2d = marginal_efficiency(1)
         x_centers = cube["mag_centers"]
         y_centers = cube["depth_centers"]
         x_edges = cube["mag_edges"]
@@ -1389,7 +2081,7 @@ def plot_efficiency_marginalized(
             "manual2": []
         }
     elif axis == "depth":
-        eff_2d = np.nanmean(cube["efficiency"], axis=0)  # Shape is (duration, mag) -> x=mag, y=duration
+        eff_2d = marginal_efficiency(0)  # Shape is (duration, mag) -> x=mag, y=duration
         x_centers = cube["mag_centers"]
         y_centers = cube["duration_centers"]
         x_edges = cube["mag_edges"]
@@ -1406,6 +2098,11 @@ def plot_efficiency_marginalized(
         }
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
+
+    if "n_designed" in cube:
+        marginalized_counts = np.asarray(cube["n_designed"], dtype=int).sum(axis={"mag": 2, "duration": 1, "depth": 0}[axis])
+        eff_2d = np.asarray(eff_2d, dtype=float)
+        eff_2d[marginalized_counts < MIN_EFFICIENCY_BIN_TRIALS] = np.nan
 
     return plot_efficiency_jointplot(
         x_centers,
@@ -1449,10 +2146,11 @@ def plot_efficiency_threshold_contour(
     n_dur = len(cube["duration_centers"])
     n_mag = len(cube["mag_centers"])
     depth_at_threshold = np.full((n_dur, n_mag), np.nan)
+    plot_efficiency = _efficiency_for_plot(cube)
 
     for j in range(n_dur):
         for k in range(n_mag):
-            eff = cube["efficiency"][:, j, k]
+            eff = plot_efficiency[:, j, k]
             valid = np.isfinite(eff)
             if not valid.any():
                 continue
@@ -1508,7 +2206,7 @@ def plot_efficiency_3d(
 
     D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
     
-    efficiency_flat = cube["efficiency"].flatten()
+    efficiency_flat = _efficiency_for_plot(cube).flatten()
     D_flat = D.flatten()
     Du_flat = Du.flatten()
     M_flat = M.flatten()
@@ -1591,7 +2289,7 @@ def plot_efficiency_isosurface(
     D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
     
     # Filter out NaN values for plotly
-    efficiency_flat = cube["efficiency"].flatten()
+    efficiency_flat = _efficiency_for_plot(cube).flatten()
     D_flat = D.flatten()
     Du_flat = Du.flatten()
     M_flat = M.flatten()
@@ -1866,8 +2564,10 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     )
     g_injection.add_argument("--skew-min", type=float, default=-0.5)
     g_injection.add_argument("--skew-max", type=float, default=0.5)
-    g_injection.add_argument("--mag-err-order", type=int, default=5)
-    g_injection.add_argument("--mag-err-sample", type=int, default=100)
+    g_injection.add_argument("--mag-err-order", type=int, default=5,
+                             help="Deprecated compatibility option; observed-noise injections do not draw new errors")
+    g_injection.add_argument("--mag-err-sample", type=int, default=100,
+                             help="Deprecated compatibility option; observed-noise injections do not fit an error model")
 
     g_detection.add_argument("--trigger-mode", choices=["posterior_prob", "logbf"], default=TRIGGER_MODE)
     g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
@@ -1930,13 +2630,14 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     add_config_args(g_postprocess)
     parser.set_defaults(**INJECTION_CONFIG_DEFAULTS)
 
-    args = parser.parse_args()
-    apply_config(
-        args,
+    args = parse_args_with_config(
+        parser,
         command="injection",
         valid_keys=namespace_keys(parser, INJECTION_CONFIG_DEFAULTS),
         path_keys={"manifest", "out_dir", "output", "cube_out", "plot_dir"},
     )
+    if args.plot_only and args.output is None:
+        parser.error("--plot-only requires --output pointing to an existing results parquet")
 
     # Set up output paths with timestamped run directory
     base_out_dir = Path(args.out_dir)
@@ -1964,7 +2665,9 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
 
     # Save run parameters to JSON
-    run_params_file = run_dir / "run_params.json"
+    run_params_file = run_dir / (
+        "postprocess_params.json" if args.plot_only else "run_params.json"
+    )
     run_params = vars(args).copy()
     # Convert Path objects to strings for JSON serialization
     for key, value in run_params.items():
@@ -2039,27 +2742,19 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     output_tag = ""  # No suffix needed with timestamped directories
     metrics_path = results_dir / f"quality_metrics{output_tag}.txt"
     print_quality_summary(metrics, output_path=metrics_path)
-
-    results_ok = results_df
-    if "error" in results_df.columns:
-        results_ok = results_df.loc[results_df["error"].isna()].copy()
-        if len(results_ok) < len(results_df):
-            print(f"Using {len(results_ok)}/{len(results_df)} successful trials for efficiency cube/plots.")
-    if "median_mag" in results_ok.columns:
-        results_ok = results_ok[np.isfinite(results_ok["median_mag"])].copy()
-    if "fractional_depth" in results_ok.columns:
-        results_ok = results_ok[np.isfinite(results_ok["fractional_depth"])].copy()
+    metrics_json_path = results_dir / f"quality_metrics{output_tag}.json"
+    metrics_json_path.write_text(json.dumps(metrics, indent=2, sort_keys=True))
 
     # Compute cube and generate plots (unless skipped)
     if not args.skip_cube or not args.skip_plots:
-        if "fractional_depth" not in results_ok.columns or "median_mag" not in results_ok.columns:
+        if "fractional_depth" not in results_df.columns or "median_mag" not in results_df.columns:
             print("Warning: Results missing fractional_depth or median_mag columns, skipping 3D cube.")
-        elif results_ok.empty:
-            print("Warning: No successful trials with valid magnitudes/depths; skipping 3D cube.")
+        elif results_df.empty:
+            print("Warning: No designed trials are available; skipping 3D cube.")
         else:
-            print("Computing 3D efficiency cube...")
+            print("Computing end-to-end and observable-conditional 3D efficiency cubes...")
             cube = compute_detection_efficiency_3d(
-                results_ok,
+                results_df,
                 depth_bins=args.depth_bins,
                 duration_bins=args.duration_bins,
                 mag_bins=args.mag_bins,

@@ -776,33 +776,66 @@ def _rate(series: pd.Series) -> float:
     return float(series.fillna(False).astype(bool).mean())
 
 
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float, float]:
+    if trials <= 0:
+        return np.nan, np.nan
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denominator
+    half = z * np.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half)), float(min(1.0, center + half))
+
+
 def summarize_results(df: pd.DataFrame, group_cols: list[str] | tuple[str, ...]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    ok = df[df["status"].eq("ok")].copy()
-    grouped = ok.groupby(list(group_cols), dropna=False) if group_cols else [((), ok)]
-    for key, sub in grouped:
+    grouped = df.groupby(list(group_cols), dropna=False) if group_cols else [((), df)]
+    for key, sub_all in grouped:
         key_tuple = key if isinstance(key, tuple) else (key,)
         row = {col: val for col, val in zip(group_cols, key_tuple)}
+        sub = sub_all[sub_all["status"].eq("ok")].copy()
         has_dip = sub["has_dip"].fillna(False).astype(bool)
         observable = has_dip & sub["truth_observable_actual"].fillna(False).astype(bool)
         controls = ~has_dip
         detected = sub["dip_significant"].fillna(False).astype(bool)
         recovered = sub["target_recovered"].fillna(False).astype(bool)
         true_positive_detected = detected & has_dip & sub["detected_overlap"].fillna(False).astype(bool)
+        observable_success = int(recovered[observable].sum()) if observable.any() else 0
+        dip_success = int(recovered[has_dip].sum()) if has_dip.any() else 0
+        control_fp = int(detected[controls].sum()) if controls.any() else 0
+        precision_success = int(true_positive_detected.sum())
+        observable_ci = _wilson_interval(observable_success, int(observable.sum()))
+        dip_ci = _wilson_interval(dip_success, int(has_dip.sum()))
+        fp_ci = _wilson_interval(control_fp, int(controls.sum()))
+        precision_ci = _wilson_interval(precision_success, int(detected.sum()))
 
         row.update(
             {
-                "n": int(len(sub)),
+                "n": int(len(sub_all)),
+                "n_ok": int(len(sub)),
+                "n_error": int(len(sub_all) - len(sub)),
                 "n_dip": int(has_dip.sum()),
                 "n_observable_dip": int(observable.sum()),
                 "n_control": int(controls.sum()),
-                "status_error_rate": float(1.0 - len(sub) / max(1, len(df.loc[sub.index]))),
+                "status_error_rate": float(1.0 - len(sub) / max(1, len(sub_all))),
                 "dip_significant_rate": _rate(detected),
                 "observable_recall": float(recovered[observable].mean()) if observable.any() else np.nan,
+                "observable_recovered_n": observable_success,
+                "observable_recall_ci95_low": observable_ci[0],
+                "observable_recall_ci95_high": observable_ci[1],
                 "all_dip_recall": float(recovered[has_dip].mean()) if has_dip.any() else np.nan,
+                "all_dip_recovered_n": dip_success,
+                "all_dip_recall_ci95_low": dip_ci[0],
+                "all_dip_recall_ci95_high": dip_ci[1],
                 "control_false_positive_rate": float(detected[controls].mean()) if controls.any() else np.nan,
+                "control_false_positive_n": control_fp,
+                "control_false_positive_rate_ci95_low": fp_ci[0],
+                "control_false_positive_rate_ci95_high": fp_ci[1],
                 "off_target_detection_rate": _rate(sub.loc[has_dip, "off_target_detection"]) if has_dip.any() else np.nan,
                 "precision_by_trial": float(true_positive_detected.sum() / detected.sum()) if detected.any() else np.nan,
+                "precision_numerator": precision_success,
+                "precision_denominator": int(detected.sum()),
+                "precision_by_trial_ci95_low": precision_ci[0],
+                "precision_by_trial_ci95_high": precision_ci[1],
                 "phase_template_fallback_rate": _rate(sub["phase_template_fallback"]),
                 "median_baseline_mae_outside_dip": float(sub["baseline_mae_outside_dip"].median()),
                 "median_baseline_rmse_outside_dip": float(sub["baseline_rmse_outside_dip"].median()),

@@ -4,7 +4,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 import argparse
+import hashlib
+import inspect
 import io
+import json
 import re
 import sys
 
@@ -22,8 +25,9 @@ from malca.core.baseline import (
     global_median_baseline,
     per_camera_median_baseline,
     per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
-from malca.cli_config import add_config_args, apply_config, namespace_keys
+from malca.cli_config import add_config_args, namespace_keys, parse_args_with_config
 from malca.enrichment.characterize import query_gaia_by_ids, get_dust_extinction
 from malca.enrichment.classify import compute_all_classifications
 from malca.config import (
@@ -55,8 +59,9 @@ from malca.config import (
     BASELINE_JITTER,
     JD_OFFSET,
     DEFAULT_OUTPUT_DIR,
+    LIGHT_CURVE_FILE_EXTENSION,
 )
-from malca.stv.events import score_lightcurve
+from malca.stv.events import score_lightcurve, signal_amplitude_pass_mask
 from malca.stv.filter import apply_filters, filter_signal_amplitude
 from malca.stv.plot import plot_passing_candidates
 from malca.stv.plot import read_skypatrol_csv
@@ -84,6 +89,250 @@ CANDIDATE_USECOLS = {
     "ra_deg",
     "dec_deg",
 }
+
+REPRODUCTION_SCHEMA_VERSION = 2
+_MISSING_ID_VALUES = frozenset({"", "nan", "none", "null", "<na>"})
+
+
+def _canonical_candidate_id(value: object) -> str | None:
+    if value is None or value is pd.NA:
+        return None
+    try:
+        if bool(pd.isna(value)):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (int, np.integer)):
+        text = str(int(value))
+    elif isinstance(value, (float, np.floating)) and np.isfinite(value) and float(value).is_integer():
+        text = str(int(value))
+    else:
+        text = str(value).strip()
+    return None if text.lower() in _MISSING_ID_VALUES else text
+
+
+def _validate_unique_ids(df: pd.DataFrame, column: str, label: str) -> pd.Series:
+    if column not in df.columns:
+        raise ValueError(f"{label} must include a {column!r} column")
+    ids = df[column].map(_canonical_candidate_id).astype("string")
+    if bool(ids.isna().any()):
+        raise ValueError(f"{label} contains blank/null {column} values")
+    duplicates = ids.duplicated(keep=False)
+    if bool(duplicates.any()):
+        examples = sorted(ids.loc[duplicates].astype(str).unique())[:5]
+        raise ValueError(f"{label} contains duplicate {column} values: {examples}")
+    return ids
+
+
+def _fingerprintable(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _fingerprintable(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprintable(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_fingerprintable(item) for item in value)
+    if callable(value):
+        return f"{value.__module__}.{getattr(value, '__qualname__', getattr(value, '__name__', type(value).__name__))}"
+    if isinstance(value, Path):
+        return str(value.expanduser())
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _stable_digest(value: object) -> str:
+    payload = json.dumps(_fingerprintable(value), sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _reproduction_code_fingerprint() -> str:
+    functions = {
+        "score_lightcurve": score_lightcurve,
+        "compute_event_score": compute_event_score,
+        "apply_tags": apply_tags,
+        "filter_signal_amplitude": filter_signal_amplitude,
+        "apply_filters": apply_filters,
+        "query_gaia_by_ids": query_gaia_by_ids,
+        "get_dust_extinction": get_dust_extinction,
+        "compute_all_classifications": compute_all_classifications,
+        "enrich_row_worker": _enrich_row_worker,
+        "global_median_baseline": global_median_baseline,
+        "per_camera_median_baseline": per_camera_median_baseline,
+        "per_camera_gp_baseline": per_camera_gp_baseline,
+        "per_camera_gp_baseline_masked": per_camera_gp_baseline_masked,
+    }
+    sources: dict[str, str] = {}
+    for name, function in functions.items():
+        try:
+            sources[name] = inspect.getsource(function)
+        except (OSError, TypeError):
+            sources[name] = repr(function)
+    return _stable_digest(sources)
+
+
+def _path_fingerprint(path_value: object) -> dict[str, object]:
+    if _canonical_candidate_id(path_value) is None:
+        return {"path": None, "exists": False, "is_file": False}
+    path = Path(str(path_value)).expanduser().resolve(strict=False)
+    record: dict[str, object] = {"path": str(path), "exists": path.exists(), "is_file": path.is_file()}
+    if path.is_dir():
+        children = [
+            {
+                "relative_path": str(child.relative_to(path)),
+                "fingerprint": _path_fingerprint(child),
+            }
+            for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file())
+        ]
+        record.update(
+            {
+                "is_directory": True,
+                "n_files": len(children),
+                "contents_sha256": _stable_digest(children),
+            }
+        )
+        return record
+    if not path.is_file():
+        return record
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    stat = path.stat()
+    record.update({"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "sha256": digest.hexdigest()})
+    return record
+
+
+def _strict_boolean_series(series: pd.Series) -> pd.Series:
+    def parse(value: object) -> object:
+        if value is None or value is pd.NA:
+            return pd.NA
+        try:
+            if bool(pd.isna(value)):
+                return pd.NA
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)) and int(value) in (0, 1):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"true", "1", "t", "yes", "y"}:
+            return True
+        if text in {"false", "0", "f", "no", "n"}:
+            return False
+        return pd.NA
+
+    return pd.Series((parse(value) for value in series), index=series.index, dtype="boolean")
+
+
+def _apply_reproduction_signal_amplitude(
+    frame: pd.DataFrame,
+    *,
+    min_mag_offset: float,
+) -> pd.DataFrame:
+    """Apply the canonical amplitude gate independently to every band/branch.
+
+    Reproduction rows keep g and V results in separate prefixed columns.  They
+    must not be collapsed by taking a baseline from one band and an event
+    offset from the other.  This helper also gates dip and jump significance
+    independently so a strong jump cannot make an under-amplitude dip count as
+    a reproduced dip.
+    """
+    out = frame.copy()
+    threshold = float(min_mag_offset)
+    if out.empty or threshold <= 0:
+        return out
+
+    successful = out.get(
+        "trial_status",
+        pd.Series("ok", index=out.index, dtype="string"),
+    ).astype("string").eq("ok")
+    original: dict[tuple[str, str], pd.Series] = {}
+    passed: dict[tuple[str, str], pd.Series] = {}
+
+    for band in ("g", "v"):
+        band_frame = pd.DataFrame(index=out.index)
+        for kind in ("dip", "jump"):
+            significant_col = f"{band}_bayes_{kind}_significant"
+            significant = _strict_boolean_series(
+                out.get(significant_col, pd.Series(False, index=out.index))
+            ).fillna(False)
+            original[(band, kind)] = significant & successful
+            band_frame[f"{kind}_significant"] = significant
+
+            explicit_delta = f"{band}_{kind}_best_delta_mag"
+            legacy_delta = f"{band}_{kind}_best_mag_event"
+            source_col = explicit_delta if explicit_delta in out.columns else legacy_delta
+            band_frame[f"{kind}_best_delta_mag"] = pd.to_numeric(
+                out.get(source_col, pd.Series(np.nan, index=out.index)),
+                errors="coerce",
+            )
+
+        # Use the same canonical event-gate implementation as stv-events, then
+        # retain branch-level decisions for scientifically correct reporting.
+        band_any_pass = signal_amplitude_pass_mask(band_frame, threshold) & successful
+        for kind in ("dip", "jump"):
+            delta = pd.to_numeric(band_frame[f"{kind}_best_delta_mag"], errors="coerce")
+            branch_pass = original[(band, kind)] & delta.abs().ge(threshold)
+            passed[(band, kind)] = branch_pass
+            significant_col = f"{band}_bayes_{kind}_significant"
+            if significant_col not in out.columns:
+                out[significant_col] = False
+            out.loc[successful, significant_col] = branch_pass.loc[successful].to_numpy()
+
+            decision = pd.Series(pd.NA, index=out.index, dtype="boolean")
+            decision.loc[successful] = branch_pass.loc[successful].to_numpy()
+            out[f"{band}_{kind}_signal_amplitude_pass"] = decision
+
+        # Assert that the explicit branch decisions cannot drift from the
+        # canonical candidate-level gate.
+        explicit_band_pass = passed[(band, "dip")] | passed[(band, "jump")]
+        if not explicit_band_pass.loc[successful].equals(band_any_pass.loc[successful]):
+            raise AssertionError(f"{band}-band amplitude decisions disagree with the canonical gate")
+
+    original_dip = original[("g", "dip")] | original[("v", "dip")]
+    passed_dip = passed[("g", "dip")] | passed[("v", "dip")]
+    original_any = original_dip | original[("g", "jump")] | original[("v", "jump")]
+    passed_any = passed_dip | passed[("g", "jump")] | passed[("v", "jump")]
+
+    evaluated = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    evaluated.loc[successful] = original_any.loc[successful].to_numpy()
+    out["signal_amplitude_evaluated"] = evaluated
+
+    amplitude_pass = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    amplitude_pass.loc[successful] = passed_any.loc[successful].to_numpy()
+    out["signal_amplitude_pass"] = amplitude_pass
+
+    dip_amplitude_pass = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    dip_amplitude_pass.loc[successful] = passed_dip.loc[successful].to_numpy()
+    out["dip_signal_amplitude_pass"] = dip_amplitude_pass
+
+    failed = pd.Series(pd.NA, index=out.index, dtype="boolean")
+    failed.loc[successful] = (
+        original_any.loc[successful] & ~passed_any.loc[successful]
+    ).to_numpy()
+    out["failed_signal_amplitude"] = failed
+
+    # ``detected`` in the reproduction report is specifically dip recovery.
+    # Record a dip-amplitude rejection when every otherwise-significant dip is
+    # removed, even if an unrelated jump branch survives.
+    dip_rejected = successful & original_dip & ~passed_dip
+    if "rejection_reason" not in out.columns:
+        out["rejection_reason"] = None
+    overall_update = dip_rejected & out["rejection_reason"].isna()
+    out.loc[overall_update, "rejection_reason"] = "signal_amplitude"
+
+    for band in ("g", "v"):
+        reason_col = f"{band}_rejection_reason"
+        if reason_col not in out.columns:
+            out[reason_col] = None
+        band_rejected = successful & original[(band, "dip")] & ~passed[(band, "dip")]
+        update = band_rejected & out[reason_col].isna()
+        out.loc[update, reason_col] = "signal_amplitude"
+
+    return out
 
 
 REPRODUCE_CONFIG_DEFAULTS = {
@@ -202,9 +451,11 @@ tzanidakis_candidates: list[dict[str, object]] = _parse_tzanidakis_candidates()
 def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
     path = Path(manifest_path).expanduser()
     df = read_parquet_table(path)
-    if "source_id" not in df.columns:
-        raise ValueError("Manifest must include a 'source_id' column.")
-    df["source_id"] = df["source_id"].astype(str)
+    if "source_id" not in df.columns and "asas_sn_id" in df.columns:
+        df["source_id"] = df["asas_sn_id"]
+    df["source_id"] = _validate_unique_ids(df, "source_id", "Reproduction manifest")
+    if "candidate_id" not in df.columns:
+        df["candidate_id"] = df["source_id"]
     return df
 
 
@@ -223,6 +474,12 @@ def load_candidates_df(cand_path: Path) -> pd.DataFrame:
             df["candidate_id"] = df["source_id"].astype(str)
         elif "path" in df.columns:
             df["candidate_id"] = df["path"].map(lambda value: Path(str(value)).stem)
+    if "source_id" not in df.columns and "candidate_id" in df.columns:
+        df["source_id"] = df["candidate_id"]
+    if "source_id" not in df.columns:
+        raise ValueError("Candidate table must include source_id/asas_sn_id or a path-derived identity")
+    df["source_id"] = _validate_unique_ids(df, "source_id", "Candidate table")
+    df["candidate_id"] = _validate_unique_ids(df, "candidate_id", "Candidate table")
     usecols = [col for col in df.columns if col in CANDIDATE_USECOLS]
     return df[usecols].copy() if usecols else df
 
@@ -231,7 +488,10 @@ def dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None
     df = pd.DataFrame(data or brayden_candidates).copy()
     if "source_id" not in df.columns:
         raise ValueError("Candidates must include a 'source_id' column.")
-    df["source_id"] = df["source_id"].astype(str)
+    df["source_id"] = _validate_unique_ids(df, "source_id", "Candidates")
+    if "candidate_id" not in df.columns:
+        df["candidate_id"] = df["source_id"]
+    df["candidate_id"] = _validate_unique_ids(df, "candidate_id", "Candidates")
     return df
 
 
@@ -243,12 +503,21 @@ def target_map(df: pd.DataFrame) -> dict[str, set[str]]:
 
 
 def records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]]]:
+    source_ids = _validate_unique_ids(df, "source_id", "Manifest subset")
     records: dict[str, list[dict[str, object]]] = {}
-    for rec in df.to_dict("records"):
-        source_id = str(rec.get("source_id"))
+    for source_id, rec in zip(source_ids.astype(str), df.to_dict("records")):
         mag_bin = str(rec.get("mag_bin"))
         lc_dir = str(rec.get("lc_dir"))
-        dat_path = rec.get("dat_path") or str(Path(lc_dir) / f"{source_id}.dat")
+        dat_value = rec.get("dat_path")
+        dat_path = (
+            str(dat_value)
+            if _canonical_candidate_id(dat_value) is not None
+            else str(Path(lc_dir) / f"{source_id}.{LIGHT_CURVE_FILE_EXTENSION}")
+        )
+        exists_value = rec.get("dat_exists", Path(dat_path).exists())
+        exists = _strict_boolean_series(pd.Series([exists_value])).iloc[0]
+        if pd.isna(exists):
+            raise ValueError(f"Manifest has an invalid dat_exists value for source_id {source_id!r}")
         record = {
             "mag_bin": mag_bin,
             "index_num": rec.get("index_num"),
@@ -256,7 +525,8 @@ def records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]]
             "lc_dir": lc_dir,
             "asas_sn_id": source_id,
             "dat_path": dat_path,
-            "found": bool(rec.get("dat_exists", True)),
+            "found": bool(exists),
+            "input_source": "manifest",
         }
         records.setdefault(mag_bin, []).append(record)
     return records
@@ -264,8 +534,6 @@ def records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]]
 
 def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) -> dict[str, list[dict[str, object]]]:
     base = Path(skypatrol_dir)
-    if not base.exists():
-        return {}
 
     records: dict[str, list[dict[str, object]]] = {}
     for _, row in df_targets.iterrows():
@@ -277,7 +545,7 @@ def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) ->
         ]
         csv_path = next((path for path in csv_candidates if path.exists()), None)
         if csv_path is None:
-            continue
+            csv_path = csv_candidates[0]
         rec = {
             "mag_bin": mag_bin,
             "index_num": None,
@@ -285,7 +553,8 @@ def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) ->
             "lc_dir": str(base),
             "asas_sn_id": source_id,
             "dat_path": str(csv_path),
-            "found": True,
+            "found": csv_path.is_file(),
+            "input_source": "skypatrol",
         }
         records.setdefault(mag_bin, []).append(rec)
     return records
@@ -312,11 +581,8 @@ def records_from_candidates_with_paths(
         source_id = str(row.get("source_id"))
         mag_bin = str(row.get("mag_bin", ""))
         path_str = str(row.get("path", ""))
-
-        if not path_str or path_str == "nan":
-            continue
-
-        path = Path(path_str)
+        path_missing = _canonical_candidate_id(row.get("path")) is None
+        path = Path(path_str) if not path_missing else Path("__missing_light_curve__") / f"{source_id}.dat2"
         if prefix and root:
             try:
                 path = root / path.relative_to(prefix)
@@ -331,7 +597,8 @@ def records_from_candidates_with_paths(
             "lc_dir": lc_dir,
             "asas_sn_id": source_id,
             "dat_path": str(path),
-            "found": path.exists(),
+            "found": path.is_file(),
+            "input_source": "candidate_path",
         }
         records.setdefault(mag_bin, []).append(rec)
     return records
@@ -349,9 +616,24 @@ def _ordered_reproduction_columns(frame: pd.DataFrame, extra_cols: Iterable[str]
             "source_id",
             "category",
             "mag_bin",
+            "trial_status",
+            "evaluation_error",
+            "reproduction_record_id",
             "detected",
+            "pipeline_passed",
             "rejection_reason",
             "detection_details",
+            "input_source",
+            "dat_path",
+            "input_record_fingerprint",
+            "input_file_fingerprint",
+            "input_fingerprint",
+            "candidate_set_fingerprint",
+            "manifest_fingerprint",
+            "auxiliary_input_fingerprint",
+            "config_fingerprint",
+            "code_fingerprint",
+            "run_fingerprint",
         ]
         if col in frame.columns
     ]
@@ -426,16 +708,27 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
     if isinstance(first, Mapping):
 
         coerced: list[dict[str, object]] = []
-        for rec in records:
+        seen_source_ids: set[str] = set()
+        seen_candidate_ids: set[str] = set()
+        for row_index, rec in enumerate(records):
             if not isinstance(rec, Mapping):
-                continue
+                raise ValueError(f"Candidate entry {row_index} is not a mapping")
             new = dict(rec)
-            source_id = str(new.get("source_id", "")).strip()
-
-            if not source_id:
-                continue
+            source_id = _canonical_candidate_id(new.get("source_id", new.get("asas_sn_id")))
+            if source_id is None and "path" in new:
+                source_id = _canonical_candidate_id(Path(str(new["path"])).stem)
+            if source_id is None:
+                raise ValueError(f"Candidate entry {row_index} has no usable source identity")
+            candidate_id = _canonical_candidate_id(new.get("candidate_id")) or source_id
+            if source_id in seen_source_ids:
+                raise ValueError(f"Candidates contain duplicate source_id value {source_id!r}")
+            if candidate_id in seen_candidate_ids:
+                raise ValueError(f"Candidates contain duplicate candidate_id value {candidate_id!r}")
+            seen_source_ids.add(source_id)
+            seen_candidate_ids.add(candidate_id)
 
             new["source_id"] = source_id
+            new["candidate_id"] = candidate_id
             new.setdefault("source", new.get("source", source_id))
 
             if "mag_bin" not in new or not new["mag_bin"]:
@@ -461,12 +754,14 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
     seen = set()
     for source_id in ids:
         if source_id in seen:
-            continue
+            raise ValueError(f"Candidates contain duplicate source identity {source_id!r}")
         seen.add(source_id)
         if source_id in lookup:
-            coerced.append(lookup[source_id])
+            record = dict(lookup[source_id])
+            record.setdefault("candidate_id", source_id)
+            coerced.append(record)
         else:
-            coerced.append({"source": source_id, "source_id": source_id, "mag_bin": None})
+            coerced.append({"source": source_id, "source_id": source_id, "candidate_id": source_id, "mag_bin": None})
     return coerced
 
 
@@ -828,6 +1123,12 @@ def build_reproduction_report(
                 df_targets["mag_bin"] = df_targets["mag_bin_y"].fillna(df_targets["mag_bin_x"])
                 df_targets = df_targets.drop(columns=["mag_bin_x", "mag_bin_y"])
 
+    if "mag_bin" not in df_targets.columns:
+        df_targets["mag_bin"] = ""
+    df_targets["mag_bin"] = df_targets["mag_bin"].map(
+        lambda value: "" if _canonical_candidate_id(value) is None else str(value)
+    )
+
     target_map_dict = target_map(df_targets)
 
     # Priority order for light curve sources:
@@ -858,7 +1159,103 @@ def build_reproduction_report(
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from manifest: {n_found} light curves found")
 
+    code_fingerprint = _reproduction_code_fingerprint()
+    config_fingerprint = _stable_digest(
+        {
+            "schema_version": REPRODUCTION_SCHEMA_VERSION,
+            "code_fingerprint": code_fingerprint,
+            "method": method,
+            "trigger_mode": trigger_mode,
+            "significance_threshold": significance_threshold,
+            "logbf_threshold_dip": logbf_threshold_dip,
+            "logbf_threshold_jump": logbf_threshold_jump,
+            "p_points": p_points,
+            "p_bounds": [p_min_dip, p_max_dip, p_min_jump, p_max_jump],
+            "mag_points": mag_points,
+            "mag_bounds": [mag_min_dip, mag_max_dip, mag_min_jump, mag_max_jump],
+            "baseline_func": baseline_func,
+            "baseline": [baseline_s0, baseline_w0, baseline_q, baseline_jitter, baseline_sigma_floor],
+            "run_confirmation": [run_min_points, max_gap_points, run_max_gap_days, run_min_duration_days],
+            "tagging": [skip_tags, min_time_span, min_points_per_day, min_cameras, skip_vsx, str(vsx_catalog), vsx_max_sep],
+            "signal_filter": min_mag_offset,
+            "post_filter": [run_filter, filter_min_run_cameras, filter_min_run_points, filter_min_bayes_factor],
+            "accepted_morphologies": accepted_morphologies,
+            "post_processing": [run_enrich, enrich_compute_ls, run_classify, run_characterize, run_dust],
+            "extra_baseline_kwargs": baseline_kwargs,
+        }
+    )
+    candidate_fingerprint = _stable_digest(
+        df_targets[[column for column in ("candidate_id", "source_id", "mag_bin", "path") if column in df_targets.columns]]
+        .sort_values("source_id", kind="mergesort")
+        .to_dict("records")
+    )
+    selected_input_records: list[dict[str, object]] = []
+    record_provenance_by_source: dict[str, dict[str, object]] = {}
+    if records_map:
+        for mag_bin in sorted(records_map):
+            for record in records_map[mag_bin]:
+                file_fingerprint = _path_fingerprint(record.get("dat_path"))
+                record_fingerprint = _stable_digest(
+                    {
+                        "source_id": _canonical_candidate_id(record.get("asas_sn_id")),
+                        "mag_bin": str(record.get("mag_bin")),
+                        "input_source": record.get("input_source"),
+                        "file": file_fingerprint,
+                    }
+                )
+                record["input_file_fingerprint"] = _stable_digest(file_fingerprint)
+                record["input_record_fingerprint"] = record_fingerprint
+                source_id = str(record.get("asas_sn_id"))
+                input_record = {
+                    "source_id": source_id,
+                    "input_source": record.get("input_source"),
+                    "dat_path": str(record.get("dat_path")),
+                    "lc_dir": record.get("lc_dir"),
+                    "index_num": record.get("index_num"),
+                    "index_csv": record.get("index_csv"),
+                    "input_record_fingerprint": record_fingerprint,
+                    "input_file_fingerprint": record["input_file_fingerprint"],
+                    "file": file_fingerprint,
+                }
+                selected_input_records.append(input_record)
+                record_provenance_by_source[source_id] = input_record
+    manifest_fingerprint = _stable_digest(_path_fingerprint(manifest_path)) if manifest_path is not None else None
+    auxiliary_inputs = {
+        "vsx_catalog": (
+            _path_fingerprint(vsx_catalog)
+            if manifest_subset is not None and not skip_tags and bool(records_map) and not skip_vsx
+            else None
+        ),
+        "index_file": (
+            _path_fingerprint(index_file)
+            if index_file is not None and (run_filter or run_characterize or run_dust)
+            else None
+        ),
+        "gaia_cache": (
+            _path_fingerprint(gaia_cache)
+            if gaia_cache is not None and run_characterize
+            else None
+        ),
+    }
+    auxiliary_input_fingerprint = _stable_digest(auxiliary_inputs)
+    input_fingerprint = _stable_digest(
+        {
+            "candidates": candidate_fingerprint,
+            "manifest": manifest_fingerprint,
+            "light_curves": selected_input_records,
+            "auxiliary_inputs": auxiliary_inputs,
+        }
+    )
+    run_fingerprint = _stable_digest(
+        {
+            "schema_version": REPRODUCTION_SCHEMA_VERSION,
+            "config_fingerprint": config_fingerprint,
+            "input_fingerprint": input_fingerprint,
+        }
+    )
+
     tags_applied = manifest_subset is not None and not skip_tags and bool(records_map)
+    tag_rejected_ids: set[str] = set()
     # Apply tag filters if manifest is provided and not skipped
     if tags_applied:
         if verbose:
@@ -884,7 +1281,13 @@ def build_reproduction_report(
             )
             
             # Update records_map to only include filtered sources
-            filtered_ids = set(df_filtered["source_id"].astype(str))
+            filtered_ids = set(_validate_unique_ids(df_filtered, "source_id", "Tagged reproduction candidates").astype(str))
+            original_ids = {
+                str(record.get("asas_sn_id"))
+                for records in records_map.values()
+                for record in records
+            }
+            tag_rejected_ids = original_ids - filtered_ids
             for mag_bin in list(records_map.keys()):
                 records_map[mag_bin] = [
                     rec for rec in records_map[mag_bin]
@@ -900,16 +1303,19 @@ def build_reproduction_report(
                 print(f"[TAG] Rejected {total_before - total_after} candidates")
         
         except Exception as e:
-            if verbose:
-                print(f"[TAG] Warning: tagging failed: {e}")
-                print(f"[TAG] Continuing without tagging...")
+            raise RuntimeError("Reproduction tag stage failed; refusing to report an untagged run as tagged") from e
 
     baseline_func_map = {
         "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
         "global_median": global_median_baseline,
         "per_camera_median": per_camera_median_baseline,
     }
-    selected_baseline_func = baseline_func_map.get(baseline_func, per_camera_gp_baseline)
+    if baseline_func not in baseline_func_map:
+        raise ValueError(
+            f"Unsupported baseline_func {baseline_func!r}; expected one of {sorted(baseline_func_map)}"
+        )
+    selected_baseline_func = baseline_func_map[baseline_func]
     baseline_kwargs_dict = dict(
         S0=baseline_s0,
         w0=baseline_w0,
@@ -921,17 +1327,18 @@ def build_reproduction_report(
 
     if method != "bayes":
         raise ValueError(f"Unsupported method '{method}'. Only 'bayes' is supported.")
-    if records_map is None or not records_map:
+    if records_map is None or (not records_map and not tags_applied):
         raise SystemExit("Bayesian method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
 
     rows = []
 
     for mag_bin in sorted(records_map):
         for rec in records_map[mag_bin]:
-            asn = rec.get("asas_sn_id")
+            asn = _canonical_candidate_id(rec.get("asas_sn_id"))
             lc_dir = rec.get("lc_dir")
             dat_path = rec.get("dat_path")
-            has_path = bool(dat_path) and Path(str(dat_path)).exists()
+            has_path = _canonical_candidate_id(dat_path) is not None and Path(str(dat_path)).is_file()
+            load_error: str | None = None
 
             if verbose and not has_path:
                 print(f"[DEBUG] {asn}: dat_path missing: {dat_path}")
@@ -948,14 +1355,15 @@ def build_reproduction_report(
                         dfg, dfv = pd.DataFrame(), pd.DataFrame()
                 else:
                     dfg, dfv = (
-                        read_lc_dat2(asn, lc_dir)
-                        if asn and lc_dir and has_path
+                        read_lc_dat2(asn, str(dat_path))
+                        if asn and has_path
                         else (pd.DataFrame(), pd.DataFrame())
                     )
             except Exception as e:
                 if verbose:
                     print(f"[DEBUG] {asn}: data load failed: {e}")
                 dfg, dfv = pd.DataFrame(), pd.DataFrame()
+                load_error = f"{type(e).__name__}: {e}"
 
             if verbose:
                 print(f"[DEBUG] {asn}: loaded g={len(dfg)} rows, v={len(dfv)} rows from {dat_path}")
@@ -963,10 +1371,11 @@ def build_reproduction_report(
             def apply_triggering(result: dict, band_name: str) -> dict:
                 """Normalize dip/jump trigger metadata without overriding trigger logic."""
                 for kind in ("dip", "jump"):
-                    block = result.get(kind, {})
+                    if not isinstance(result, dict):
+                        raise ValueError("score_lightcurve must return a mapping")
+                    block = result.get(kind)
                     if not isinstance(block, dict):
-                        result[kind] = {"significant": False}
-                        continue
+                        raise ValueError(f"score_lightcurve result is missing a {kind!r} decision block")
 
                     block = normalize_trigger_block(
                         block,
@@ -974,6 +1383,10 @@ def build_reproduction_report(
                         default_trigger_mode=trigger_mode,
                     )
                     idx = np.asarray(block.get("event_indices", np.array([], dtype=int)), dtype=int)
+                    significant = _strict_boolean_series(pd.Series([block.get("significant")])).iloc[0]
+                    if pd.isna(significant):
+                        raise ValueError(f"score_lightcurve {kind}.significant is not an explicit boolean")
+                    block["significant"] = bool(significant)
 
                     if verbose:
                         mode = str(block.get("trigger_mode", trigger_mode))
@@ -1010,6 +1423,8 @@ def build_reproduction_report(
                     return {
                         "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
                         "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
+                        "_evaluation_status": "ineligible_empty_band",
+                        "_evaluation_error": None,
                     }
 
                 try:
@@ -1035,6 +1450,8 @@ def build_reproduction_report(
                         run_min_duration_days=run_min_duration_days,
                     )
                     result = apply_triggering(result, band_name)
+                    result["_evaluation_status"] = "ok"
+                    result["_evaluation_error"] = None
                     return result
                 except Exception as e:
                     if verbose:
@@ -1042,10 +1459,32 @@ def build_reproduction_report(
                     return {
                         "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_dips": 0, "max_log_bf_local": np.nan},
                         "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan, "n_jumps": 0, "max_log_bf_local": np.nan},
+                        "_evaluation_status": "error",
+                        "_evaluation_error": f"{type(e).__name__}: {e}",
                     }
 
             res_g = bayes(dfg, "g")
             res_v = bayes(dfv, "V")
+            band_errors = [
+                f"{band}: {result.get('_evaluation_error')}"
+                for band, result in (("g", res_g), ("v", res_v))
+                if result.get("_evaluation_status") == "error"
+            ]
+            if not has_path:
+                trial_status = "input_missing"
+                evaluation_error = f"Light-curve path is missing or is not a file: {dat_path}"
+            elif load_error is not None:
+                trial_status = "error"
+                evaluation_error = f"load_error: {load_error}"
+            elif band_errors:
+                trial_status = "error"
+                evaluation_error = "; ".join(band_errors)
+            elif res_g.get("_evaluation_status") != "ok" and res_v.get("_evaluation_status") != "ok":
+                trial_status = "ineligible_empty_light_curve"
+                evaluation_error = None
+            else:
+                trial_status = "ok"
+                evaluation_error = None
 
             # Apply morphology filtering to results
             def count_accepted_runs(res: dict, kind: str) -> int:
@@ -1053,7 +1492,7 @@ def build_reproduction_report(
                 run_summaries = res.get(kind, {}).get("run_summaries", [])
                 return sum(
                     1 for s in run_summaries
-                    if s.get("morphology", "none").lower() in accepted_morphologies
+                    if str(s.get("morphology") or "none").lower() in accepted_morphologies
                 )
 
             # Update significant flags based on morphology filter
@@ -1071,7 +1510,7 @@ def build_reproduction_report(
                 # Find best accepted run (first one that passes morphology filter)
                 best_run = None
                 for s in run_summaries:
-                    if s.get("morphology", "none").lower() in accepted_morphologies:
+                    if str(s.get("morphology") or "none").lower() in accepted_morphologies:
                         best_run = s
                         break
 
@@ -1081,7 +1520,7 @@ def build_reproduction_report(
 
                 if best_run:
                     params = best_run.get("params", {})
-                    morph = best_run.get("morphology", "none")
+                    morph = str(best_run.get("morphology") or "none").lower()
                     # Extract width param based on morphology type
                     if morph == "gaussian":
                         width_param = params.get("sigma", np.nan)
@@ -1179,6 +1618,8 @@ def build_reproduction_report(
                         "dipper_score": 0.0,
                         "dipper_n_dips": 0,
                         "dipper_n_valid_dips": 0,
+                        "dipper_score_status": "not_applicable",
+                        "dipper_score_error": None,
                     }
                 try:
                     df_base = res_band.get("df_base")
@@ -1191,12 +1632,16 @@ def build_reproduction_report(
                         "dipper_score": float(score),
                         "dipper_n_dips": int(len(events)),
                         "dipper_n_valid_dips": int(sum(1 for e in events if e.valid)),
+                        "dipper_score_status": "ok",
+                        "dipper_score_error": None,
                     }
-                except Exception:
+                except Exception as exc:
                     return {
-                        "dipper_score": 0.0,
-                        "dipper_n_dips": 0,
-                        "dipper_n_valid_dips": 0,
+                        "dipper_score": np.nan,
+                        "dipper_n_dips": pd.NA,
+                        "dipper_n_valid_dips": pd.NA,
+                        "dipper_score_status": "error",
+                        "dipper_score_error": f"{type(exc).__name__}: {exc}",
                     }
 
             g_dipper_stats = compute_dipper_stats(dfg_clean, res_g)
@@ -1254,28 +1699,58 @@ def build_reproduction_report(
                 else:
                     combined_rejection = v_dip_reason
 
-            if out_dir:
+            plot_status = "not_requested"
+            plot_error: str | None = None
+            if out_dir and trial_status == "ok":
                 plot_path = Path(out_dir) / f"{asn}_dips.{plot_format}"
-                plot_light_curve_with_dips(
-                    clean_for_bayes(dfg),
-                    clean_for_bayes(dfv),
-                    res_g,
-                    res_v,
-                    str(asn),
-                    plot_path,
-                    accepted_morphologies=accepted_morphologies,
-                    g_significant=res_g["dip"].get("significant", False),
-                    v_significant=res_v["dip"].get("significant", False),
-                )
+                try:
+                    plot_light_curve_with_dips(
+                        clean_for_bayes(dfg),
+                        clean_for_bayes(dfv),
+                        res_g,
+                        res_v,
+                        str(asn),
+                        plot_path,
+                        accepted_morphologies=accepted_morphologies,
+                        g_significant=res_g["dip"].get("significant", False),
+                        v_significant=res_v["dip"].get("significant", False),
+                    )
+                    plot_status = "ok"
+                except Exception as exc:
+                    plot_status = "error"
+                    plot_error = f"{type(exc).__name__}: {exc}"
 
             rows.append(
                 {
+                    "candidate_id": next(
+                        (
+                            str(value)
+                            for value in df_targets.loc[df_targets["source_id"].astype(str).eq(str(asn)), "candidate_id"]
+                            if _canonical_candidate_id(value) is not None
+                        ),
+                        str(asn),
+                    ),
                     "mag_bin": str(rec.get("mag_bin")),
                     "asas_sn_id": asn,
                     "index_num": rec.get("index_num"),
                     "index_csv": rec.get("index_csv"),
                     "lc_dir": lc_dir,
                     "dat_path": dat_path,
+                    "input_source": rec.get("input_source", "unknown"),
+                    "input_record_fingerprint": rec.get("input_record_fingerprint"),
+                    "input_file_fingerprint": rec.get("input_file_fingerprint"),
+                    "input_fingerprint": input_fingerprint,
+                    "candidate_set_fingerprint": candidate_fingerprint,
+                    "manifest_fingerprint": manifest_fingerprint,
+                    "auxiliary_input_fingerprint": auxiliary_input_fingerprint,
+                    "config_fingerprint": config_fingerprint,
+                    "code_fingerprint": code_fingerprint,
+                    "run_fingerprint": run_fingerprint,
+                    "reproduction_schema_version": REPRODUCTION_SCHEMA_VERSION,
+                    "trial_status": trial_status,
+                    "evaluation_error": evaluation_error,
+                    "plot_status": plot_status,
+                    "plot_error": plot_error,
 
                     "g_bayes_dip_significant": bool(res_g["dip"].get("significant", False)),
                     "v_bayes_dip_significant": bool(res_v["dip"].get("significant", False)),
@@ -1416,6 +1891,10 @@ def build_reproduction_report(
                     "v_dipper_n_dips": v_dipper_stats["dipper_n_dips"],
                     "g_dipper_n_valid_dips": g_dipper_stats["dipper_n_valid_dips"],
                     "v_dipper_n_valid_dips": v_dipper_stats["dipper_n_valid_dips"],
+                    "g_dipper_score_status": g_dipper_stats["dipper_score_status"],
+                    "v_dipper_score_status": v_dipper_stats["dipper_score_status"],
+                    "g_dipper_score_error": g_dipper_stats["dipper_score_error"],
+                    "v_dipper_score_error": v_dipper_stats["dipper_score_error"],
 
                     # System info (from events.py)
                     "g_used_sigma_eff": bool(res_g["dip"].get("used_sigma_eff", False)),
@@ -1450,51 +1929,21 @@ def build_reproduction_report(
             n_before = len(rows_df)
 
         try:
-            # Create combined columns for the filter (which expects detect schema)
-            # Use g-band as primary, fall back to v-band
-            df_for_filter = rows_df.copy()
-            if "g_baseline_mag" in df_for_filter.columns:
-                v_baseline = df_for_filter["v_baseline_mag"] if "v_baseline_mag" in df_for_filter.columns else np.nan
-                df_for_filter["baseline_mag"] = df_for_filter["g_baseline_mag"].fillna(v_baseline)
-            if "g_dip_best_mag_event" in df_for_filter.columns:
-                v_dip = df_for_filter["v_dip_best_mag_event"] if "v_dip_best_mag_event" in df_for_filter.columns else np.nan
-                df_for_filter["dip_best_mag_event"] = df_for_filter["g_dip_best_mag_event"].fillna(v_dip)
-            if "g_jump_best_mag_event" in df_for_filter.columns:
-                v_jump = df_for_filter["v_jump_best_mag_event"] if "v_jump_best_mag_event" in df_for_filter.columns else np.nan
-                df_for_filter["jump_best_mag_event"] = df_for_filter["g_jump_best_mag_event"].fillna(v_jump)
-
-            # Get filtered result to identify which rows pass
-            rows_df_filtered = filter_signal_amplitude(
-                df_for_filter,
+            rows_df = _apply_reproduction_signal_amplitude(
+                rows_df,
                 min_mag_offset=min_mag_offset,
-                show_tqdm=verbose,
             )
 
-            # Identify rejected rows and mark their rejection reason
-            if "asas_sn_id" in rows_df.columns:
-                before_ids = set(rows_df["asas_sn_id"].astype(str))
-                after_ids = set(rows_df_filtered["asas_sn_id"].astype(str)) if not rows_df_filtered.empty else set()
-                rejected_ids = before_ids - after_ids
-
-                if rejected_ids:
-                    # Mark rows that were detected but failed signal amplitude
-                    mask = rows_df["asas_sn_id"].astype(str).isin(rejected_ids)
-                    # Only update if they had passed previous filters (rejection_reason was None)
-                    if "rejection_reason" in rows_df.columns:
-                        mask &= rows_df["rejection_reason"].isna()
-                    rows_df.loc[mask, "rejection_reason"] = "signal_amplitude"
-                    # Also mark as not significant since they failed the filter
-                    rows_df.loc[mask, "g_bayes_dip_significant"] = False
-                    rows_df.loc[mask, "v_bayes_dip_significant"] = False
-
             if verbose:
-                n_rejected = len(rejected_ids) if "asas_sn_id" in rows_df.columns else 0
+                n_rejected = int(
+                    _strict_boolean_series(rows_df["failed_signal_amplitude"])
+                    .fillna(False)
+                    .sum()
+                )
                 print(f"[SIGNAL-FILTER] Marked {n_rejected}/{n_before} as rejected by signal amplitude filter")
 
         except Exception as e:
-            if verbose:
-                print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
-                print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
+            raise RuntimeError("Reproduction signal-amplitude stage failed; refusing unfiltered science output") from e
 
     # ==========================================================================
     # Post-processing: Load index to get Gaia IDs and coordinates
@@ -1512,7 +1961,7 @@ def build_reproduction_report(
                 index_df = index_df[[col for col in index_cols if col in index_df.columns]].copy()
 
                 # Ensure asas_sn_id is string for matching
-                index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
+                index_df["asas_sn_id"] = _validate_unique_ids(index_df, "asas_sn_id", "Reproduction index")
 
                 # The source_id in rows_df is actually asas_sn_id
                 if "asas_sn_id" in rows_df.columns:
@@ -1541,10 +1990,9 @@ def build_reproduction_report(
                         print(f"[INDEX] Matched {n_with_gaia}/{len(rows_df)} sources to index (got gaia_id, ra_deg, dec_deg)")
 
             except Exception as e:
-                if verbose:
-                    print(f"[INDEX] Warning: Failed to load index: {e}")
-        elif verbose:
-            print(f"[INDEX] Warning: Index file not found: {index_path}")
+                raise RuntimeError("Reproduction index merge failed") from e
+        else:
+            raise FileNotFoundError(f"Requested reproduction index file does not exist: {index_path}")
 
     # ==========================================================================
     # Post-processing: Filters (apply_filters)
@@ -1557,6 +2005,12 @@ def build_reproduction_report(
             df_for_post = rows_df.copy()
             if "path" not in df_for_post.columns and "dat_path" in df_for_post.columns:
                 df_for_post["path"] = df_for_post["dat_path"]
+            if "lc_path" not in df_for_post.columns and "dat_path" in df_for_post.columns:
+                df_for_post["lc_path"] = df_for_post["dat_path"]
+            df_for_post["_reproduction_order"] = np.arange(len(df_for_post), dtype=int)
+            ok_mask = df_for_post.get("trial_status", pd.Series("ok", index=df_for_post.index)).astype("string").eq("ok")
+            df_not_evaluated = df_for_post.loc[~ok_mask].copy()
+            df_for_post = df_for_post.loc[ok_mask].copy()
 
             def _combine(primary: str, secondary: str):
                 if primary in df_for_post.columns:
@@ -1597,68 +2051,90 @@ def build_reproduction_report(
             df_for_post["dip_max_run_points"] = _max_cols("g_dip_max_run_points", "v_dip_max_run_points")
             df_for_post["jump_max_run_points"] = _max_cols("g_jump_max_run_points", "v_jump_max_run_points")
 
-            rows_df = apply_filters(
-                df_for_post,
-                min_bayes_factor=filter_min_bayes_factor,
-                apply_run_robustness=True,
-                min_run_points=filter_min_run_points,
-                min_run_cameras=filter_min_run_cameras,
-                show_tqdm=verbose,
-                verbose=verbose,
-            )
+            if df_for_post.empty:
+                rows_df = df_not_evaluated.drop(columns=["_reproduction_order"], errors="ignore")
+            else:
+                filtered_ok = apply_filters(
+                    df_for_post,
+                    min_bayes_factor=filter_min_bayes_factor,
+                    apply_run_robustness=True,
+                    min_run_points=filter_min_run_points,
+                    min_run_cameras=filter_min_run_cameras,
+                    show_tqdm=verbose,
+                    verbose=verbose,
+                )
+                rows_df = (
+                    pd.concat([filtered_ok, df_not_evaluated], ignore_index=True, sort=False)
+                    .sort_values("_reproduction_order", kind="mergesort")
+                    .drop(columns=["_reproduction_order"], errors="ignore")
+                    .reset_index(drop=True)
+                )
         except Exception as e:
-            if verbose:
-                print(f"[FILTER] Warning: filter step failed: {e}")
-                print("[FILTER] Continuing without filtering...")
+            raise RuntimeError("Reproduction post-filter stage failed; refusing unfiltered science output") from e
 
     # ==========================================================================
     # Post-processing: Postprocess plots (optional)
     # ==========================================================================
     if run_postprocess:
         if not run_filter:
-            if verbose:
-                print("[POSTPROCESS] Warning: --run-postprocess requires --run-filter. Skipping.")
+            raise ValueError("run_postprocess=True requires run_filter=True")
         elif not rows_df.empty:
             if verbose:
                 print("\n[POSTPROCESS] Generating postprocess plots...")
             try:
                 baseline_map = {
                     "gp": "per_camera_gp",
+                    "gp_masked": "gp_masked",
                     "global_median": "global_median",
                     "per_camera_median": "per_camera_median",
                 }
                 baseline_name = baseline_map.get(str(baseline_func), "per_camera_gp")
                 postprocess_dir = Path(out_dir) / "postprocess"
                 postprocess_dir.mkdir(parents=True, exist_ok=True)
-                plot_passing_candidates(
-                    rows_df,
-                    postprocess_dir,
-                    baseline=baseline_name,
-                    logbf_threshold_dip=logbf_threshold_dip,
-                    logbf_threshold_jump=logbf_threshold_jump,
-                    format=plot_format,
-                    max_plots=max_plots,
-                    show_tqdm=verbose,
-                )
+                plot_mask = rows_df.get("trial_status", pd.Series("ok", index=rows_df.index)).astype("string").eq("ok")
+                if "failed_any" in rows_df.columns:
+                    failed = _strict_boolean_series(rows_df["failed_any"])
+                    plot_mask &= failed.eq(False).fillna(False)
+                plot_input = rows_df.loc[plot_mask].copy()
+                if not plot_input.empty:
+                    plot_passing_candidates(
+                        plot_input,
+                        postprocess_dir,
+                        baseline=baseline_name,
+                        logbf_threshold_dip=logbf_threshold_dip,
+                        logbf_threshold_jump=logbf_threshold_jump,
+                        format=plot_format,
+                        max_plots=max_plots,
+                        show_tqdm=verbose,
+                    )
+                    rows_df["postprocess_plot_status"] = "ok"
+                else:
+                    rows_df["postprocess_plot_status"] = "ineligible_no_passing_candidates"
+                rows_df["postprocess_plot_error"] = None
             except Exception as e:
-                if verbose:
-                    print(f"[POSTPROCESS] Warning: postprocess failed: {e}")
+                rows_df["postprocess_plot_status"] = "error"
+                rows_df["postprocess_plot_error"] = f"{type(e).__name__}: {e}"
 
     # ==========================================================================
     # Post-processing: Enrich with compute_stats (optional)
     # ==========================================================================
     if run_enrich:
         if not run_filter:
-            if verbose:
-                print("[ENRICH] Warning: --run-enrich requires --run-filter. Skipping.")
+            raise ValueError("run_enrich=True requires run_filter=True")
         elif not rows_df.empty:
             if verbose:
                 print("\n[ENRICH] Enriching with light curve stats...")
             try:
+                rows_df = rows_df.copy()
+                rows_df["_reproduction_order"] = np.arange(len(rows_df), dtype=int)
+                eligible = rows_df.get("trial_status", pd.Series("ok", index=rows_df.index)).astype("string").eq("ok")
                 if "failed_any" in rows_df.columns:
-                    df_passed = rows_df[~rows_df["failed_any"]].copy()
+                    failed = _strict_boolean_series(rows_df["failed_any"])
+                    eligible &= failed.eq(False).fillna(False)
+                    df_passed = rows_df.loc[eligible].copy()
                 else:
-                    df_passed = rows_df.copy()
+                    df_passed = rows_df.loc[eligible].copy()
+                df_passthrough = rows_df.loc[~eligible].copy()
 
                 # Separate pass-through rows from rows needing compute_stats,
                 # tracking original position so we can reconstruct order afterwards.
@@ -1673,7 +2149,7 @@ def build_reproduction_report(
                         continue
                     lc_path = Path(str(path_val))
                     asassn_id = str(row.get("asas_sn_id") or row.get("source_id") or lc_path.stem)
-                    pending_tasks.append((row_dict, asassn_id, str(lc_path.parent), enrich_compute_ls))
+                    pending_tasks.append((row_dict, asassn_id, str(lc_path), enrich_compute_ls, lc_path.suffix.lstrip(".") or None))
                     pending_indices.append(pos)
 
                 n_enrich_workers = max(1, n_workers or WORKERS)
@@ -1689,11 +2165,28 @@ def build_reproduction_report(
                     )):
                         ordered_results[pos] = result
 
-                rows_df = pd.DataFrame(ordered_results)
+                enriched = pd.DataFrame(ordered_results)
+                if not enriched.empty:
+                    enriched["enrichment_status"] = np.where(
+                        enriched.get("stats_compute_status", pd.Series(index=enriched.index, dtype=object)).notna(),
+                        enriched.get("stats_compute_status", pd.Series("ok", index=enriched.index)),
+                        "error",
+                    )
+                    enriched["enrichment_error"] = np.where(
+                        enriched["enrichment_status"].astype(str).eq("error"),
+                        enriched.get("stats_compute_error", pd.Series(None, index=enriched.index)).fillna(
+                            "compute_stats worker returned no explicit status"
+                        ),
+                        enriched.get("stats_compute_error", pd.Series(None, index=enriched.index)),
+                    )
+                rows_df = (
+                    pd.concat([enriched, df_passthrough], ignore_index=True, sort=False)
+                    .sort_values("_reproduction_order", kind="mergesort")
+                    .drop(columns=["_reproduction_order"], errors="ignore")
+                    .reset_index(drop=True)
+                )
             except Exception as e:
-                if verbose:
-                    print(f"[ENRICH] Warning: enrichment failed: {e}")
-                    print("[ENRICH] Continuing without enrichment...")
+                raise RuntimeError("Requested reproduction enrichment failed") from e
 
     # Load index logic has been moved before apply_filters.
 
@@ -1701,9 +2194,11 @@ def build_reproduction_report(
     # Post-processing: Characterization (Gaia DR3, stellar params, photometry)
     # ==========================================================================
     if run_characterize and not rows_df.empty:
-        df_char = rows_df
+        char_mask = rows_df.get("trial_status", pd.Series("ok", index=rows_df.index)).astype("string").eq("ok")
         if "failed_any" in rows_df.columns:
-            df_char = rows_df[~rows_df["failed_any"]].copy()
+            failed = _strict_boolean_series(rows_df["failed_any"])
+            char_mask &= failed.eq(False).fillna(False)
+        df_char = rows_df.loc[char_mask].copy()
         if df_char.empty:
             if verbose:
                 print("\n[CHARACTERIZE] No rows passed failed_any filter. Skipping Gaia DR3 query.")
@@ -1729,7 +2224,7 @@ def build_reproduction_report(
 
                 if not gaia_df.empty:
                     # Merge Gaia data with results by gaia_id
-                    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+                    gaia_df["source_id"] = _validate_unique_ids(gaia_df, "source_id", "Gaia characterization result")
 
                     # Select key columns from Gaia
                     gaia_cols = [
@@ -1754,38 +2249,61 @@ def build_reproduction_report(
                         left_on="_gaia_id_str",
                         right_on="source_id",
                         how="left",
-                        suffixes=("", "_gaia_query")
+                        suffixes=("", "_gaia_query"),
+                        validate="many_to_one",
                     )
                     rows_df = rows_df.drop(columns=["_gaia_id_str", "source_id_gaia_query", "source_id"], errors="ignore")
 
                     if verbose:
                         n_matched = rows_df["gaia_ruwe"].notna().sum() if "gaia_ruwe" in rows_df.columns else 0
                         print(f"[CHARACTERIZE] Matched {n_matched}/{len(rows_df)} sources to Gaia DR3")
+                    rows_df["characterization_status"] = np.where(
+                        rows_df.get("gaia_ruwe", pd.Series(index=rows_df.index, dtype=float)).notna(),
+                        "matched",
+                        "no_match",
+                    )
+                else:
+                    rows_df["characterization_status"] = "no_matches_returned"
             else:
-                if verbose:
-                    print("[CHARACTERIZE] No Gaia IDs found. Use --index-file to provide ASAS-SN index with gaia_id column.")
+                rows_df["characterization_status"] = "ineligible_no_gaia_id"
 
         except Exception as e:
-            if verbose:
-                print(f"[CHARACTERIZE] Warning: Gaia characterization failed: {e}")
-                print(f"[CHARACTERIZE] Continuing without Gaia characterization...")
+            raise RuntimeError("Requested reproduction Gaia characterization failed") from e
 
     # ==========================================================================
     # Post-processing: Dust extinction
     # ==========================================================================
+    def eligible_postprocess_mask(frame: pd.DataFrame) -> pd.Series:
+        mask = frame.get("trial_status", pd.Series("ok", index=frame.index)).astype("string").eq("ok")
+        if "failed_any" in frame.columns:
+            failed = _strict_boolean_series(frame["failed_any"])
+            mask &= failed.eq(False).fillna(False)
+        return mask
+
     if run_dust and not rows_df.empty:
         if verbose:
             print(f"\n[DUST] Computing 3D dust extinction for {len(rows_df)} sources...")
 
         try:
-            rows_df = get_dust_extinction(rows_df)
+            rows_df = rows_df.copy()
+            rows_df["_reproduction_order"] = np.arange(len(rows_df), dtype=int)
+            dust_mask = eligible_postprocess_mask(rows_df)
+            dust_eligible = rows_df.loc[dust_mask].copy()
+            dust_passthrough = rows_df.loc[~dust_mask].copy()
+            dust_result = get_dust_extinction(dust_eligible) if not dust_eligible.empty else dust_eligible
+            if len(dust_result) != len(dust_eligible):
+                raise ValueError("Dust-extinction stage changed the candidate row count")
+            rows_df = (
+                pd.concat([dust_result, dust_passthrough], ignore_index=True, sort=False)
+                .sort_values("_reproduction_order", kind="mergesort")
+                .drop(columns=["_reproduction_order"], errors="ignore")
+                .reset_index(drop=True)
+            )
             if verbose:
                 n_with_av = (rows_df["A_v_3d"] > 0).sum() if "A_v_3d" in rows_df.columns else 0
                 print(f"[DUST] {n_with_av}/{len(rows_df)} sources have A_V > 0")
         except Exception as e:
-            if verbose:
-                print(f"[DUST] Warning: Dust extinction failed: {e}")
-                print(f"[DUST] Continuing without dust extinction...")
+            raise RuntimeError("Requested reproduction dust-extinction stage failed") from e
 
     # ==========================================================================
     # Post-processing: Classification (EB/CV/starspot rejection, YSO)
@@ -1795,49 +2313,169 @@ def build_reproduction_report(
             print(f"\n[CLASSIFY] Running classification on {len(rows_df)} sources...")
 
         try:
-            rows_df = compute_all_classifications(rows_df)
+            rows_df = rows_df.copy()
+            rows_df["_reproduction_order"] = np.arange(len(rows_df), dtype=int)
+            classify_mask = eligible_postprocess_mask(rows_df)
+            classify_eligible = rows_df.loc[classify_mask].copy()
+            classify_passthrough = rows_df.loc[~classify_mask].copy()
+            classify_result = (
+                compute_all_classifications(classify_eligible)
+                if not classify_eligible.empty
+                else classify_eligible
+            )
+            if len(classify_result) != len(classify_eligible):
+                raise ValueError("Classification stage changed the candidate row count")
+            rows_df = (
+                pd.concat([classify_result, classify_passthrough], ignore_index=True, sort=False)
+                .sort_values("_reproduction_order", kind="mergesort")
+                .drop(columns=["_reproduction_order"], errors="ignore")
+                .reset_index(drop=True)
+            )
             if verbose:
                 if "final_class" in rows_df.columns:
                     print("[CLASSIFY] Classification summary:")
                     print(rows_df["final_class"].value_counts().to_string())
         except Exception as e:
-            if verbose:
-                print(f"[CLASSIFY] Warning: Classification failed: {e}")
-                print(f"[CLASSIFY] Continuing without classification...")
+            raise RuntimeError("Requested reproduction classification failed") from e
 
     if "source_id" not in rows_df.columns:
         if "asas_sn_id" in rows_df.columns:
-            rows_df["source_id"] = rows_df["asas_sn_id"].astype(str)
+            rows_df["source_id"] = rows_df["asas_sn_id"].map(_canonical_candidate_id).astype("string")
         else:
-            rows_df["source_id"] = ""
+            rows_df["source_id"] = pd.Series(pd.NA, index=rows_df.index, dtype="string")
     rows_df = rows_df.drop(columns=["asas_sn_id"], errors="ignore")
     if "mag_bin" not in rows_df.columns:
         rows_df["mag_bin"] = ""
+    rows_df["mag_bin"] = rows_df["mag_bin"].map(
+        lambda value: "" if _canonical_candidate_id(value) is None else str(value)
+    )
+    if not rows_df.empty:
+        rows_df["source_id"] = _validate_unique_ids(rows_df, "source_id", "Reproduction results")
+        target_candidate_by_source = df_targets.set_index("source_id")["candidate_id"].astype(str).to_dict()
+        if "candidate_id" in rows_df.columns:
+            mismatched = rows_df.apply(
+                lambda row: str(row["candidate_id"]) != target_candidate_by_source.get(str(row["source_id"]), str(row["candidate_id"])),
+                axis=1,
+            )
+            if bool(mismatched.any()):
+                raise ValueError("Reproduction result candidate_id/source_id pairs do not match the requested candidates")
+            rows_df = rows_df.drop(columns=["candidate_id"])
 
-    merged = df_targets.merge(rows_df, on=["source_id", "mag_bin"], how="left", suffixes=("", "_det"))
+    merged = df_targets.merge(
+        rows_df,
+        on=["source_id", "mag_bin"],
+        how="left",
+        suffixes=("", "_det"),
+        validate="one_to_one",
+    )
+    for column in (
+        "input_source",
+        "dat_path",
+        "lc_dir",
+        "index_num",
+        "index_csv",
+        "input_record_fingerprint",
+        "input_file_fingerprint",
+    ):
+        mapped = merged["source_id"].astype(str).map(
+            lambda source_id: record_provenance_by_source.get(source_id, {}).get(column)
+        )
+        has_selected_record = merged["source_id"].astype(str).isin(record_provenance_by_source)
+        if column not in merged.columns:
+            merged[column] = mapped
+        else:
+            merged.loc[has_selected_record, column] = mapped.loc[has_selected_record]
+        merged = merged.drop(columns=[f"{column}_det"], errors="ignore")
+    merged["path"] = merged["dat_path"]
+    merged = merged.drop(columns=["path_det"], errors="ignore")
+
+    missing_result = merged.get("trial_status", pd.Series(pd.NA, index=merged.index, dtype="string")).isna()
+    if "trial_status" not in merged.columns:
+        merged["trial_status"] = pd.Series(pd.NA, index=merged.index, dtype="string")
+    merged.loc[missing_result & merged["source_id"].astype(str).isin(tag_rejected_ids), "trial_status"] = "ineligible_tag_filter"
+    merged.loc[missing_result & ~merged["source_id"].astype(str).isin(tag_rejected_ids), "trial_status"] = "not_evaluated"
+    if "evaluation_error" not in merged.columns:
+        merged["evaluation_error"] = None
+    merged.loc[merged["trial_status"].eq("not_evaluated") & merged["evaluation_error"].isna(), "evaluation_error"] = (
+        "No coherent light-curve record was evaluated for this candidate"
+    )
+    for column, value in (
+        ("input_fingerprint", input_fingerprint),
+        ("candidate_set_fingerprint", candidate_fingerprint),
+        ("manifest_fingerprint", manifest_fingerprint),
+        ("auxiliary_input_fingerprint", auxiliary_input_fingerprint),
+        ("config_fingerprint", config_fingerprint),
+        ("code_fingerprint", code_fingerprint),
+        ("run_fingerprint", run_fingerprint),
+        ("reproduction_schema_version", REPRODUCTION_SCHEMA_VERSION),
+    ):
+        if column not in merged.columns:
+            merged[column] = value
+        elif value is not None:
+            merged[column] = merged[column].fillna(value)
+    merged["reproduction_record_id"] = merged.apply(
+        lambda row: _stable_digest(
+            {
+                "candidate_id": row.get("candidate_id"),
+                "source_id": row.get("source_id"),
+                "input_record_fingerprint": row.get("input_record_fingerprint"),
+                "run_fingerprint": row.get("run_fingerprint"),
+            }
+        ),
+        axis=1,
+    )
+    if bool(merged["reproduction_record_id"].duplicated().any()):
+        raise ValueError("Reproduction output contains duplicate per-candidate record identities")
 
     g_peaks = merged["g_n_peaks"] if "g_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
     v_peaks = merged["v_n_peaks"] if "v_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
-    g_bayes = (
-        merged["g_bayes_dip_significant"].fillna(False).astype(bool)
-        if "g_bayes_dip_significant" in merged.columns
-        else pd.Series(False, index=merged.index)
-    )
-    v_bayes = (
-        merged["v_bayes_dip_significant"].fillna(False).astype(bool)
-        if "v_bayes_dip_significant" in merged.columns
-        else pd.Series(False, index=merged.index)
-    )
+    evidence_flags: list[pd.Series] = []
+    for peaks in (g_peaks, v_peaks):
+        numeric = pd.to_numeric(peaks, errors="coerce")
+        if bool(numeric.notna().any()):
+            evidence_flags.append(numeric.gt(0).astype("boolean").mask(numeric.isna() | numeric.lt(0), pd.NA))
+    for column in ("g_bayes_dip_significant", "v_bayes_dip_significant"):
+        if column in merged.columns:
+            evidence_flags.append(_strict_boolean_series(merged[column]))
+    detected = pd.Series(pd.NA, index=merged.index, dtype="boolean")
+    if evidence_flags:
+        evidence = pd.concat(evidence_flags, axis=1).astype("boolean")
+        detected.loc[evidence.eq(True).any(axis=1)] = True
+        detected.loc[evidence.eq(False).all(axis=1)] = False
+    successful = merged["trial_status"].astype("string").eq("ok")
+    if bool(detected.loc[successful].isna().any()):
+        raise ValueError("Successful reproduction rows contain an unknown detection decision")
+    detected.loc[~successful] = pd.NA
+    merged["detected"] = detected
+    for column in (
+        "g_bayes_dip_significant",
+        "v_bayes_dip_significant",
+        "g_bayes_jump_significant",
+        "v_bayes_jump_significant",
+        "g_used_sigma_eff",
+        "v_used_sigma_eff",
+    ):
+        if column in merged.columns:
+            parsed = _strict_boolean_series(merged[column])
+            parsed.loc[~successful] = pd.NA
+            merged[column] = parsed
+    merged.loc[~successful, "rejection_reason"] = merged.loc[~successful, "trial_status"].astype(str)
 
-    merged["detected"] = (
-        (g_peaks.fillna(0).astype(float) > 0)
-        | (v_peaks.fillna(0).astype(float) > 0)
-        | g_bayes
-        | v_bayes
-    )
+    if run_filter and "failed_any" in merged.columns:
+        failed_any = _strict_boolean_series(merged["failed_any"])
+        pipeline_passed = detected & ~failed_any
+        pipeline_passed.loc[~successful | failed_any.isna()] = pd.NA
+        merged["pipeline_passed"] = pipeline_passed.astype("boolean")
+    else:
+        merged["pipeline_passed"] = detected.astype("boolean")
 
     def format_detection(row: pd.Series) -> str:
-        if not row.get("detected", False):
+        if str(row.get("trial_status")) != "ok":
+            error = row.get("evaluation_error")
+            return f"unknown ({row.get('trial_status')}{': ' + str(error) if pd.notna(error) and error else ''})"
+        if row.get("detected") is not True and not isinstance(row.get("detected"), np.bool_):
+            return "—"
+        if not bool(row.get("detected")):
             return "—"
         parts = [f"mag_bin={row.get('mag_bin', '')}"]
 
@@ -1847,7 +2485,8 @@ def build_reproduction_report(
             parts.append(f"v_peaks={int(row['v_n_peaks'])}")
 
         def bayes_part(prefix: str) -> str | None:
-            sig = bool(row.get(f"{prefix}_bayes_dip_significant", False))
+            sig_value = row.get(f"{prefix}_bayes_dip_significant", pd.NA)
+            sig = bool(sig_value) if pd.notna(sig_value) else False
             if not sig:
                 return None
             bf = row.get(f"{prefix}_bayes_dip_bayes_factor")
@@ -2010,9 +2649,50 @@ Examples:
     g_input = parser.add_argument_group("Input")
     g_manifest_tag = parser.add_argument_group("Manifest & tag")
     g_filter = parser.add_argument_group("Filter")
+    g_detection = parser.add_argument_group("Detection")
     g_postprocess = parser.add_argument_group("Postprocess")
     g_output = parser.add_argument_group("Output")
     g_general = parser.add_argument_group("General")
+
+    g_detection.add_argument(
+        "--trigger-mode",
+        choices=("posterior_prob", "logbf"),
+        default=TRIGGER_MODE,
+        help="Event triggering statistic.",
+    )
+    g_detection.add_argument("--significance-threshold", type=float, default=SIGNIFICANCE_THRESHOLD)
+    g_detection.add_argument("--logbf-threshold-dip", type=float, default=LOGBF_THRESHOLD_DIP)
+    g_detection.add_argument("--logbf-threshold-jump", type=float, default=LOGBF_THRESHOLD_JUMP)
+    g_detection.add_argument("--p-points", type=int, default=P_POINTS)
+    g_detection.add_argument("--p-min-dip", type=float, default=None)
+    g_detection.add_argument("--p-max-dip", type=float, default=None)
+    g_detection.add_argument("--p-min-jump", type=float, default=None)
+    g_detection.add_argument("--p-max-jump", type=float, default=None)
+    g_detection.add_argument("--mag-points", type=int, default=MAG_POINTS)
+    g_detection.add_argument("--mag-min-dip", type=float, default=None)
+    g_detection.add_argument("--mag-max-dip", type=float, default=None)
+    g_detection.add_argument("--mag-min-jump", type=float, default=None)
+    g_detection.add_argument("--mag-max-jump", type=float, default=None)
+    g_detection.add_argument(
+        "--baseline-func",
+        choices=("gp", "gp_masked", "global_median", "per_camera_median"),
+        default=BASELINE_FUNC,
+    )
+    g_detection.add_argument("--baseline-s0", type=float, default=BASELINE_S0)
+    g_detection.add_argument("--baseline-w0", type=float, default=BASELINE_W0)
+    g_detection.add_argument("--baseline-q", type=float, default=BASELINE_Q)
+    g_detection.add_argument("--baseline-jitter", type=float, default=BASELINE_JITTER)
+    g_detection.add_argument("--baseline-sigma-floor", type=float, default=None)
+    g_detection.add_argument("--run-min-points", type=int, default=RUN_MIN_POINTS)
+    g_detection.add_argument(
+        "--run-max-gap-points",
+        dest="run_max_gap_points",
+        type=int,
+        default=RUN_MAX_GAP_POINTS,
+    )
+    g_detection.add_argument("--run-max-gap-days", type=float, default=None)
+    g_detection.add_argument("--run-min-duration-days", type=float, default=0.0)
+    g_detection.add_argument("--min-mag-offset", type=float, default=MIN_MAG_OFFSET)
 
     g_output.add_argument(
         "--output-dir",
@@ -2219,18 +2899,18 @@ Examples:
 
 def main(argv: Iterable[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    apply_config(
-        args,
+    args = parse_args_with_config(
+        parser,
         command="reproduce",
+        argv=list(argv) if argv is not None else None,
         valid_keys=namespace_keys(parser, REPRODUCE_CONFIG_DEFAULTS),
         path_keys={
             "out_dir",
             "gaia_cache",
             "index_file",
             "manifest",
-            "candidates",
             "path_root",
+            "skypatrol_dir",
             "vsx_catalog",
         },
     )

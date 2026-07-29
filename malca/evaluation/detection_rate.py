@@ -14,14 +14,14 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import argparse
+import hashlib
 import json
 import multiprocessing as mp
+import os
 
 from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pa_parquet
 
 from malca.core.baseline import (
     global_median_baseline,
@@ -29,7 +29,7 @@ from malca.core.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
 )
-from malca.cli_config import add_config_args, apply_config, namespace_keys
+from malca.cli_config import add_config_args, namespace_keys, parse_args_with_config
 from malca.config import (
     WORKERS,
     TRIGGER_MODE,
@@ -97,7 +97,7 @@ BASELINE_CHOICES = ("gp", "gp_masked", "global_median", "per_camera_median")
 
 def get_id_column(df: pd.DataFrame) -> str:
     """Find the ID column in manifest."""
-    for col in ("asas_sn_id", "source_id", "id"):
+    for col in ("candidate_id", "asas_sn_id", "source_id", "id"):
         if col in df.columns:
             return col
     raise KeyError("Manifest is missing a usable ID column (expected asas_sn_id/source_id/id).")
@@ -121,6 +121,12 @@ def select_control_sample(
 ) -> pd.DataFrame:
     """Select control sample of light curves."""
     df = manifest.copy()
+    id_col = get_id_column(df)
+    ids = df[id_col].astype("string").str.strip()
+    if bool((ids.isna() | ids.eq("")).any()):
+        raise ValueError(f"Control manifest contains blank/null {id_col} values")
+    if bool(ids.duplicated().any()):
+        raise ValueError(f"Control manifest contains duplicate {id_col} values")
 
     # Reject known candidates if provided
     if reject_candidates is not None and "asas_sn_id" in reject_candidates.columns:
@@ -208,14 +214,16 @@ def _extract_detection_result(
     baseline_mag = float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan)))
     dip_best_mag_event = float(dip.get("best_mag_event", np.nan))
     jump_best_mag_event = float(jump.get("best_mag_event", np.nan))
+    dip_best_delta_mag = float(dip.get("best_delta_mag", dip_best_mag_event))
+    jump_best_delta_mag = float(jump.get("best_delta_mag", jump_best_mag_event))
 
     # Apply signal amplitude filter if min_mag_offset > 0
-    if min_mag_offset > 0 and np.isfinite(baseline_mag):
-        dip_diff = abs(dip_best_mag_event - baseline_mag) if np.isfinite(dip_best_mag_event) else 0.0
-        jump_diff = abs(jump_best_mag_event - baseline_mag) if np.isfinite(jump_best_mag_event) else 0.0
-        if dip_diff <= min_mag_offset:
+    if min_mag_offset > 0:
+        dip_diff = abs(dip_best_delta_mag) if np.isfinite(dip_best_delta_mag) else np.nan
+        jump_diff = abs(jump_best_delta_mag) if np.isfinite(jump_best_delta_mag) else np.nan
+        if not np.isfinite(dip_diff) or dip_diff < min_mag_offset:
             dip_significant = False
-        if jump_diff <= min_mag_offset:
+        if not np.isfinite(jump_diff) or jump_diff < min_mag_offset:
             jump_significant = False
 
     return dict(
@@ -229,7 +237,31 @@ def _extract_detection_result(
         baseline_mag=baseline_mag,
         dip_best_mag_event=dip_best_mag_event,
         jump_best_mag_event=jump_best_mag_event,
+        dip_best_delta_mag=dip_best_delta_mag,
+        jump_best_delta_mag=jump_best_delta_mag,
     )
+
+
+def _trial_failure(trial_index: int, asas_sn_id: str, status: str, error: str) -> dict:
+    return {
+        "trial_index": int(trial_index),
+        "asas_sn_id": str(asas_sn_id),
+        "trial_status": status,
+        "detected": pd.NA,
+        "dip_significant": pd.NA,
+        "jump_significant": pd.NA,
+        "median_mag": np.nan,
+        "dip_bayes_factor": np.nan,
+        "jump_bayes_factor": np.nan,
+        "dip_best_p": np.nan,
+        "jump_best_p": np.nan,
+        "baseline_mag": np.nan,
+        "dip_best_mag_event": np.nan,
+        "jump_best_mag_event": np.nan,
+        "dip_best_delta_mag": np.nan,
+        "jump_best_delta_mag": np.nan,
+        "error": str(error),
+    }
 
 
 def run_detection_rate_trial(
@@ -240,53 +272,26 @@ def run_detection_rate_trial(
     seed: int = INJECTION_SEED,
 ) -> dict:
     """Run detection on a single light curve (no injection)."""
-    rng = np.random.default_rng(seed + int(trial_index))
+    if len(control_ids) == 0:
+        return _trial_failure(trial_index, "", "error", "empty_control_manifest")
+    # Stable permutation makes the designed sample independent of worker count,
+    # scheduling, and resume boundaries.  Every control is used once per cycle.
+    permutation = np.random.default_rng(seed).permutation(len(control_ids))
+    control_idx = int(permutation[int(trial_index) % len(permutation)])
+    asas_sn_id = str(control_ids[control_idx])
+    lc_dir = Path(control_dirs[control_idx])
+    try:
+        df = _load_lc(asas_sn_id, lc_dir)
+    except Exception as exc:
+        return _trial_failure(trial_index, asas_sn_id, "error", f"load_error:{type(exc).__name__}:{exc}")
+    if df.empty or len(df) < 10:
+        return _trial_failure(trial_index, asas_sn_id, "ineligible_short_lightcurve", "empty_or_short_lc")
 
-    # Select random LC from control sample
-    max_attempts = 5
-    for attempt in range(max_attempts):
-        try:
-            control_idx = rng.integers(0, len(control_ids))
-            asas_sn_id = str(control_ids[control_idx])
-            lc_dir = Path(control_dirs[control_idx])
-
-            df = _load_lc(asas_sn_id, lc_dir)
-            if df.empty or len(df) < 10:
-                if attempt == max_attempts - 1:
-                    return dict(
-                        trial_index=trial_index,
-                        asas_sn_id=asas_sn_id,
-                        detected=False,
-                        error="empty_or_short_lc_max_retries",
-                    )
-                continue
-
-            median_mag = float(np.nanmedian(df["mag"].values))
-
-            # Only process stars with median magnitude between 12 and 15
-            if median_mag < INJECTION_MAG_LO or median_mag > INJECTION_MAG_HI:
-                if attempt == max_attempts - 1:
-                     return dict(
-                        trial_index=trial_index,
-                        median_mag=median_mag,
-                        asas_sn_id=asas_sn_id,
-                        detected=False,
-                        error="magnitude_out_of_range",
-                    )
-                continue
-
-            # Found a valid star
-            break
-
-        except Exception as exc:
-            if attempt == max_attempts - 1:
-                return dict(
-                    trial_index=trial_index,
-                    asas_sn_id=asas_sn_id,
-                    detected=False,
-                    error=str(exc),
-                )
-            continue
+    median_mag = float(np.nanmedian(df["mag"].values))
+    if not np.isfinite(median_mag) or median_mag < INJECTION_MAG_LO or median_mag > INJECTION_MAG_HI:
+        record = _trial_failure(trial_index, asas_sn_id, "ineligible_magnitude", "magnitude_out_of_range")
+        record["median_mag"] = median_mag
+        return record
 
     try:
         # Run detection on original LC (no injection)
@@ -302,15 +307,14 @@ def run_detection_rate_trial(
             trial_index=trial_index,
             asas_sn_id=asas_sn_id,
             median_mag=median_mag,
+            trial_status="ok",
+            error=None,
             **detection_result,
         )
     except Exception as exc:
-        return dict(
-            trial_index=trial_index,
-            asas_sn_id=asas_sn_id,
-            detected=False,
-            error=str(exc),
-        )
+        record = _trial_failure(trial_index, asas_sn_id, "error", f"score_error:{type(exc).__name__}:{exc}")
+        record["median_mag"] = median_mag
+        return record
 
 
 def _init_worker(
@@ -349,115 +353,219 @@ def run_detection_rate(
     seed: int = 42,
     no_resume: bool = False,
 ) -> pd.DataFrame:
-    """Run detection rate trials in parallel with checkpointing."""
-
-
-    class _Writer:
-        def __init__(self, path: Path):
-            self.path = Path(path)
-            if self.path.suffix.lower() != ".parquet":
-                raise ValueError(f"Detection-rate output must be Parquet: {self.path}")
-            self.columns = None
-            self.parquet_writer = None
-
-        def write_chunk(self, rows: list[dict]) -> None:
-            if not rows:
-                return
-            df_chunk = pd.DataFrame(rows)
-            if self.columns is None:
-                self.columns = list(df_chunk.columns)
-            df_chunk = df_chunk.reindex(columns=self.columns)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-            if self.parquet_writer is None:
-                self.parquet_writer = pa_parquet.ParquetWriter(self.path, table.schema, compression="zstd")
-            self.parquet_writer.write_table(table)
-
-        def close(self) -> None:
-            if self.parquet_writer is not None:
-                self.parquet_writer.close()
+    """Run deterministic trials with recoverable, fingerprinted checkpoints."""
+    output_path = Path(output_path)
+    if output_path.suffix.lower() != ".parquet":
+        raise ValueError(f"Detection-rate output must be Parquet: {output_path}")
+    if total_trials < 0:
+        raise ValueError("total_trials must be non-negative")
+    if checkpoint_interval <= 0:
+        raise ValueError("checkpoint_interval must be positive")
 
     id_col = get_id_column(manifest)
     control_ids = manifest[id_col].values
-    control_dirs = manifest["lc_dir"].values if "lc_dir" in manifest.columns else manifest["path"].values
+    location_column = "lc_dir" if "lc_dir" in manifest.columns else "path"
+    if location_column not in manifest.columns:
+        raise ValueError("Control manifest requires an explicit lc_dir or path column")
+    control_dirs = manifest[location_column].values
+    fingerprint_payload = {
+        "version": 2,
+        "total_trials": int(total_trials),
+        "seed": int(seed),
+        "control_ids": [str(value) for value in control_ids],
+        "control_locations": [str(value) for value in control_dirs],
+        "detection_kwargs": _fingerprintable(detection_kwargs),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    checkpoint_path = Path(checkpoint_path) if checkpoint_path else output_path.with_suffix(".checkpoint.json")
+    part_dir = output_path.with_name(f".{output_path.stem}.parts")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Resume logic
-    start_index = 0
-    if checkpoint_path and checkpoint_path.exists() and not no_resume:
-        with open(checkpoint_path, "r") as f:
-            content = f.read().strip()
-            if content:
-                start_index = int(content) + 1
-                print(f"Resuming from trial {start_index}")
+    existing = pd.DataFrame()
+    if no_resume:
+        if output_path.exists() or checkpoint_path.exists() or part_dir.exists():
+            raise FileExistsError("no_resume=True refuses existing output/checkpoint state; remove it explicitly")
+    elif output_path.exists() or checkpoint_path.exists() or part_dir.exists():
+        if not checkpoint_path.exists():
+            raise RuntimeError("Cannot resume detection-rate output without its fingerprinted checkpoint")
+        try:
+            checkpoint = json.loads(checkpoint_path.read_text())
+        except Exception as exc:
+            raise RuntimeError("Legacy or unreadable detection-rate checkpoint; start a new run") from exc
+        if checkpoint.get("fingerprint") != fingerprint:
+            raise RuntimeError("Detection-rate checkpoint fingerprint does not match this run")
+        if output_path.exists():
+            existing = pd.read_parquet(output_path)
 
-    results = []
-    writer = _Writer(output_path)
+    part_dir.mkdir(parents=True, exist_ok=True)
+    if not checkpoint_path.exists():
+        _write_detection_checkpoint(checkpoint_path, fingerprint, total_trials)
+    part_frames: list[pd.DataFrame] = []
+    for part_path in sorted(part_dir.glob("part_*.parquet")):
+        part_frames.append(pd.read_parquet(part_path))
+    completed_frames = [frame for frame in [existing, *part_frames] if not frame.empty]
+    completed = pd.concat(completed_frames, ignore_index=True) if completed_frames else pd.DataFrame()
+    completed_indices = set(pd.to_numeric(completed.get("trial_index", pd.Series(dtype=float)), errors="coerce").dropna().astype(int))
+    pending_indices = [idx for idx in range(total_trials) if idx not in completed_indices]
+    if completed_indices - set(range(total_trials)):
+        raise RuntimeError("Checkpoint contains trial indices outside this design")
+    if pending_indices:
+        print(f"Running {len(pending_indices)} pending trial(s); {len(completed_indices)} already complete")
+
+    async_results = []
+    rows_buffer: list[dict] = []
 
     with mp.Pool(
         processes=workers,
         initializer=_init_worker,
         initargs=(control_ids, control_dirs, detection_kwargs, seed),
     ) as pool:
-        for trial_index in tqdm(range(start_index, total_trials), desc="Detection rate trials"):
+        for position, trial_index in enumerate(tqdm(pending_indices, desc="Detection rate trials"), start=1):
             result = pool.apply_async(_worker_run_trial, (trial_index,))
-            results.append(result)
+            async_results.append(result)
 
-            # Periodic checkpoint and flush
-            if checkpoint_path and (trial_index + 1) % checkpoint_interval == 0:
-                # Wait for pending results
-                completed = [r.get() for r in results]
-                results = []
+            if position % checkpoint_interval == 0:
+                rows_buffer.extend(result.get() for result in async_results)
+                async_results = []
+                _write_detection_part(part_dir, rows_buffer)
+                rows_buffer = []
+                _write_detection_checkpoint(checkpoint_path, fingerprint, total_trials)
 
-                df_batch = pd.DataFrame(completed)
-                writer.write_chunk(df_batch.to_dict(orient="records"))
+        if async_results:
+            rows_buffer.extend(result.get() for result in async_results)
+        if rows_buffer:
+            _write_detection_part(part_dir, rows_buffer)
+            _write_detection_checkpoint(checkpoint_path, fingerprint, total_trials)
 
-                # Update checkpoint
-                with open(checkpoint_path, "w") as f:
-                    f.write(str(trial_index))
+    all_frames = [existing] if not existing.empty else []
+    all_frames.extend(pd.read_parquet(path) for path in sorted(part_dir.glob("part_*.parquet")))
+    final = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame(columns=["trial_index"])
+    if not final.empty:
+        final["trial_index"] = pd.to_numeric(final["trial_index"], errors="raise").astype(int)
+        final = final.sort_values("trial_index").drop_duplicates("trial_index", keep="last").reset_index(drop=True)
+    expected_indices = set(range(total_trials))
+    final_indices = set(final["trial_index"].astype(int)) if not final.empty else set()
+    if final_indices != expected_indices:
+        raise RuntimeError(
+            f"Detection-rate stage incomplete: missing={sorted(expected_indices-final_indices)[:10]}, "
+            f"unexpected={sorted(final_indices-expected_indices)[:10]}"
+        )
+    temp_output = output_path.with_suffix(output_path.suffix + ".tmp")
+    final.to_parquet(temp_output, index=False)
+    os.replace(temp_output, output_path)
+    for part_path in part_dir.glob("part_*.parquet"):
+        part_path.unlink()
+    part_dir.rmdir()
+    _write_detection_checkpoint(checkpoint_path, fingerprint, total_trials, complete=True)
+    return final
 
-        # Final batch
-        if results:
-            completed = [r.get() for r in results]
-            df_batch = pd.DataFrame(completed)
-            writer.write_chunk(df_batch.to_dict(orient="records"))
 
-    writer.close()
+def _fingerprintable(value):
+    if isinstance(value, dict):
+        return {str(key): _fingerprintable(item) for key, item in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_fingerprintable(item) for item in value]
+    if callable(value):
+        return f"{value.__module__}.{getattr(value, '__qualname__', value.__name__)}"
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
-    return pd.read_parquet(output_path)
+
+def _write_detection_part(part_dir: Path, rows: list[dict]) -> Path:
+    frame = pd.DataFrame(rows)
+    start = int(frame["trial_index"].min())
+    stop = int(frame["trial_index"].max())
+    path = part_dir / f"part_{start:09d}_{stop:09d}.parquet"
+    temp = path.with_suffix(".parquet.tmp")
+    frame.to_parquet(temp, index=False)
+    os.replace(temp, path)
+    return path
+
+
+def _write_detection_checkpoint(
+    path: Path,
+    fingerprint: str,
+    total_trials: int,
+    *,
+    complete: bool = False,
+) -> None:
+    payload = {
+        "version": 2,
+        "fingerprint": fingerprint,
+        "total_trials": int(total_trials),
+        "complete": bool(complete),
+    }
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temp, path)
 
 
 def compute_detection_summary(results_df: pd.DataFrame) -> dict:
     """Compute detection rate summary statistics."""
     total = len(results_df)
     if total == 0:
-        return {"total_trials": 0, "detection_rate": np.nan}
+        return {
+            "total_trials": 0,
+            "successful_trials": 0,
+            "failed_trials": 0,
+            "ineligible_trials": 0,
+            "detections": 0,
+            "detection_rate": None,
+            "detection_rate_percent": None,
+            "end_to_end_detection_yield": None,
+        }
 
-    # Filter out errors
-    has_error = results_df["error"].notna() if "error" in results_df.columns else pd.Series([False] * len(results_df))
-    successful = (~has_error).sum()
-
-    # Detection rate among successful trials
-    if successful > 0:
-        detected_col = "detected" if "detected" in results_df.columns else "dip_significant"
-        if detected_col in results_df.columns:
-            successful_mask = ~has_error
-            n_detected = results_df.loc[successful_mask, detected_col].sum()
-            detection_rate = n_detected / successful
-        else:
-            detection_rate = np.nan
-            n_detected = 0
-    else:
-        detection_rate = np.nan
-        n_detected = 0
+    status = (
+        results_df["trial_status"].astype("string")
+        if "trial_status" in results_df.columns
+        else pd.Series(np.where(results_df.get("error", pd.Series(index=results_df.index)).notna(), "error", "ok"), index=results_df.index)
+    )
+    successful_mask = status.eq("ok")
+    error_mask = status.eq("error")
+    ineligible_mask = ~(successful_mask | error_mask)
+    successful = int(successful_mask.sum())
+    detected_col = "detected" if "detected" in results_df.columns else "dip_significant"
+    if detected_col not in results_df.columns:
+        raise ValueError(f"Detection-rate results are missing {detected_col!r}")
+    detected = results_df[detected_col].astype("boolean")
+    if bool(detected.loc[successful_mask].isna().any()):
+        raise ValueError("Successful detection-rate rows contain unknown detection decisions")
+    n_detected = int(detected.loc[successful_mask].sum())
+    detection_rate = n_detected / successful if successful else np.nan
+    end_to_end_yield = n_detected / total
+    conditional_low, conditional_high = _wilson_interval(n_detected, successful)
+    yield_low, yield_high = _wilson_interval(n_detected, total)
 
     return {
         "total_trials": int(total),
         "successful_trials": int(successful),
-        "failed_trials": int(total - successful),
+        "failed_trials": int(error_mask.sum()),
+        "ineligible_trials": int(ineligible_mask.sum()),
         "detections": int(n_detected),
         "detection_rate": float(detection_rate) if np.isfinite(detection_rate) else None,
         "detection_rate_percent": float(detection_rate * 100) if np.isfinite(detection_rate) else None,
+        "detection_rate_ci95_low": conditional_low,
+        "detection_rate_ci95_high": conditional_high,
+        "end_to_end_detection_yield": float(end_to_end_yield),
+        "end_to_end_detection_yield_ci95_low": yield_low,
+        "end_to_end_detection_yield_ci95_high": yield_high,
+        "unique_controls_evaluated": int(results_df.get("asas_sn_id", pd.Series(dtype=str)).nunique()),
+        "rate_denominator_definition": "trial_status == 'ok'",
+        "yield_denominator_definition": "all designed trials; errors and ineligible rows are not relabelled as nondetections",
     }
+
+
+def _wilson_interval(successes: int, trials: int, z: float = 1.959963984540054) -> tuple[float | None, float | None]:
+    if trials <= 0:
+        return None, None
+    p = successes / trials
+    denominator = 1.0 + z * z / trials
+    center = (p + z * z / (2.0 * trials)) / denominator
+    half_width = z * np.sqrt(p * (1.0 - p) / trials + z * z / (4.0 * trials**2)) / denominator
+    return float(max(0.0, center - half_width)), float(min(1.0, center + half_width))
 
 
 def main() -> None:
@@ -545,9 +653,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     add_config_args(g_config)
     parser.set_defaults(**DETECTION_RATE_CONFIG_DEFAULTS)
 
-    args = parser.parse_args()
-    apply_config(
-        args,
+    args = parse_args_with_config(
+        parser,
         command="detection-rate",
         valid_keys=namespace_keys(parser, DETECTION_RATE_CONFIG_DEFAULTS),
         path_keys={"manifest", "out_dir", "output"},
