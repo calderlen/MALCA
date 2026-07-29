@@ -7,32 +7,85 @@ import pandas as pd
 
 
 TRUTHY_FAILED_ANY_VALUES = {"1", "true", "t", "yes", "y"}
+FALSEY_FAILED_ANY_VALUES = {"0", "false", "f", "no", "n"}
 
 
-def passing_candidates_mask(df: pd.DataFrame, *, failed_col: str = "failed_any") -> pd.Series:
-    """Return True for rows that have not failed candidate filtering."""
+class CandidateSelectionError(ValueError):
+    """Raised when a science/pass selection cannot be made unambiguously."""
+
+
+def coerce_strict_bool_series(series: pd.Series, *, field_name: str) -> pd.Series:
+    """Return Boolean failure flags, rejecting null or ambiguous values.
+
+    Candidate selection is a science boundary.  Treating an absent, null, or
+    misspelled failure value as ``False`` silently promotes an unevaluated row
+    into the passing sample, so coercion here is intentionally strict.
+    """
+    if pd.api.types.is_bool_dtype(series):
+        invalid = series.isna()
+        flags = series.astype("boolean")
+    elif pd.api.types.is_numeric_dtype(series):
+        numeric = pd.to_numeric(series, errors="coerce")
+        invalid = numeric.isna() | ~numeric.isin([0, 1])
+        flags = numeric.eq(1).astype("boolean")
+    else:
+        lowered = series.astype("string").str.strip().str.lower()
+        valid = lowered.isin(TRUTHY_FAILED_ANY_VALUES | FALSEY_FAILED_ANY_VALUES)
+        invalid = lowered.isna() | ~valid
+        flags = lowered.isin(TRUTHY_FAILED_ANY_VALUES).astype("boolean")
+
+    if bool(invalid.any()):
+        examples = [str(value) for value in series.loc[invalid].head(5).tolist()]
+        raise CandidateSelectionError(
+            f"Cannot select passing candidates: {field_name!r} contains "
+            f"{int(invalid.sum())} null/invalid value(s); examples={examples}"
+        )
+    return flags.astype(bool)
+
+
+def passing_candidates_mask(
+    df: pd.DataFrame,
+    *,
+    failed_col: str = "failed_any",
+    require_failed_col: bool = True,
+) -> pd.Series:
+    """Return True only for rows explicitly evaluated as passing.
+
+    ``require_failed_col=False`` is reserved for callers that are deliberately
+    operating before filtering.  Science, review, and publication consumers
+    should use the fail-closed default.
+    """
     if failed_col not in df.columns:
         if failed_col == "failed_any" and "derived_stats" in df.columns:
             from malca.products.feature_layers import feature_value_series
 
-            failed = feature_value_series(df, "derived_stats.failed_any", default=False)
+            failed = feature_value_series(df, "derived_stats.failed_any", default=pd.NA)
         else:
+            if require_failed_col:
+                raise CandidateSelectionError(
+                    f"Cannot select passing candidates: required {failed_col!r} field is missing"
+                )
             return pd.Series(True, index=df.index, dtype=bool)
     else:
         failed = df[failed_col]
 
-    if pd.api.types.is_bool_dtype(failed):
-        return ~failed.fillna(False).astype(bool)
-    if pd.api.types.is_numeric_dtype(failed):
-        return failed.fillna(0).astype(float) == 0.0
-
-    lowered = failed.fillna("").astype(str).str.strip().str.lower()
-    return ~lowered.isin(TRUTHY_FAILED_ANY_VALUES)
+    return ~coerce_strict_bool_series(failed, field_name=failed_col)
 
 
-def select_passing_candidates(df: pd.DataFrame, *, failed_col: str = "failed_any") -> pd.DataFrame:
-    """Return a copy of candidates with failed_any absent or false-like."""
-    return df.loc[passing_candidates_mask(df, failed_col=failed_col)].copy()
+def select_passing_candidates(
+    df: pd.DataFrame,
+    *,
+    failed_col: str = "failed_any",
+    require_failed_col: bool = True,
+) -> pd.DataFrame:
+    """Return candidates explicitly marked as passing."""
+    return df.loc[
+        passing_candidates_mask(
+            df,
+            failed_col=failed_col,
+            require_failed_col=require_failed_col,
+        )
+    ].copy()
 
 
 def select_passing_candidates_if_present(
@@ -46,7 +99,7 @@ def select_passing_candidates_if_present(
         return df.copy()
 
     before = len(df)
-    out = select_passing_candidates(df)
+    out = select_passing_candidates(df, require_failed_col=True)
     if printer is not None:
         printer(f"Using passers only (failed_any=False): {len(out)}/{before} {label}")
     return out
@@ -110,6 +163,29 @@ def ensure_candidate_id(
     return out
 
 
+def validate_candidate_ids(
+    df: pd.DataFrame,
+    *,
+    key_col: str = "candidate_id",
+    require_unique: bool = True,
+) -> pd.Series:
+    """Validate and return canonical string candidate identifiers."""
+    if key_col not in df.columns:
+        raise ValueError(f"Required candidate identity column is missing: {key_col}")
+    ids = df[key_col].map(_normalize_candidate_token).astype("string")
+    missing = ids.isna() | ids.eq("")
+    if bool(missing.any()):
+        raise ValueError(f"{key_col} contains {int(missing.sum())} blank/null identifier(s)")
+    if require_unique:
+        duplicated = ids.duplicated(keep=False)
+        if bool(duplicated.any()):
+            examples = ids.loc[duplicated].drop_duplicates().head(5).tolist()
+            raise ValueError(
+                f"{key_col} contains {int(duplicated.sum())} duplicate row(s); examples={examples}"
+            )
+    return ids.astype(str)
+
+
 def merge_candidate_columns(
     base: pd.DataFrame,
     extra: pd.DataFrame,
@@ -128,9 +204,8 @@ def merge_candidate_columns(
 
     left = base.copy()
     right = extra[[key_col, *cols]].copy()
-    left[key_col] = left[key_col].astype(str)
-    right[key_col] = right[key_col].astype(str)
-    right = right.drop_duplicates(subset=[key_col], keep="last")
+    left[key_col] = validate_candidate_ids(left, key_col=key_col, require_unique=True)
+    right[key_col] = validate_candidate_ids(right, key_col=key_col, require_unique=True)
 
     merged = left.merge(right, on=key_col, how="left", suffixes=("", "_candidate_new"))
     for col in cols:

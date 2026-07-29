@@ -192,12 +192,13 @@ def read_passing_parquet_table(
 
 
 def _passing_mask(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_bool_dtype(series):
-        return ~series.fillna(False).astype(bool)
-    if pd.api.types.is_numeric_dtype(series):
-        return series.fillna(0).astype(float) == 0.0
-    lowered = series.astype("string").str.strip().str.lower()
-    return ~lowered.isin({"1", "true", "t", "yes", "y"}).fillna(False)
+    from malca.products.candidates import passing_candidates_mask
+
+    return passing_candidates_mask(
+        pd.DataFrame({"failed_any": series}),
+        failed_col="failed_any",
+        require_failed_col=True,
+    )
 
 
 def read_passing_feature_table(
@@ -220,9 +221,15 @@ def read_passing_feature_table(
         read_columns = [*read_columns, failed_col]
     table = read_feature_table(out, columns=read_columns, **kwargs)
     if failed_col not in table.columns:
-        if requested_columns is not None:
-            return table[requested_columns].copy()
-        return table
+        from malca.products.feature_layers import feature_value_series, is_layer_path
+
+        if is_layer_path(failed_col):
+            table = table.copy()
+            table[failed_col] = feature_value_series(table, failed_col, default=pd.NA)
+        else:
+            raise ValueError(
+                f"Cannot select passing rows from {out}: required feature {failed_col!r} is missing"
+            )
 
     table = table.loc[_passing_mask(table[failed_col])].copy()
     if requested_columns is not None and failed_col not in requested_columns:

@@ -1019,6 +1019,10 @@ def per_camera_gp_baseline_masked(
     min_anchor_overlap_days=GP_MIN_ANCHOR_OVERLAP_DAYS,
     min_quiet_baseline_days=GP_MIN_QUIET_BASELINE_DAYS,
     consensus_start_resid_sigma=GP_CONSENSUS_START_RESID_SIGMA,
+    allow_cross_band_consensus=False,
+    cross_band_min_overlap_points=20,
+    cross_band_min_overlap_days=30.0,
+    cross_band_clip_sigma=3.5,
     **kwargs,
 ):
     """Per-camera GP baseline with dip masking (excludes significant dips from fit).
@@ -1063,7 +1067,7 @@ def per_camera_gp_baseline_masked(
         return float(np.sqrt(floor2))
 
     df_out = df.copy()
-    bool_out_cols = ("is_masked", "needs_consensus")
+    bool_out_cols = ("is_masked", "needs_consensus", "cross_band_calibrated")
     out_cols = (
         "baseline",
         "base_rough",
@@ -1071,10 +1075,19 @@ def per_camera_gp_baseline_masked(
         *bool_out_cols,
         "resid",
         "sigma_resid",
+        "baseline_source",
+        "cross_band_offset_mag",
+        "cross_band_offset_scatter",
+        "cross_band_overlap_points",
     ) + (("sigma_eff",) if add_sigma_eff_col else ())
     for col in out_cols:
         if col not in df_out.columns:
-            df_out[col] = False if col in bool_out_cols else np.nan
+            if col in bool_out_cols:
+                df_out[col] = False
+            elif col == "baseline_source":
+                df_out[col] = "unknown"
+            else:
+                df_out[col] = np.nan
     for col in bool_out_cols:
         df_out[col] = _coerce_bool_series(df_out[col])
 
@@ -1154,6 +1167,10 @@ def per_camera_gp_baseline_masked(
     needs_consensus: set = set()
 
     if has_band_col and late_onset_buffer_days > 0:
+        finite_starts = [
+            meta["t_first"] for meta in cam_meta.values() if np.isfinite(meta["t_first"])
+        ]
+        global_start = min(finite_starts) if finite_starts else np.nan
         for band_id, band_sub in df_out.groupby(band_col, group_keys=False):
             band_cam_ids = list(band_sub[cam_col].unique())
             anchors, consensus_cams = _classify_band_cameras(
@@ -1169,12 +1186,26 @@ def per_camera_gp_baseline_masked(
             )
             band_anchors[band_id] = anchors
             needs_consensus.update(consensus_cams)
+            if allow_cross_band_consensus and not anchors and np.isfinite(global_start):
+                band_start = min(cam_meta[cam_id]["t_first"] for cam_id in band_cam_ids)
+                if (band_start - global_start) > float(late_onset_buffer_days):
+                    # An entire band can arrive after an excursion begins, so
+                    # relative-within-band onset alone cannot identify it.  Only
+                    # opt into cross-band handling when the caller explicitly
+                    # enabled calibrated transfer.
+                    needs_consensus.update(band_cam_ids)
 
-    def _build_cross_band_consensus(curve_source, current_band_id, t_target):
-        if not has_band_col:
+    def _build_cross_band_consensus(
+        curve_source,
+        current_band_id,
+        t_target,
+        mag_target,
+    ):
+        """Return a colour-calibrated cross-band curve, never an absolute raw copy."""
+        if not has_band_col or not allow_cross_band_consensus:
             return None
-        best_consensus = None
-        best_overlap = 0.0
+        best: tuple[np.ndarray, dict[str, float]] | None = None
+        best_overlap = 0
         for band_id, anchors in band_anchors.items():
             if band_id == current_band_id or not anchors:
                 continue
@@ -1186,12 +1217,50 @@ def per_camera_gp_baseline_masked(
                 cam_band_map,
                 min_anchor_overlap_days=min_anchor_overlap_days,
             )
-            if c is not None:
-                overlap = float(np.isfinite(c).sum())
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_consensus = c
-        return best_consensus
+            if c is None:
+                continue
+
+            finite = np.isfinite(c) & np.isfinite(mag_target) & np.isfinite(t_target)
+            if int(finite.sum()) < int(cross_band_min_overlap_points):
+                continue
+            t_finite = np.asarray(t_target, float)[finite]
+            if float(np.nanmax(t_finite) - np.nanmin(t_finite)) < float(cross_band_min_overlap_days):
+                continue
+
+            differences = np.asarray(mag_target, float)[finite] - np.asarray(c, float)[finite]
+            keep = np.ones(differences.size, dtype=bool)
+            for _ in range(4):
+                values = differences[keep]
+                if values.size < int(cross_band_min_overlap_points):
+                    break
+                center = float(np.nanmedian(values))
+                scatter = float(MAD_SCALE * np.nanmedian(np.abs(values - center)))
+                if not np.isfinite(scatter) or scatter <= 1e-8:
+                    break
+                new_keep = np.abs(differences - center) <= float(cross_band_clip_sigma) * scatter
+                if np.array_equal(new_keep, keep):
+                    break
+                keep = new_keep
+
+            if int(keep.sum()) < int(cross_band_min_overlap_points):
+                continue
+            offset = float(np.nanmedian(differences[keep]))
+            scatter = float(MAD_SCALE * np.nanmedian(np.abs(differences[keep] - offset)))
+            if not np.isfinite(offset):
+                continue
+            shifted = np.asarray(c, float) + offset
+            overlap = int(np.isfinite(shifted).sum())
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best = (
+                    shifted,
+                    {
+                        "offset": offset,
+                        "scatter": scatter,
+                        "n_points": int(keep.sum()),
+                    },
+                )
+        return best
 
     def _write_flat_baseline(idx, mag, mag_err, baseline):
         resid = mag - baseline
@@ -1219,6 +1288,8 @@ def per_camera_gp_baseline_masked(
         median_mag = cached["median_mag"]
         base_rough = cached["base_rough"].copy()
         consensus = None
+        consensus_source = None
+        cross_band_meta: dict[str, float] | None = None
 
         if cam_id in needs_consensus:
             band_id = cam_band_map.get(cam_id)
@@ -1231,21 +1302,37 @@ def per_camera_gp_baseline_masked(
                 cam_band_map,
                 min_anchor_overlap_days=min_anchor_overlap_days,
             )
+            if consensus is not None:
+                consensus_source = "same_band_consensus"
             if consensus is None:
-                consensus = _build_cross_band_consensus(curve_source, band_id, t)
+                cross_band_result = _build_cross_band_consensus(
+                    curve_source,
+                    band_id,
+                    t,
+                    mag,
+                )
+                if cross_band_result is not None:
+                    consensus, cross_band_meta = cross_band_result
+                    consensus_source = "cross_band_consensus_calibrated"
             if consensus is not None:
                 base_rough = np.where(np.isfinite(consensus), consensus, base_rough)
 
         df_out.loc[idx, "base_rough"] = base_rough
 
-        df_out.loc[idx, "needs_consensus"] = use_consensus
+        df_out.loc[idx, "needs_consensus"] = bool(use_consensus_baseline)
         if consensus is not None:
             df_out.loc[idx, "base_consensus"] = consensus
+        if cross_band_meta is not None:
+            df_out.loc[idx, "cross_band_offset_mag"] = cross_band_meta["offset"]
+            df_out.loc[idx, "cross_band_offset_scatter"] = cross_band_meta["scatter"]
+            df_out.loc[idx, "cross_band_overlap_points"] = cross_band_meta["n_points"]
+            df_out.loc[idx, "cross_band_calibrated"] = True
 
         if use_consensus_baseline and consensus is not None and np.isfinite(consensus).any():
             baseline = np.where(np.isfinite(consensus), consensus, median_mag)
             df_out.loc[idx, "is_masked"] = False
             _write_flat_baseline(idx, mag, mag_err, baseline)
+            df_out.loc[idx, "baseline_source"] = consensus_source or "same_band_consensus"
             return baseline
 
         _flags, keep, _intervals, _s0 = _mask_excursions(
@@ -1264,12 +1351,14 @@ def per_camera_gp_baseline_masked(
         if keep.sum() < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
             _write_flat_baseline(idx, mag, mag_err, baseline)
+            df_out.loc[idx, "baseline_source"] = "camera_median_fallback"
             return baseline
 
         fit_keep = keep & np.isfinite(mag_err) & (mag_err > 0)
         if np.count_nonzero(fit_keep) < min_gp_points:
             baseline = np.full_like(mag, median_mag, dtype=float)
             _write_flat_baseline(idx, mag, mag_err, baseline)
+            df_out.loc[idx, "baseline_source"] = "camera_median_fallback"
             return baseline
 
         t_fit = t[fit_keep]
@@ -1298,6 +1387,7 @@ def per_camera_gp_baseline_masked(
         except Exception:
             baseline = np.full_like(mag, median_mag, dtype=float)
             _write_flat_baseline(idx, mag, mag_err, baseline)
+            df_out.loc[idx, "baseline_source"] = "camera_median_fallback"
             return baseline
 
         baseline = np.asarray(mean_prediction, float) + mean_mag
@@ -1321,6 +1411,7 @@ def per_camera_gp_baseline_masked(
         df_out.loc[idx, "baseline"] = baseline
         df_out.loc[idx, "resid"] = resid
         df_out.loc[idx, "sigma_resid"] = sigma_resid
+        df_out.loc[idx, "baseline_source"] = "masked_gp"
         return baseline
 
     # ---- Pass 3a: loose GP for cameras with their own quiet baseline ----

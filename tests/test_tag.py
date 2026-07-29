@@ -3,7 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
+from malca.products.stage_state import (
+    StageResult,
+    build_stage_fingerprint,
+    read_stage_state,
+    write_stage_state,
+)
 from malca.stv import tag
 
 
@@ -90,6 +97,12 @@ def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Pa
             "time_span_days": [123.0],
             "points_per_day": [4.5],
             "n_cameras": [2],
+            "tag_stats_status": ["ok"],
+            "tag_stats_error": [""],
+            "tag_stats_version": [tag.TAG_STATS_VERSION],
+            "raw_n_points": [40],
+            "clean_n_points": [35],
+            "raw_n_cameras": [2],
         }
     ).to_parquet(checkpoint, index=False)
 
@@ -98,6 +111,33 @@ def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Pa
             "source_id": ["2001", "2002"],
             "path": [str(flat_dir), str(flat_dir)],
         }
+    )
+    fingerprint = build_stage_fingerprint(
+        stage="tag_stats",
+        stage_version=str(tag.TAG_STATS_VERSION),
+        candidate_ids=df["source_id"].tolist(),
+        input_paths=[flat_dir / "2001.dat2", flat_dir / "2002.dat2"],
+        settings={
+            "compute_time": True,
+            "compute_cameras": True,
+            "compute_fields": True,
+            "file_extension": "dat2",
+            "min_good_points_per_camera": tag.TAG_MIN_GOOD_POINTS_PER_CAMERA,
+        },
+        code_base=Path(tag.__file__).resolve().parent.parent,
+        code_paths=("stv/tag.py", "core/utils.py"),
+        hash_input_contents=False,
+    )
+    write_stage_state(
+        tag._stats_checkpoint_state_path(checkpoint),
+        fingerprint=fingerprint,
+        result=StageResult(
+            stage="tag_stats",
+            status="running",
+            expected=2,
+            succeeded=1,
+        ),
+        outputs=tag._stats_checkpoint_outputs(checkpoint),
     )
 
     out = tag._compute_stats_parallel(
@@ -139,6 +179,177 @@ def test_compute_stats_parallel_writes_incremental_checkpoint_parts(tmp_path: Pa
 
     assert out_resume["time_span_days"].tolist() == [123.0, 20.0]
     assert sorted(parts_dir.glob("part-*.parquet")) == parts
+
+    state = read_stage_state(tag._stats_checkpoint_state_path(checkpoint))
+    assert state is not None
+    assert {entry["path"] for entry in state["outputs"]} == {
+        str(checkpoint),
+        str(parts_dir),
+    }
+
+    # Reuse must validate the legacy/base file as well as the incremental parts.
+    base = pd.read_parquet(checkpoint)
+    base.loc[0, "time_span_days"] = 999.0
+    base.to_parquet(checkpoint, index=False)
+    with pytest.raises(RuntimeError, match="output no longer matches"):
+        tag._compute_stats_parallel(
+            df,
+            "source_id",
+            "path",
+            compute_time=True,
+            compute_cameras=True,
+            compute_fields=True,
+            file_ext="dat2",
+            n_workers=1,
+            checkpoint_path=checkpoint,
+            chunk_size=1,
+        )
+
+
+def test_compute_stats_parallel_rejects_unsigned_checkpoint_outputs(tmp_path: Path) -> None:
+    flat_dir = tmp_path / "flat"
+    _write_mock_dat(flat_dir / "2101.dat2")
+    checkpoint = tmp_path / "unsigned.parquet"
+    pd.DataFrame(
+        {
+            "source_id": ["2101"],
+            "time_span_days": [20.0],
+            "points_per_day": [0.15],
+            "tag_stats_status": ["ok"],
+            "tag_stats_error": [""],
+            "tag_stats_version": [tag.TAG_STATS_VERSION],
+            "raw_n_points": [3],
+            "clean_n_points": [3],
+            "raw_n_cameras": [1],
+        }
+    ).to_parquet(checkpoint, index=False)
+    frame = pd.DataFrame({"source_id": ["2101"], "path": [str(flat_dir)]})
+    fingerprint = build_stage_fingerprint(
+        stage="tag_stats",
+        stage_version=str(tag.TAG_STATS_VERSION),
+        candidate_ids=["2101"],
+        input_paths=[flat_dir / "2101.dat2"],
+        settings={
+            "compute_time": True,
+            "compute_cameras": False,
+            "compute_fields": False,
+            "file_extension": "dat2",
+            "min_good_points_per_camera": tag.TAG_MIN_GOOD_POINTS_PER_CAMERA,
+        },
+        code_base=Path(tag.__file__).resolve().parent.parent,
+        code_paths=("stv/tag.py", "core/utils.py"),
+        hash_input_contents=False,
+    )
+    write_stage_state(
+        tag._stats_checkpoint_state_path(checkpoint),
+        fingerprint=fingerprint,
+        result=StageResult(
+            stage="tag_stats",
+            status="success",
+            expected=1,
+            succeeded=1,
+        ),
+        # A legacy/incomplete state that did not sign its outputs is unsafe.
+        outputs=(),
+    )
+
+    with pytest.raises(RuntimeError, match="must sign both"):
+        tag._compute_stats_parallel(
+            frame,
+            "source_id",
+            "path",
+            compute_time=True,
+            compute_cameras=False,
+            file_ext="dat2",
+            n_workers=1,
+            checkpoint_path=checkpoint,
+            chunk_size=1,
+        )
+
+
+def test_attach_vsx_does_not_replace_canonical_source_identity(tmp_path: Path) -> None:
+    crossmatch = tmp_path / "vsx.parquet"
+    pd.DataFrame(
+        {
+            "asas_sn_id": ["1002"],
+            "vsx_sep_arcsec": [0.2],
+            "vsx_class": ["EA"],
+        }
+    ).to_parquet(crossmatch, index=False)
+    candidates = pd.DataFrame(
+        {
+            "source_id": ["1001", "1002", "1003"],
+            "path": ["a", "b", "c"],
+        }
+    )
+
+    out = tag.attach_vsx_info(candidates, vsx_crossmatch_csv=crossmatch)
+
+    assert out["source_id"].tolist() == ["1001", "1002", "1003"]
+    assert "asas_sn_id" not in out.columns
+    assert out.loc[1, "vsx_class"] == "EA"
+    assert pd.isna(out.loc[0, "vsx_class"])
+
+    layered = pd.DataFrame(
+        {
+            "candidate_id": ["stv_1001", "stv_1002"],
+            "asas_sn_id": ["1001", "1002"],
+        }
+    )
+    layered_out = tag.attach_vsx_info(layered, vsx_crossmatch_csv=crossmatch)
+    assert layered_out["candidate_id"].tolist() == ["stv_1001", "stv_1002"]
+    assert layered_out.loc[1, "vsx_class"] == "EA"
+
+
+def test_tag_stats_use_clean_observations_and_preserve_raw_counts(tmp_path: Path) -> None:
+    lc_path = tmp_path / "3001.dat2"
+    lc_path.write_text(
+        "\n".join(
+            [
+                "1000 14.0 0.05 1 1 0 0 cam1/field1",
+                "1010 14.1 0.05 1 1 0 0 cam1/field1",
+                # One good point from another camera is not enough to satisfy
+                # the science-facing multi-camera requirement.
+                "1015 14.2 0.05 1 2 0 0 cam2/field2",
+                "1020 14.2 0.05 0 2 0 0 cam2/field2",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+
+    result = tag._compute_stats_for_row(
+        "3001",
+        str(tmp_path),
+        compute_time=True,
+        compute_cameras=True,
+        compute_fields=True,
+        file_ext="dat2",
+    )
+
+    assert result["tag_stats_status"] == "ok"
+    assert result["raw_n_points"] == 4
+    assert result["clean_n_points"] == 3
+    assert result["raw_n_cameras"] == 2
+    assert result["n_cameras"] == 1
+    assert result["asassn_field_key"] == "field1"
+    assert result["asassn_fields"] == "field1,field2"
+
+
+def test_tag_stats_read_error_is_unknown_not_zero(tmp_path: Path) -> None:
+    result = tag._compute_stats_for_row(
+        "missing",
+        str(tmp_path),
+        compute_time=True,
+        compute_cameras=True,
+        file_ext="dat2",
+    )
+
+    assert result["tag_stats_status"] == "error"
+    assert "FileNotFoundError" in result["tag_stats_error"]
+    assert pd.isna(result["time_span_days"])
+    assert pd.isna(result["points_per_day"])
+    assert pd.isna(result["n_cameras"])
 
 
 def test_filter_camera_medians_marks_raw_suspects_without_exclusions(tmp_path: Path) -> None:

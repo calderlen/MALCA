@@ -26,7 +26,6 @@ from tqdm import tqdm
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
@@ -46,10 +45,11 @@ from malca.config import (
     LOGBF_THRESHOLD_DIP, LOGBF_THRESHOLD_JUMP, SIGNIFICANCE_THRESHOLD,
     MIN_MAG_OFFSET, RUN_MIN_POINTS, RUN_MAX_GAP_POINTS, MAG_BINS,
     BASELINE_FUNC, BASELINE_S0, BASELINE_W0, BASELINE_Q, BASELINE_JITTER,
+    MAD_SCALE,
 )
-from malca.cli_config import add_config_args, apply_config, namespace_keys
+from malca.cli_config import add_config_args, namespace_keys, parse_args_with_config
 from malca.products.feature_layers import is_layer_first_frame, to_layer_first_frame
-from malca.stv.score import compute_event_score
+from malca.stv.score import EVENT_SCORE_VERSION, compute_event_score
 from malca.core.stats import log_gaussian, median_dt, bic
 from malca.stv.triggering import resolve_trigger_indices
 from malca.core.utils import (
@@ -66,6 +66,7 @@ from malca.core.utils import (
     filter_residual_bad_cameras,
     log as _log,
 )
+from malca.core.event_epochs import serialize_run_summaries
 
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
@@ -84,6 +85,7 @@ def _curve_fit_quiet(*args, **kwargs):
 
 
 EventKind: TypeAlias = Literal["dip", "jump"]
+EVENT_SCHEMA_VERSION = 2
 
 DEFAULT_BASELINE_KWARGS = dict(
     S0=BASELINE_S0,
@@ -116,6 +118,10 @@ EVENTS_CONFIG_DEFAULTS = {
     "baseline_q": BASELINE_Q,
     "baseline_jitter": BASELINE_JITTER,
     "baseline_sigma_floor": None,
+    "allow_cross_band_consensus": False,
+    "cross_band_min_overlap_points": 20,
+    "cross_band_min_overlap_days": 30.0,
+    "cross_band_clip_sigma": 3.5,
     "mag_min_dip": None,
     "mag_max_dip": None,
     "mag_min_jump": None,
@@ -134,6 +140,8 @@ EVENTS_CONFIG_PATH_KEYS = {"output", "error_output", "metadata", "input_file"}
 EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "candidate_id",
     "timescale",
+    "event_schema_version",
+    "event_score_version",
     "asas_sn_id",
     "lc_path",
     "dip_significant",
@@ -180,12 +188,19 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "jump_best_p",
     "dip_best_mag_event",
     "jump_best_mag_event",
+    "dip_best_delta_mag",
+    "jump_best_delta_mag",
     "dip_trigger_max",
     "jump_trigger_max",
     "dip_max_event_prob",
     "jump_max_event_prob",
     "n_cameras",
+    "raw_n_cameras",
     "camera_ids",
+    "raw_camera_ids",
+    "raw_n_points",
+    "raw_asassn_fields",
+    "raw_camera_names",
     "camera_min_points",
     "camera_max_points",
     "asassn_field_key",
@@ -197,12 +212,16 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "camera_name_count",
     "camera_name_key_fraction",
     "dipper_score",
+    "dipper_score_status",
     "dipper_n_dips",
     "dipper_n_valid_dips",
     "jumper_score",
+    "jumper_score_status",
     "jumper_n_jumps",
     "jumper_n_valid_jumps",
     "baseline_source",
+    "baseline_cross_band_calibrated",
+    "baseline_cross_band_details",
     "trigger_mode",
     "dip_trigger_threshold",
     "jump_trigger_threshold",
@@ -211,12 +230,16 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "dip_inter_event_spacing_median",
     "dip_inter_event_spacing_std",
     "dip_amplitude_consistency",
+    "dip_trigger_strength_cv",
     "dip_duration_consistency",
     "jump_is_single_event",
     "jump_inter_event_spacing_median",
     "jump_inter_event_spacing_std",
     "jump_amplitude_consistency",
+    "jump_trigger_strength_cv",
     "jump_duration_consistency",
+    "dip_run_epochs_json",
+    "jump_run_epochs_json",
 )
 
 EVENTS_KNOWN_METADATA_COLUMNS: tuple[str, ...] = (
@@ -240,12 +263,14 @@ EVENTS_BOOL_COLUMNS: frozenset[str] = frozenset(
         "jump_is_single_event",
         "failed_signal_amplitude",
         "pre_periodic_flag",
+        "baseline_cross_band_calibrated",
     }
 )
 
 EVENTS_INT_COLUMNS: frozenset[str] = frozenset(
     {
         "n_points",
+        "raw_n_points",
         "dip_count",
         "jump_count",
         "dip_run_count",
@@ -255,6 +280,9 @@ EVENTS_INT_COLUMNS: frozenset[str] = frozenset(
         "dip_max_run_cameras",
         "jump_max_run_cameras",
         "n_cameras",
+        "raw_n_cameras",
+        "event_schema_version",
+        "event_score_version",
         "camera_min_points",
         "camera_max_points",
         "asassn_field_count",
@@ -275,11 +303,17 @@ EVENTS_STRING_COLUMNS: frozenset[str] = frozenset(
         "dip_best_morph",
         "jump_best_morph",
         "camera_ids",
+        "raw_camera_ids",
+        "raw_asassn_fields",
+        "raw_camera_names",
         "asassn_field_key",
         "asassn_fields",
         "camera_name_key",
         "camera_names",
         "baseline_source",
+        "baseline_cross_band_details",
+        "dipper_score_status",
+        "jumper_score_status",
         "trigger_mode",
         "bad_cameras_filtered",
         "vsx_class",
@@ -343,6 +377,141 @@ def _is_missing_value(value: object) -> bool:
     if isinstance(missing, (bool, np.bool_)):
         return bool(missing)
     return False
+
+
+_METADATA_EXACT_ID_COLUMNS: frozenset[str] = frozenset(
+    {
+        "candidate_id",
+        "asas_sn_id",
+        "lc_path",
+        "source_id",
+        "gaia_id",
+        "gaia_dr2_id",
+        "target_id",
+    }
+)
+_METADATA_EXACT_INT_COLUMNS: frozenset[str] = frozenset(
+    set(EVENTS_INT_COLUMNS)
+    | {
+        "clean_n_points",
+        "tag_stats_version",
+    }
+)
+
+
+def _parse_explicit_bool(value: object) -> bool | None:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)) and int(value) in (0, 1):
+        return bool(value)
+    if isinstance(value, (float, np.floating)) and np.isfinite(value) and float(value) in (0.0, 1.0):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "t", "yes", "y"}:
+            return True
+        if token in {"0", "false", "f", "no", "n"}:
+            return False
+    return None
+
+
+def _parse_exact_int(value: object) -> int | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric) or not numeric.is_integer():
+        return None
+    return int(numeric)
+
+
+def _metadata_values_equal(left: object, right: object, *, column: str) -> bool:
+    if _is_missing_value(left) or _is_missing_value(right):
+        return _is_missing_value(left) and _is_missing_value(right)
+    if column in _METADATA_EXACT_ID_COLUMNS or column.endswith("_id"):
+        return str(left).strip() == str(right).strip()
+    if column in EVENTS_BOOL_COLUMNS or isinstance(left, (bool, np.bool_)) or isinstance(right, (bool, np.bool_)):
+        left_bool = _parse_explicit_bool(left)
+        right_bool = _parse_explicit_bool(right)
+        return left_bool is not None and right_bool is not None and left_bool is right_bool
+    if column in _METADATA_EXACT_INT_COLUMNS:
+        left_int = _parse_exact_int(left)
+        right_int = _parse_exact_int(right)
+        return left_int is not None and right_int is not None and left_int == right_int
+    try:
+        left_number = float(left)
+        right_number = float(right)
+    except (TypeError, ValueError):
+        return str(left).strip() == str(right).strip()
+    if np.isfinite(left_number) and np.isfinite(right_number):
+        return bool(np.isclose(left_number, right_number, rtol=0.0, atol=1e-12))
+    return bool(np.isnan(left_number) and np.isnan(right_number))
+
+
+def merge_event_result_metadata(
+    result: Mapping[str, object],
+    metadata: Mapping[str, object] | None,
+    *,
+    lc_path: str,
+) -> dict[str, object]:
+    """Attach metadata without allowing it to rewrite measured event science."""
+    merged = dict(result)
+    meta = dict(metadata or {})
+    for key, value in meta.items():
+        if key == "lc_path" or _is_missing_value(value):
+            continue
+        if key in merged and not _is_missing_value(merged[key]):
+            if not _metadata_values_equal(merged[key], value, column=str(key)):
+                raise ValueError(
+                    f"Metadata disagrees with event-derived {key!r} for {lc_path}: "
+                    f"event={merged[key]!r}, metadata={value!r}"
+                )
+            # The event calculation remains authoritative even when equal.
+            continue
+        merged[key] = value
+
+    def finite_count(mapping: Mapping[str, object], key: str) -> int | None:
+        value = mapping.get(key)
+        if _is_missing_value(value):
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Metadata count {key!r} is not numeric for {lc_path}: {value!r}")
+        if not np.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+            raise ValueError(f"Metadata count {key!r} is invalid for {lc_path}: {value!r}")
+        return int(numeric)
+
+    raw_count = finite_count(merged, "raw_n_points")
+    clean_count = finite_count(merged, "clean_n_points")
+    analysis_count = finite_count(merged, "n_points")
+    raw_camera_count = finite_count(merged, "raw_n_cameras")
+    analysis_camera_count = finite_count(merged, "n_cameras")
+    if raw_count is not None and clean_count is not None and clean_count > raw_count:
+        raise ValueError(
+            f"Point-count invariant failed for {lc_path}: clean_n_points={clean_count} "
+            f"> raw_n_points={raw_count}"
+        )
+    if clean_count is not None and analysis_count is not None and analysis_count > clean_count:
+        raise ValueError(
+            f"Point-count invariant failed for {lc_path}: n_points={analysis_count} "
+            f"> clean_n_points={clean_count}"
+        )
+    if raw_count is not None and analysis_count is not None and analysis_count > raw_count:
+        raise ValueError(
+            f"Point-count invariant failed for {lc_path}: n_points={analysis_count} "
+            f"> raw_n_points={raw_count}"
+        )
+    if (
+        raw_camera_count is not None
+        and analysis_camera_count is not None
+        and analysis_camera_count > raw_camera_count
+    ):
+        raise ValueError(
+            f"Camera-count invariant failed for {lc_path}: n_cameras={analysis_camera_count} "
+            f"> raw_n_cameras={raw_camera_count}"
+        )
+    return merged
 
 
 def _json_safe_value(value: object) -> object:
@@ -796,11 +965,16 @@ def build_runs(
     trig_idx.sort()
 
     if max_gap_days is None:
-        # 99.73th percentile (3-sigma) of gaps between sorted data points
-        dt = np.diff(np.sort(jd))
+        # A high percentile can itself be a seasonal gap for sparse light
+        # curves.  Infer a local cadence threshold and cap it so a run cannot
+        # bridge month/season-scale holes merely because rows are adjacent.
+        dt = np.diff(np.sort(jd[np.isfinite(jd)]))
         dt = dt[np.isfinite(dt) & (dt > 0)]
         if dt.size > 0:
-            max_gap_days = float(np.nanpercentile(dt, 99.73))
+            cadence = float(np.nanmedian(dt))
+            mad = float(MAD_SCALE * np.nanmedian(np.abs(dt - cadence)))
+            robust_upper = cadence + 6.0 * mad if np.isfinite(mad) else cadence
+            max_gap_days = min(30.0, max(5.0 * cadence, robust_upper, 1.0))
         else:
             max_gap_days = 5.0
     max_gap_days = float(max_gap_days)
@@ -970,6 +1144,7 @@ def compute_recurrence_stats(run_summaries: list[dict]) -> dict:
         inter_event_spacing_median=np.nan,
         inter_event_spacing_std=np.nan,
         amplitude_consistency=np.nan,
+        trigger_strength_cv=np.nan,
         duration_consistency=np.nan,
     )
     if not run_summaries or len(run_summaries) < 1:
@@ -993,8 +1168,16 @@ def compute_recurrence_stats(run_summaries: list[dict]) -> dict:
     spacing_median = float(np.nanmedian(spacings)) if spacings.size else np.nan
     spacing_std = float(np.nanstd(spacings, ddof=1)) if spacings.size >= 2 else np.nan
 
-    # Amplitude consistency: coefficient of variation of run_max across runs
-    amps = np.asarray([s.get("run_max", np.nan) for s in sorted_runs], float)
+    # Trigger strength is not a photometric amplitude.  Keep it under an honest
+    # name and compute amplitude consistency from residual event depths.
+    triggers = np.asarray([s.get("run_max", np.nan) for s in sorted_runs], float)
+    triggers = triggers[np.isfinite(triggers)]
+    if triggers.size >= 2 and np.mean(np.abs(triggers)) != 0:
+        trigger_strength_cv = float(np.std(triggers, ddof=1) / np.mean(np.abs(triggers)))
+    else:
+        trigger_strength_cv = np.nan
+
+    amps = np.abs(np.asarray([s.get("peak_delta_mag", np.nan) for s in sorted_runs], float))
     amps = amps[np.isfinite(amps)]
     if amps.size >= 2 and np.mean(amps) != 0:
         amplitude_consistency = float(np.std(amps, ddof=1) / np.mean(amps))
@@ -1014,8 +1197,36 @@ def compute_recurrence_stats(run_summaries: list[dict]) -> dict:
         inter_event_spacing_median=spacing_median,
         inter_event_spacing_std=spacing_std,
         amplitude_consistency=amplitude_consistency,
+        trigger_strength_cv=trigger_strength_cv,
         duration_consistency=duration_consistency,
     )
+
+
+def signal_amplitude_pass_mask(df: pd.DataFrame, min_delta_mag: float) -> pd.Series:
+    """Return whether either *significant* branch clears a delta-mag threshold."""
+    threshold = float(min_delta_mag)
+    if threshold <= 0:
+        return pd.Series(True, index=df.index, dtype=bool)
+
+    def branch_pass(kind: EventKind) -> pd.Series:
+        delta_col = f"{kind}_best_delta_mag"
+        legacy_col = f"{kind}_best_mag_event"
+        if delta_col in df.columns:
+            delta = pd.to_numeric(df[delta_col], errors="coerce")
+        elif legacy_col in df.columns:
+            # Legacy event grids were already residual offsets despite the old
+            # ambiguous name.  Do not subtract absolute baseline magnitude.
+            delta = pd.to_numeric(df[legacy_col], errors="coerce")
+        else:
+            delta = pd.Series(np.nan, index=df.index, dtype=float)
+        significant = (
+            df.get(f"{kind}_significant", pd.Series(False, index=df.index))
+            .fillna(False)
+            .astype(bool)
+        )
+        return significant & delta.abs().ge(threshold)
+
+    return branch_pass("dip") | branch_pass("jump")
 
 
 @njit(fastmath=True, cache=True, parallel=True)
@@ -1149,6 +1360,20 @@ def score_events_bayesian(
     # the caller already cleaned df and df_base must match it.
     if df_base is None:
         df = clean_lc(df)
+    df = df.reset_index(drop=True)
+    if df_base is not None:
+        if len(df_base) != len(df):
+            raise ValueError(
+                "Prepared light curve and baseline have different lengths: "
+                f"{len(df)} != {len(df_base)}"
+            )
+        df_base = df_base.reset_index(drop=True)
+        if "JD" in df_base.columns and not np.allclose(
+            pd.to_numeric(df["JD"], errors="coerce").to_numpy(float),
+            pd.to_numeric(df_base["JD"], errors="coerce").to_numpy(float),
+            equal_nan=True,
+        ):
+            raise ValueError("Prepared light curve and baseline rows are not time-aligned")
     cam_vec = df["camera#"].to_numpy() if "camera#" in df.columns else None
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
@@ -1197,6 +1422,9 @@ def score_events_bayesian(
 
     if df_base is None and baseline_func is not None:
         df_base = baseline_func(df, **baseline_kwargs)
+        if len(df_base) != len(df):
+            raise ValueError("Baseline function changed the number of light-curve rows")
+        df_base = df_base.reset_index(drop=True)
 
     if df_base is None:
         if not np.isfinite(mags).any():
@@ -1447,8 +1675,10 @@ def score_events_bayesian(
     kept_runs = []
     run_summaries = []
 
-    # Pull baseline array for morphology classification
-    baseline_arr = np.asarray(df_base["baseline"], float) if (df_base is not None and "baseline" in df_base.columns) else None
+    # This is the already-filtered, position-aligned baseline array.  Using the
+    # original df_base here would shift morphology fits whenever an invalid
+    # point was removed above.
+    baseline_arr = baseline_mags
 
     if raw_idx.size == 0:
         event_indices = np.array([], dtype=int)
@@ -1486,6 +1716,13 @@ def score_events_bayesian(
                 kind=kind,
             )
             summary.update(morph_res)
+
+            residual_here = mags - baseline_mags
+            if kind == "dip":
+                peak_delta_mag = float(np.nanmax(residual_here[r]))
+            else:
+                peak_delta_mag = float(np.nanmin(residual_here[r]))
+            summary["peak_delta_mag"] = peak_delta_mag
             
             # Symmetry score for dips (Tzanidakis+2025 Eq. 5), computed on residuals
             if kind == "dip" and len(r) >= 3:
@@ -1514,6 +1751,7 @@ def score_events_bayesian(
         kind=str(kind),
         baseline_mag=float(baseline_mag),
         best_mag_event=float(best_mag_event),
+        best_delta_mag=float(best_mag_event),
         best_p=float(best_p),
 
         log_bf_local=log_bf_local,
@@ -1571,7 +1809,9 @@ def score_lightcurve(
     mag_grid_jump: np.ndarray | None = None,
 ):
     """Compute baseline once, then score dips and jumps via kind_configs loop."""
-    df = clean_lc(df)
+    df = clean_lc(df).reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No usable light-curve observations after canonical cleaning")
 
     if baseline_kwargs is None:
         baseline_kwargs = dict(DEFAULT_BASELINE_KWARGS)
@@ -1585,8 +1825,27 @@ def score_lightcurve(
             scatter_ratio_threshold=bad_camera_scatter_ratio,
         )
         if residual_bad_cameras:
-            df = df_filtered
+            df = df_filtered.reset_index(drop=True)
             df_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
+
+    if df_base is not None:
+        if len(df_base) != len(df):
+            raise ValueError("Baseline function changed the number of light-curve rows")
+        df_base = df_base.reset_index(drop=True)
+        if "baseline" not in df_base.columns or "sigma_eff" not in df_base.columns:
+            raise RuntimeError("Baseline must return aligned 'baseline' and 'sigma_eff' columns")
+        prepared_mask = (
+            np.isfinite(pd.to_numeric(df["JD"], errors="coerce").to_numpy(float))
+            & np.isfinite(pd.to_numeric(df["mag"], errors="coerce").to_numpy(float))
+            & np.isfinite(pd.to_numeric(df_base["baseline"], errors="coerce").to_numpy(float))
+            & np.isfinite(pd.to_numeric(df_base["sigma_eff"], errors="coerce").to_numpy(float))
+            & (pd.to_numeric(df_base["sigma_eff"], errors="coerce").to_numpy(float) > 0)
+        )
+        if not bool(prepared_mask.any()):
+            raise ValueError("No aligned finite observations remain after baseline preparation")
+        if not bool(prepared_mask.all()):
+            df = df.loc[prepared_mask].reset_index(drop=True)
+            df_base = df_base.loc[prepared_mask].reset_index(drop=True)
 
     kind_configs = {
         "dip": dict(
@@ -1667,21 +1926,39 @@ def process_lightcurve(
         basename = os.path.basename(path)
         asassn_id = os.path.splitext(basename)[0]
         ext = os.path.splitext(basename)[1][1:] if '.' in basename else None
-        dfg, dfv = read_lc_dat2(asassn_id, dir_path, excluded_cameras=excluded_cameras, file_ext=ext)
+        dfg, dfv = read_lc_dat2(asassn_id, dir_path, excluded_cameras=None, file_ext=ext)
         df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
     else:
         raise ValueError(f"Cannot read light curve from path: {path}")
 
-    field_summary = compute_field_summary(df)
-
-    valid_mask = (
-        np.isfinite(df["JD"]) &
-        np.isfinite(df["mag"]) &
-        np.isfinite(df["error"]) &
-        (df["error"] > 0) &
-        (df["error"] < 10)
+    df_raw = df.copy()
+    raw_n_points = int(len(df_raw))
+    raw_cameras = (
+        df_raw["camera#"].dropna().astype(str)
+        if "camera#" in df_raw.columns
+        else pd.Series([], dtype="string")
     )
-    df = df[valid_mask].copy()
+    raw_camera_ids_values = sorted(raw_cameras.unique().tolist())
+    raw_n_cameras = int(len(raw_camera_ids_values))
+    raw_camera_ids = ",".join(raw_camera_ids_values)
+    raw_field_summary = compute_field_summary(df_raw)
+
+    analysis_raw = df_raw
+    if excluded_cameras and "camera#" in analysis_raw.columns:
+        declared_excluded = {
+            token.strip()
+            for token in str(excluded_cameras).split(",")
+            if token.strip()
+        }
+        analysis_raw = analysis_raw.loc[
+            ~analysis_raw["camera#"].astype(str).isin(declared_excluded)
+        ].copy()
+
+    # Apply exactly the same observation-level quality cuts used by tagging and
+    # direct scoring before any camera or baseline decision.
+    df = clean_lc(analysis_raw)
+    if df.empty:
+        raise ValueError("No usable observations after canonical light-curve cleaning")
 
     # Only catastrophic unsupported excursions are removed before baseline
     # fitting. Scatter/offset camera decisions happen below in residual space.
@@ -1752,6 +2029,7 @@ def process_lightcurve(
     bad_cameras_filtered = set(pre_baseline_bad_cameras) | residual_bad_cameras
     df = res.get("df", df)
     n_points = len(df)
+    field_summary = compute_field_summary(df)
 
     dip = res["dip"]
     jump = res["jump"]
@@ -1824,6 +2102,29 @@ def process_lightcurve(
     dip_recurrence = compute_recurrence_stats(dip["run_summaries"])
     jump_recurrence = compute_recurrence_stats(jump["run_summaries"])
 
+    df_base_for_provenance = res.get("df_base")
+    cross_band_details: dict[str, dict[str, float | int | None]] = {}
+    if (
+        df_base_for_provenance is not None
+        and "cross_band_calibrated" in df_base_for_provenance.columns
+        and "camera#" in df_base_for_provenance.columns
+    ):
+        calibrated = df_base_for_provenance["cross_band_calibrated"].fillna(False).astype(bool)
+        for camera_id, group in df_base_for_provenance.loc[calibrated].groupby("camera#"):
+            def numeric_values(column: str) -> np.ndarray:
+                if column not in group.columns:
+                    return np.array([], dtype=float)
+                return pd.to_numeric(group[column], errors="coerce").to_numpy(float)
+
+            offsets = numeric_values("cross_band_offset_mag")
+            scatters = numeric_values("cross_band_offset_scatter")
+            overlaps = numeric_values("cross_band_overlap_points")
+            cross_band_details[str(camera_id)] = {
+                "offset_mag": float(np.nanmedian(offsets)) if np.isfinite(offsets).any() else None,
+                "offset_scatter": float(np.nanmedian(scatters)) if np.isfinite(scatters).any() else None,
+                "overlap_points": int(np.nanmax(overlaps)) if np.isfinite(overlaps).any() else None,
+            }
+
     cams = df["camera#"].dropna() if "camera#" in df.columns else pd.Series([], dtype=str)
 
     unique_cams = np.unique(cams.astype(str)) if len(cams) > 0 else np.array([], dtype=str)
@@ -1833,7 +2134,8 @@ def process_lightcurve(
     camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
     camera_ids = ",".join(unique_cams) if len(unique_cams) > 0 else ""
 
-    dipper_score = 0.0
+    dipper_score = np.nan
+    dipper_score_status = "not_evaluated"
     dipper_n_dips = 0
     dipper_n_valid_dips = 0
     if bool(dip["significant"]):
@@ -1844,12 +2146,16 @@ def process_lightcurve(
         else:
             baseline_mags = None
         score, events = compute_event_score(df, event_type='dip', baseline_mags=baseline_mags)
-        dipper_score = float(score)
-
         dipper_n_dips = int(len(events))
         dipper_n_valid_dips = int(sum(1 for e in events if e.valid))
+        if np.isfinite(score) and dipper_n_valid_dips > 0:
+            dipper_score = float(score)
+            dipper_score_status = "ok"
+        else:
+            dipper_score_status = "no_valid_events"
 
-    jumper_score = 0.0
+    jumper_score = np.nan
+    jumper_score_status = "not_evaluated"
     jumper_n_jumps = 0
     jumper_n_valid_jumps = 0
     if bool(jump["significant"]):
@@ -1859,17 +2165,31 @@ def process_lightcurve(
         else:
             baseline_mags = None
         score, events = compute_event_score(df, event_type='jump', baseline_mags=baseline_mags)
-        jumper_score = float(score)
-
         jumper_n_jumps = int(len(events))
         jumper_n_valid_jumps = int(sum(1 for e in events if e.valid))
+        if np.isfinite(score) and jumper_n_valid_jumps > 0:
+            jumper_score = float(score)
+            jumper_score_status = "ok"
+        else:
+            jumper_score_status = "no_valid_events"
 
     lc_path = str(path)
-    asas_sn_id = Path(path).stem
+    metadata_asas_id = path_metadata.get("asas_sn_id")
+    asas_sn_id = Path(path).stem if _is_missing_value(metadata_asas_id) else str(metadata_asas_id).strip()
+    metadata_candidate_id = path_metadata.get("candidate_id")
+    candidate_id = (
+        f"stv_{asas_sn_id}"
+        if _is_missing_value(metadata_candidate_id)
+        else str(metadata_candidate_id).strip()
+    )
+    if not candidate_id or candidate_id.lower() in {"nan", "none", "null", "<na>"}:
+        raise ValueError("Candidate metadata contains an invalid candidate_id")
 
     return dict(
-        candidate_id=f"stv_{asas_sn_id}",
+        candidate_id=candidate_id,
         timescale="stv",
+        event_schema_version=EVENT_SCHEMA_VERSION,
+        event_score_version=EVENT_SCORE_VERSION,
         asas_sn_id=asas_sn_id,
         lc_path=lc_path,
 
@@ -1877,6 +2197,7 @@ def process_lightcurve(
         jump_significant=bool(jump["significant"]),
 
         n_points=int(n_points),
+        raw_n_points=int(raw_n_points),
         jd_first=jd_first,
         jd_last=jd_last,
         cadence_median_days=cadence_median_days,
@@ -1924,13 +2245,19 @@ def process_lightcurve(
         jump_best_p=float(jump["best_p"]),
         dip_best_mag_event=float(dip.get("best_mag_event", np.nan)),
         jump_best_mag_event=float(jump.get("best_mag_event", np.nan)),
+        dip_best_delta_mag=float(dip.get("best_delta_mag", np.nan)),
+        jump_best_delta_mag=float(jump.get("best_delta_mag", np.nan)),
         dip_trigger_max=float(dip.get("trigger_max", np.nan)),
         jump_trigger_max=float(jump.get("trigger_max", np.nan)),
         dip_max_event_prob=max_event_prob(dip),
         jump_max_event_prob=max_event_prob(jump),
 
         n_cameras=int(n_cameras),
+        raw_n_cameras=int(raw_n_cameras),
         camera_ids=str(camera_ids),
+        raw_camera_ids=str(raw_camera_ids),
+        raw_asassn_fields=str(raw_field_summary.get("asassn_fields", "")),
+        raw_camera_names=str(raw_field_summary.get("camera_names", "")),
         camera_min_points=int(camera_min_points),
         camera_max_points=int(camera_max_points),
         asassn_field_key=str(field_summary.get("asassn_field_key", "")),
@@ -1943,14 +2270,18 @@ def process_lightcurve(
         camera_name_key_fraction=float(field_summary.get("camera_name_key_fraction", np.nan)),
 
         dipper_score=float(dipper_score),
+        dipper_score_status=str(dipper_score_status),
         dipper_n_dips=int(dipper_n_dips),
         dipper_n_valid_dips=int(dipper_n_valid_dips),
 
         jumper_score=float(jumper_score),
+        jumper_score_status=str(jumper_score_status),
         jumper_n_jumps=int(jumper_n_jumps),
         jumper_n_valid_jumps=int(jumper_n_valid_jumps),
 
         baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
+        baseline_cross_band_calibrated=bool(cross_band_details),
+        baseline_cross_band_details=json.dumps(cross_band_details, sort_keys=True, separators=(",", ":")),
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),
@@ -1961,13 +2292,22 @@ def process_lightcurve(
         dip_inter_event_spacing_median=float(dip_recurrence["inter_event_spacing_median"]),
         dip_inter_event_spacing_std=float(dip_recurrence["inter_event_spacing_std"]),
         dip_amplitude_consistency=float(dip_recurrence["amplitude_consistency"]),
+        dip_trigger_strength_cv=float(dip_recurrence["trigger_strength_cv"]),
         dip_duration_consistency=float(dip_recurrence["duration_consistency"]),
 
         jump_is_single_event=bool(jump_recurrence["is_single_event"]),
         jump_inter_event_spacing_median=float(jump_recurrence["inter_event_spacing_median"]),
         jump_inter_event_spacing_std=float(jump_recurrence["inter_event_spacing_std"]),
         jump_amplitude_consistency=float(jump_recurrence["amplitude_consistency"]),
+        jump_trigger_strength_cv=float(jump_recurrence["trigger_strength_cv"]),
         jump_duration_consistency=float(jump_recurrence["duration_consistency"]),
+
+        # Per-run epoch JSON: enables downstream period consensus to
+        # consume the events pipeline's own dip epochs without re-running
+        # the full posterior. Values are compact JSON blobs (or None) as
+        # produced by ``serialize_run_summaries``.
+        dip_run_epochs_json=serialize_run_summaries(dip.get("run_summaries")),
+        jump_run_epochs_json=serialize_run_summaries(jump.get("run_summaries")),
     )
 
 
@@ -2085,6 +2425,29 @@ def main():
     g_baseline.add_argument("--baseline-q", type=float, help="SHOTerm Q for GP baselines.")
     g_baseline.add_argument("--baseline-jitter", type=float, help="Additional jitter for GP baselines.")
     g_baseline.add_argument("--baseline-sigma-floor", type=float, help="Optional fixed sigma floor for GP baselines.")
+    g_baseline.add_argument(
+        "--allow-cross-band-consensus",
+        action="store_true",
+        help=(
+            "Allow late cameras to borrow another band's baseline only after a "
+            "robust overlapping-data colour offset is measured (disabled by default)."
+        ),
+    )
+    g_baseline.add_argument(
+        "--cross-band-min-overlap-points",
+        type=int,
+        help="Minimum quiet overlapping points required for cross-band colour calibration.",
+    )
+    g_baseline.add_argument(
+        "--cross-band-min-overlap-days",
+        type=float,
+        help="Minimum time span required for cross-band colour calibration.",
+    )
+    g_baseline.add_argument(
+        "--cross-band-clip-sigma",
+        type=float,
+        help="Robust clipping threshold used while estimating the cross-band colour offset.",
+    )
 
     g_cleaning.add_argument("--filter-bad-cameras", dest="filter_bad_cameras", action="store_true", help="Enable automatic bad-camera filtering.")
     g_cleaning.add_argument("--no-filter-bad-cameras", dest="filter_bad_cameras", action="store_false", help="Disable automatic bad-camera filtering.")
@@ -2097,9 +2460,8 @@ def main():
     g_general.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(**EVENTS_CONFIG_DEFAULTS)
 
-    args = parser.parse_args()
-    apply_config(
-        args,
+    args = parse_args_with_config(
+        parser,
         command="events",
         valid_keys=namespace_keys(parser, EVENTS_CONFIG_DEFAULTS),
         path_keys=EVENTS_CONFIG_PATH_KEYS,
@@ -2131,7 +2493,18 @@ def main():
         meta_df = pd.read_parquet(args.metadata)
         if "lc_path" not in meta_df.columns:
             raise SystemExit("metadata parquet must include an 'lc_path' column")
-        meta_df["lc_path"] = meta_df["lc_path"].astype(str)
+        metadata_paths = meta_df["lc_path"].astype("string").str.strip()
+        invalid_metadata_paths = metadata_paths.isna() | metadata_paths.eq("")
+        if bool(invalid_metadata_paths.any()):
+            raise SystemExit(
+                "metadata parquet contains "
+                f"{int(invalid_metadata_paths.sum())} null or blank 'lc_path' value(s)"
+            )
+        duplicate_metadata_paths = metadata_paths.duplicated(keep=False)
+        if bool(duplicate_metadata_paths.any()):
+            examples = metadata_paths.loc[duplicate_metadata_paths].drop_duplicates().head(5).tolist()
+            raise SystemExit(f"metadata parquet contains duplicate 'lc_path' values: {examples}")
+        meta_df["lc_path"] = metadata_paths.astype(str)
         metadata_by_path = meta_df.set_index("lc_path").to_dict(orient="index")
 
     events_writer_columns = build_events_writer_columns(meta_df.columns if meta_df is not None else None)
@@ -2146,25 +2519,140 @@ def main():
             return path.with_suffix(ext)
         return path
 
-    def collect_processed_from_output(path: Path | None, fmt: str) -> set[str]:
+    def read_existing_output(path: Path | None, fmt: str) -> pd.DataFrame:
         if path is None or (not path.exists()):
-            return set()
-        try:
-            if fmt == "parquet":
-                table = pq.read_table(path, columns=["lc_path"])
-                df_existing = table.to_pandas()
-            elif fmt == "parquet_chunk":
+            return pd.DataFrame()
+        if fmt == "parquet":
+            return pq.read_table(path).to_pandas()
+        if fmt == "parquet_chunk":
+            chunk_paths = sorted(path.glob("chunk_*.parquet")) if path.is_dir() else []
+            if not chunk_paths:
+                return pd.DataFrame()
+            return pd.concat(
+                [pq.read_table(chunk_path).to_pandas() for chunk_path in chunk_paths],
+                ignore_index=True,
+                sort=False,
+            )
+        raise ValueError(f"Unsupported events output format for resume: {fmt}")
 
-                dataset = ds.dataset(path, format="parquet")
-                table = dataset.to_table(columns=["lc_path"])
-                df_existing = table.to_pandas()
+    def write_reconciled_output(path: Path, fmt: str, frame: pd.DataFrame) -> None:
+        if path.exists():
+            if fmt == "parquet_chunk" and path.is_dir():
+                for child in path.glob("chunk_*.parquet*"):
+                    child.unlink()
             else:
-                return set()
-            if "lc_path" in df_existing.columns:
-                return set(df_existing["lc_path"].astype(str))
-        except Exception as e:
-            _log(f"Warning: could not read existing output {path} to skip duplicates: {e}", quiet)
-        return set()
+                path.unlink()
+        if frame.empty:
+            return
+        if fmt == "parquet":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.with_suffix(f"{path.suffix}.tmp")
+            pq.write_table(
+                pa.Table.from_pandas(frame, preserve_index=False),
+                temp_path,
+                compression=PARQUET_OUTPUT_COMPRESSION,
+            )
+            os.replace(temp_path, path)
+            return
+        if fmt == "parquet_chunk":
+            path.mkdir(parents=True, exist_ok=True)
+            chunk_rows = max(1, int(EVENTS_OUTPUT_CHUNK_SIZE))
+            for chunk_idx, start in enumerate(range(0, len(frame), chunk_rows)):
+                final_path = path / f"chunk_{chunk_idx:06d}.parquet"
+                temp_path = path / f"chunk_{chunk_idx:06d}.parquet.tmp"
+                pq.write_table(
+                    pa.Table.from_pandas(
+                        frame.iloc[start : start + chunk_rows],
+                        preserve_index=False,
+                    ),
+                    temp_path,
+                    compression=PARQUET_OUTPUT_COMPRESSION,
+                )
+                os.replace(temp_path, final_path)
+            return
+        raise ValueError(f"Unsupported events output format for resume: {fmt}")
+
+    def reconcile_processed_output(
+        path: Path | None,
+        fmt: str,
+        expected_candidate_ids: Mapping[str, str],
+    ) -> tuple[set[str], list[str], int]:
+        if path is None or (not path.exists()):
+            return set(), [], 0
+        frame = read_existing_output(path, fmt)
+        if frame.empty:
+            return set(), [], 0
+
+        if "lc_path" not in frame.columns:
+            write_reconciled_output(path, fmt, frame.iloc[0:0].copy())
+            return set(), [], int(len(frame))
+
+        output_paths = frame["lc_path"].astype("string").str.strip()
+        path_counts = output_paths.value_counts(dropna=False)
+        valid_rows = output_paths.map(
+            lambda value: (
+                pd.notna(value)
+                and str(value) != ""
+                and int(path_counts.get(value, 0)) == 1
+            )
+        )
+
+        if "candidate_id" not in frame.columns:
+            frame["candidate_id"] = pd.Series(pd.NA, index=frame.index, dtype="string")
+        candidate_ids = frame["candidate_id"].astype("string").str.strip()
+        identity_backfilled = False
+        processed_paths: set[str] = set()
+        for row_index in frame.index[valid_rows]:
+            path_value = str(output_paths.loc[row_index])
+            candidate_value = candidate_ids.loc[row_index]
+            if pd.isna(candidate_value) or str(candidate_value) == "":
+                if path_value in expected_candidate_ids:
+                    valid_rows.loc[row_index] = False
+                    continue
+                candidate_value = f"stv_{Path(path_value).stem}"
+                frame.loc[row_index, "candidate_id"] = candidate_value
+                candidate_ids.loc[row_index] = candidate_value
+                identity_backfilled = True
+            if path_value in expected_candidate_ids:
+                if str(candidate_value) != expected_candidate_ids[path_value]:
+                    valid_rows.loc[row_index] = False
+                    continue
+                processed_paths.add(path_value)
+
+        retained = frame.loc[valid_rows].reset_index(drop=True)
+        retained_paths = retained["lc_path"].astype(str).tolist() if not retained.empty else []
+        retained_candidate_ids = (
+            retained["candidate_id"].astype("string").str.strip()
+            if not retained.empty
+            else pd.Series(dtype="string")
+        )
+        candidate_owners: dict[str, str] = {}
+        collisions: dict[str, set[str]] = {}
+        for candidate_value, path_value in zip(retained_candidate_ids, retained_paths):
+            candidate_text = str(candidate_value)
+            previous_path = candidate_owners.setdefault(candidate_text, path_value)
+            if previous_path != path_value:
+                collisions.setdefault(candidate_text, {previous_path}).add(path_value)
+        for path_value, candidate_value in expected_candidate_ids.items():
+            if path_value in processed_paths:
+                continue
+            previous_path = candidate_owners.setdefault(candidate_value, path_value)
+            if previous_path != path_value:
+                collisions.setdefault(candidate_value, {previous_path}).add(path_value)
+        if collisions:
+            examples = [
+                f"{candidate_id}: {sorted(paths)[:3]}"
+                for candidate_id, paths in list(collisions.items())[:5]
+            ]
+            raise ValueError(
+                "Existing and requested event rows collide on canonical candidate_id: "
+                + "; ".join(examples)
+            )
+
+        removed_count = int(len(frame) - len(retained))
+        if removed_count or identity_backfilled:
+            write_reconciled_output(path, fmt, retained)
+        return processed_paths, retained_paths, removed_count
 
     def clear_existing_output(path: Path | None, fmt: str) -> None:
         if path is None or (not path.exists()):
@@ -2208,7 +2696,44 @@ def main():
         else default_error_output_path(base_output_path)
     )
 
-    processed_files = set()
+    def reconcile_error_output(
+        new_error_rows: list[dict],
+        *,
+        resolved_paths: set[str],
+    ) -> None:
+        if error_output_path is None:
+            return
+        frames: list[pd.DataFrame] = []
+        if error_output_path.exists() and not args.overwrite:
+            existing_errors = pd.read_parquet(error_output_path)
+            if "lc_path" not in existing_errors.columns:
+                raise ValueError(f"Existing error output is missing 'lc_path': {error_output_path}")
+            unresolved_existing = existing_errors.loc[
+                ~existing_errors["lc_path"].astype(str).isin(resolved_paths)
+            ].copy()
+            if not unresolved_existing.empty:
+                frames.append(unresolved_existing)
+        if new_error_rows:
+            new_errors = pd.DataFrame(new_error_rows)
+            new_errors = new_errors.loc[
+                ~new_errors["lc_path"].astype(str).isin(resolved_paths)
+            ].copy()
+            if not new_errors.empty:
+                frames.append(new_errors)
+
+        if not frames:
+            error_output_path.unlink(missing_ok=True)
+            return
+
+        unresolved = pd.concat(frames, ignore_index=True, sort=False)
+        unresolved = unresolved.drop_duplicates(subset=["lc_path"], keep="last").reset_index(drop=True)
+        error_output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = error_output_path.with_suffix(f"{error_output_path.suffix}.tmp")
+        unresolved.to_parquet(temp_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
+        os.replace(temp_path, error_output_path)
+
+    processed_files: set[str] = set()
+    checkpoint_entries: list[str] = []
     if checkpoint_log and checkpoint_log.exists() and args.overwrite:
         try:
             with open(checkpoint_log, "w"):
@@ -2230,14 +2755,16 @@ def main():
         _log(f"Reading processed files from: {checkpoint_log}", quiet)
         try:
             with open(checkpoint_log, "r") as f:
-                processed_files = set(line.strip() for line in f)
+                seen_checkpoint_paths: set[str] = set()
+                for line in f:
+                    path_value = line.strip()
+                    if path_value and path_value not in seen_checkpoint_paths:
+                        checkpoint_entries.append(path_value)
+                        seen_checkpoint_paths.add(path_value)
+                processed_files = set(checkpoint_entries)
             _log(f"Found {len(processed_files)} previously processed files.", quiet)
         except Exception as e:
             _log(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", quiet)
-
-    # existing output (avoid duplicates if checkpoint was out-of-sync)
-    if not args.overwrite:
-        processed_files |= collect_processed_from_output(base_output_path, output_format)
 
     input_patterns: list[str] = []
     if args.input_patterns:
@@ -2274,6 +2801,79 @@ def main():
     expanded_inputs = [x for x in expanded_inputs if not (x in seen or seen.add(x))]
     
     if not expanded_inputs: raise SystemExit("No input files found.")
+
+    expected_candidate_ids: dict[str, str] = {}
+    candidate_id_paths: dict[str, list[str]] = {}
+    for path_value in expanded_inputs:
+        path_text = str(path_value)
+        path_metadata = metadata_by_path.get(path_text, {}) if metadata_by_path else {}
+        metadata_candidate_id = path_metadata.get("candidate_id")
+        candidate_id = (
+            f"stv_{Path(path_text).stem}"
+            if _is_missing_value(metadata_candidate_id)
+            else str(metadata_candidate_id).strip()
+        )
+        if not candidate_id or candidate_id.lower() in {"nan", "none", "null", "<na>"}:
+            raise SystemExit(f"Candidate metadata contains an invalid candidate_id for {path_text}")
+        expected_candidate_ids[path_text] = candidate_id
+        candidate_id_paths.setdefault(candidate_id, []).append(path_text)
+    candidate_id_collisions = {
+        candidate_id: paths
+        for candidate_id, paths in candidate_id_paths.items()
+        if len(paths) > 1
+    }
+    if candidate_id_collisions:
+        examples = [
+            f"{candidate_id}: {paths[:3]}"
+            for candidate_id, paths in list(candidate_id_collisions.items())[:5]
+        ]
+        raise SystemExit(
+            "Event inputs map multiple light curves to the same canonical candidate_id: "
+            + "; ".join(examples)
+        )
+
+    checkpoint_paths = set(checkpoint_entries)
+    retained_output_paths: list[str] = []
+    if not args.overwrite:
+        try:
+            processed_files, retained_output_paths, removed_output_rows = reconcile_processed_output(
+                base_output_path,
+                output_format,
+                expected_candidate_ids,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not reconcile existing event output for safe retry: {base_output_path}"
+            ) from exc
+        if removed_output_rows:
+            _log(
+                f"Removed {removed_output_rows} duplicate, unkeyed, or current-input "
+                "identity-invalid cached output row(s) before retry.",
+                quiet,
+            )
+        checkpoint_only = (checkpoint_paths & set(expected_candidate_ids)) - processed_files
+        if checkpoint_only:
+            _log(
+                f"Retrying {len(checkpoint_only)} checkpoint path(s) without a unique valid output row.",
+                quiet,
+            )
+        if checkpoint_log is not None:
+            checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
+            retained_path_set = set(retained_output_paths)
+            reconciled_checkpoint_paths = [
+                path_value
+                for path_value in checkpoint_entries
+                if path_value in retained_path_set
+            ]
+            seen_reconciled_paths = set(reconciled_checkpoint_paths)
+            reconciled_checkpoint_paths.extend(
+                path_value
+                for path_value in retained_output_paths
+                if path_value not in seen_reconciled_paths
+            )
+            with checkpoint_log.open("w", encoding="utf-8") as handle:
+                for path_value in reconciled_checkpoint_paths:
+                    handle.write(f"{path_value}\n")
     
     # --- CHECKPOINT FILTERING ---
     original_count = len(expanded_inputs)
@@ -2281,6 +2881,7 @@ def main():
     _log(f"Processing {len(expanded_inputs)} light curve file(s) (Filtered from {original_count})...", quiet)
     
     if len(expanded_inputs) == 0:
+        reconcile_error_output([], resolved_paths=set(retained_output_paths))
         _log("All files have been processed according to checkpoint! Exiting.", quiet)
         return
 
@@ -2288,6 +2889,7 @@ def main():
 
     results = []
     errors = []
+    successful_paths: set[str] = set()
     
     chunk_size = _resolve_events_chunk_size(args.chunk_size)
     task_chunk_size = max(1, int(chunk_size or EVENTS_OUTPUT_CHUNK_SIZE))
@@ -2415,21 +3017,6 @@ def main():
                 any_sig += 1
         return dip, jump, any_sig
 
-    def write_errors(error_rows: list[dict]) -> None:
-        if not error_rows or error_output_path is None:
-            return
-        try:
-            df_errors = pd.DataFrame(error_rows)
-            error_output_path.parent.mkdir(parents=True, exist_ok=True)
-            append = error_output_path.exists() and (not args.overwrite)
-            if append:
-                df_existing = pd.read_parquet(error_output_path)
-                df_errors = pd.concat([df_existing, df_errors], ignore_index=True, sort=False)
-            df_errors.to_parquet(error_output_path, index=False, compression=PARQUET_OUTPUT_COMPRESSION)
-            _log(f"Wrote {len(df_errors)} processing errors to {error_output_path}", quiet)
-        except Exception as e:
-            print(f"Warning: could not write processing errors to {error_output_path}: {e}", flush=True)
-
     def write_chunk(chunk_results, is_final=False):
         if not chunk_results: 
             return
@@ -2438,9 +3025,7 @@ def main():
         # Tag signal amplitude failures if requested
         if args.min_mag_offset is not None and args.min_mag_offset > 0:
             df_chunk = pd.DataFrame(chunk_results)
-            dip_diff = np.abs(df_chunk["dip_best_mag_event"] - df_chunk["baseline_mag"])
-            jump_diff = np.abs(df_chunk["jump_best_mag_event"] - df_chunk["baseline_mag"])
-            passed = (dip_diff > args.min_mag_offset) | (jump_diff > args.min_mag_offset)
+            passed = signal_amplitude_pass_mask(df_chunk, args.min_mag_offset)
             df_chunk["failed_signal_amplitude"] = ~passed
             n_failed = int((~passed).sum())
             if n_failed > 0:
@@ -2485,6 +3070,13 @@ def main():
         sigma_floor=args.baseline_sigma_floor,
         add_sigma_eff_col=True,
     )
+    if baseline_tag == "gp_masked":
+        baseline_kwargs.update(
+            allow_cross_band_consensus=args.allow_cross_band_consensus,
+            cross_band_min_overlap_points=args.cross_band_min_overlap_points,
+            cross_band_min_overlap_days=args.cross_band_min_overlap_days,
+            cross_band_clip_sigma=args.cross_band_clip_sigma,
+        )
     worker_config = {
         "trigger_mode": args.trigger_mode,
         "logbf_threshold_dip": args.logbf_threshold_dip,
@@ -2532,11 +3124,46 @@ def main():
             return
 
         result = dict(batch_result["result"])
+        expected_candidate_id = expected_candidate_ids[path]
+        result_candidate_id = result.get("candidate_id")
+        if _is_missing_value(result_candidate_id):
+            result["candidate_id"] = expected_candidate_id
+        elif not _metadata_values_equal(
+            result_candidate_id,
+            expected_candidate_id,
+            column="candidate_id",
+        ):
+            errors.append(
+                dict(
+                    lc_path=path,
+                    error=(
+                        "identity_validation: worker candidate_id disagrees with canonical "
+                        f"identity: worker={result_candidate_id!r}, "
+                        f"expected={expected_candidate_id!r}"
+                    ),
+                    traceback="",
+                )
+            )
+            return
+        result.setdefault("timescale", "stv")
         if metadata_by_path:
             meta = metadata_by_path.get(path)
             if meta:
-                result.update(meta)
+                try:
+                    result = merge_event_result_metadata(result, meta, lc_path=path)
+                except Exception as exc:
+                    tb_str = traceback.format_exc()
+                    errors.append(
+                        dict(
+                            lc_path=path,
+                            error=f"metadata_validation:{type(exc).__name__}: {exc}",
+                            traceback=tb_str,
+                        )
+                    )
+                    print(f"ERROR validating metadata for {path}: {exc}", flush=True)
+                    return
         results.append(result)
+        successful_paths.add(path)
         if chunk_size and len(results) >= chunk_size:
             write_chunk(results)
             results = []
@@ -2590,8 +3217,11 @@ def main():
             for row in results:
                 print(f"{row['lc_path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
 
+    reconcile_error_output(
+        errors,
+        resolved_paths=set(retained_output_paths) | successful_paths,
+    )
     if errors:
-        write_errors(errors)
         error_fraction = len(errors) / attempted_count if attempted_count else 0.0
         print(
             f"Completed with {len(errors)}/{attempted_count} failures "

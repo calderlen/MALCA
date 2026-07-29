@@ -561,3 +561,52 @@ class TestLateOnsetConsensus:
             f"Cross-band fallback base_rough deviates from quiescent: "
             f"mean={np.mean(new_band_base_rough):.3f}"
         )
+
+    def test_cross_band_transfer_requires_and_records_colour_calibration(self):
+        rng = np.random.default_rng(711)
+        rows = []
+        dip_center = 9600.0
+        for camera in ("g1", "g2"):
+            jd = np.arange(7000.0, 11000.0, 5.0)
+            mag = 14.0 + rng.normal(0.0, 0.015, len(jd))
+            mag += 0.45 * np.exp(-0.5 * ((jd - dip_center) / 15.0) ** 2)
+            rows.extend(
+                {
+                    "JD": t,
+                    "mag": m,
+                    "error": 0.015,
+                    "camera#": camera,
+                    "v_g_band": 0,
+                    "saturated": 0,
+                }
+                for t, m in zip(jd, mag)
+            )
+        for camera in ("v1", "v2"):
+            jd = np.arange(9500.0, 11000.0, 5.0)
+            mag = 15.0 + rng.normal(0.0, 0.015, len(jd))
+            mag += 0.45 * np.exp(-0.5 * ((jd - dip_center) / 15.0) ** 2)
+            rows.extend(
+                {
+                    "JD": t,
+                    "mag": m,
+                    "error": 0.015,
+                    "camera#": camera,
+                    "v_g_band": 1,
+                    "saturated": 0,
+                }
+                for t, m in zip(jd, mag)
+            )
+
+        result = per_camera_gp_baseline_masked(
+            pd.DataFrame(rows).sort_values("JD").reset_index(drop=True),
+            late_onset_buffer_days=300.0,
+            min_anchor_overlap_days=30.0,
+            allow_cross_band_consensus=True,
+            cross_band_min_overlap_points=50,
+        )
+        target = result["camera#"].astype(str).str.startswith("v")
+
+        assert result.loc[target, "cross_band_calibrated"].all()
+        assert np.nanmedian(result.loc[target, "cross_band_offset_mag"]) == pytest.approx(1.0, abs=0.05)
+        assert set(result.loc[target, "baseline_source"]) == {"cross_band_consensus_calibrated"}
+        assert np.nanmedian(result.loc[target, "baseline"]) == pytest.approx(15.0, abs=0.05)

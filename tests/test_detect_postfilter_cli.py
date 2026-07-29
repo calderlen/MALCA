@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -21,12 +22,18 @@ from malca.stv.pipeline import (
     _build_home_external_validation_cmd,
     _candidate_result_priority,
     _collect_bundle_lightcurve_files,
+    _count_true_feature_rows,
     _copy_single_tagged_table_output,
     _effective_enrich_workers,
     _first_existing_candidate_result,
+    _first_existing_gaia_binary_input,
+    _metadata_frame_digest,
+    _prune_resolved_event_errors,
+    _reconcile_cached_event_rows,
     load_side_table,
     load_passing_table,
     load_review_import_table,
+    _run_gaia_binary_enrichment,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
     _select_passing_candidates,
@@ -39,6 +46,170 @@ from malca.stv.pipeline import (
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
 from malca.io.table_io import write_feature_table, write_parquet_table
 from malca.products.product_schema import assert_stv_product_schema
+from malca.products.feature_layers import to_layer_first_frame
+
+
+def test_event_branch_metadata_digest_tracks_values_not_only_columns() -> None:
+    first = pd.DataFrame(
+        {
+            "lc_path": ["b.dat2", "a.dat2"],
+            "pre_periodicity_selected_period": [2.0, 3.0],
+            "tag_stats_status": ["ok", "ok"],
+        }
+    )
+    reordered = first.iloc[::-1].reset_index(drop=True)
+    changed = first.copy()
+    changed.loc[changed["lc_path"].eq("a.dat2"), "pre_periodicity_selected_period"] = 3.5
+
+    assert _metadata_frame_digest(first) == _metadata_frame_digest(reordered)
+    assert _metadata_frame_digest(first) != _metadata_frame_digest(changed)
+
+
+def test_event_branch_metadata_digest_rejects_non_scalar_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "lc_path": ["a.dat2"],
+            "pre_periodicity_selected_period": [[2.0, 3.0]],
+        }
+    )
+
+    with pytest.raises(ValueError, match="requires scalar values"):
+        _metadata_frame_digest(frame)
+
+
+def test_detection_summary_counts_layer_first_significance() -> None:
+    layered = to_layer_first_frame(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_a", "stv_b"],
+                "timescale": ["stv", "stv"],
+                "lc_path": ["a.dat2", "b.dat2"],
+                "dip_significant": [True, False],
+                "jump_significant": [False, True],
+            }
+        )
+    )
+
+    assert "dip_significant" not in layered.columns
+    assert _count_true_feature_rows(layered, "dip_significant") == 1
+    assert _count_true_feature_rows(layered, "jump_significant") == 1
+
+
+def test_detection_summary_counts_float_and_numpy_boolean_representations() -> None:
+    frame = pd.DataFrame(
+        {
+            "dip_significant": [
+                1.0,
+                0.0,
+                np.float32(1.0),
+                np.bool_(True),
+                np.bool_(False),
+                "1.0",
+            ]
+        }
+    )
+
+    assert _count_true_feature_rows(frame, "dip_significant") == 4
+
+
+def _cached_event_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
+    canonical_rows: list[dict[str, object]] = []
+    for row in rows:
+        path = row.get("lc_path")
+        candidate_id = row.get("candidate_id", f"stv_{len(canonical_rows)}")
+        canonical_rows.append(
+            {
+                "candidate_id": candidate_id,
+                "timescale": "stv",
+                "asas_sn_id": str(candidate_id).removeprefix("stv_"),
+                "lc_path": path,
+                "event_schema_version": 2,
+                "event_score_version": 2,
+                "tag_stats_status": row.get("tag_stats_status", "ok"),
+                "tag_stats_error": "",
+                "tag_stats_version": 2,
+                "raw_n_points": 20,
+                "clean_n_points": 18,
+                "raw_n_cameras": 2,
+                "raw_camera_ids": "1,2",
+                "raw_asassn_fields": "field-a",
+                "raw_camera_names": "cam-a",
+                "baseline_cross_band_calibrated": False,
+                "baseline_cross_band_details": "{}",
+                "dip_best_delta_mag": 0.25,
+                "jump_best_delta_mag": -0.1,
+            }
+        )
+    return to_layer_first_frame(pd.DataFrame(canonical_rows))
+
+
+def test_cached_event_reconciliation_retries_checkpoint_only_duplicate_null_and_malformed_rows() -> None:
+    cached = _cached_event_frame(
+        [
+            {"candidate_id": "stv_a", "lc_path": "a.dat2"},
+            {"candidate_id": "stv_b1", "lc_path": "b.dat2"},
+            {"candidate_id": "stv_b2", "lc_path": "b.dat2"},
+            {"candidate_id": "stv_null", "lc_path": None},
+            {"candidate_id": "stv_x", "lc_path": "unexpected.dat2"},
+            {"candidate_id": "stv_c", "lc_path": "c.dat2", "tag_stats_status": pd.NA},
+        ]
+    )
+
+    reconciliation = _reconcile_cached_event_rows(
+        cached,
+        expected_paths={"a.dat2", "b.dat2", "c.dat2", "d.dat2"},
+        checkpoint_paths={"a.dat2", "d.dat2"},
+    )
+
+    assert reconciliation.reusable_paths == frozenset({"a.dat2"})
+    assert reconciliation.retry_paths == frozenset({"b.dat2", "c.dat2", "d.dat2"})
+    assert reconciliation.checkpoint_only_paths == frozenset({"d.dat2"})
+    assert len(reconciliation.quarantined_rows) == 5
+    reasons = reconciliation.quarantined_rows["_cache_validation_error"].astype(str)
+    assert reasons.str.contains("duplicate_lc_path").sum() == 2
+    assert reasons.str.contains("unkeyed_lc_path").sum() == 1
+    assert reasons.str.contains("unexpected_lc_path").sum() == 1
+    assert reasons.str.contains("invalid_event_schema").sum() == 1
+
+
+def test_cached_event_reconciliation_rejects_candidate_identity_collisions_across_paths() -> None:
+    cached = _cached_event_frame(
+        [
+            {"candidate_id": "stv_same", "lc_path": "a.dat2"},
+            {"candidate_id": "stv_same", "lc_path": "b.dat2"},
+        ]
+    )
+
+    reconciliation = _reconcile_cached_event_rows(
+        cached,
+        expected_paths={"a.dat2", "b.dat2"},
+    )
+
+    assert reconciliation.reusable_paths == frozenset()
+    assert reconciliation.retry_paths == frozenset({"a.dat2", "b.dat2"})
+    assert len(reconciliation.quarantined_rows) == 2
+    assert reconciliation.quarantined_rows["_cache_validation_error"].str.contains(
+        "invalid_retained_event_schema"
+    ).all()
+
+
+def test_resolved_event_errors_are_removed_from_the_ledger(tmp_path: Path) -> None:
+    error_path = tmp_path / "events_ERRORS.parquet"
+    pd.DataFrame(
+        {
+            "lc_path": ["a.dat2", "b.dat2", "b.dat2"],
+            "error": ["old", "older", "newer"],
+        }
+    ).to_parquet(error_path, index=False)
+
+    unresolved = _prune_resolved_event_errors(error_path, resolved_paths={"a.dat2"})
+
+    assert unresolved == {"b.dat2"}
+    remaining = pd.read_parquet(error_path)
+    assert remaining.to_dict("records") == [{"lc_path": "b.dat2", "error": "newer"}]
+
+    assert _prune_resolved_event_errors(error_path, resolved_paths={"b.dat2"}) == set()
+    assert not error_path.exists()
 
 
 def _base_args() -> argparse.Namespace:
@@ -116,6 +287,7 @@ def test_candidate_result_priority_prefers_extended_outputs(tmp_path: Path) -> N
     for name in [
         "lc_events_classified.parquet",
         "lc_events_vetted.parquet",
+        "lc_events_gaia_binary.parquet",
         "lc_events_external_lcs.parquet",
         "lc_events_multi_survey_features.parquet",
     ]:
@@ -125,8 +297,62 @@ def test_candidate_result_priority_prefers_extended_outputs(tmp_path: Path) -> N
 
     assert priority[0].name == "lc_events_multi_survey_features.parquet"
     assert priority[1].name == "lc_events_external_lcs.parquet"
+    assert priority[2].name == "lc_events_gaia_binary.parquet"
     assert _first_existing_candidate_result(results_dir).name == "lc_events_multi_survey_features.parquet"
-    assert _first_existing_candidate_result(results_dir, include_extended=False).name == "lc_events_vetted.parquet"
+    assert _first_existing_candidate_result(results_dir, include_extended=False).name == "lc_events_gaia_binary.parquet"
+    assert _first_existing_gaia_binary_input(results_dir).name == "lc_events_vetted.parquet"
+
+
+def test_pipeline_gaia_binary_stage_merges_evidence_and_writes_all_products(
+    tmp_path: Path,
+) -> None:
+    source_id = "3564313717372918912"
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    nss_path = tmp_path / "NssTwoBodyOrbit_1.csv.gz"
+    pd.DataFrame(
+        {
+            "solution_id": ["1"],
+            "source_id": [source_id],
+            "nss_solution_type": ["SB1"],
+            "period": [2.0],
+            "period_error": [0.01],
+            "semi_amplitude_primary": [30.0],
+        }
+    ).to_csv(nss_path, index=False)
+    gaia_source_path = tmp_path / "gaia_dr3_crossmatched.parquet"
+    pd.DataFrame({"source_id": [source_id], "ruwe": [1.2]}).to_parquet(
+        gaia_source_path,
+        index=False,
+    )
+    candidates = pd.DataFrame(
+        {
+            "candidate_id": ["stv_A"],
+            "timescale": ["stv"],
+            "lc_path": [str(tmp_path / "A.dat2")],
+            "failed_any": [False],
+            "source_id_gaia": [source_id],
+            "period_asassn_var_days": [2.0],
+        }
+    )
+
+    output_path, merged, evidence, nss_long = _run_gaia_binary_enrichment(
+        candidates,
+        results_dir=results_dir,
+        gaia_source_path=gaia_source_path,
+        nss_catalog_path=nss_path,
+        offline=True,
+        query_all_eb=False,
+        chunk_size=100,
+        show_progress=False,
+    )
+
+    assert output_path.exists()
+    assert (results_dir / "gaia_binary_evidence.parquet").exists()
+    assert (results_dir / "gaia_nss_candidate_solutions.parquet").exists()
+    assert merged.loc[0, "gaia_nss_has_sb1"]
+    assert evidence.loc[0, "gaia_binary_evidence_level"] == "strong"
+    assert nss_long.loc[0, "candidate_id"] == "stv_A"
 
 
 def test_bundle_lightcurves_reads_only_passing_candidates(tmp_path: Path) -> None:
@@ -560,6 +786,7 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
                     "skip_vsx": True,
                     "skip_camera_median": True,
                     "run_filter": False,
+                    "run_enrich": False,
                     "export_bundle_enabled": False,
                     "review_sync_enabled": False,
                 }
@@ -579,15 +806,19 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
         paths = [line.strip() for line in input_file.read_text(encoding="ascii").splitlines() if line.strip()]
         captured_paths.extend(paths)
         output_dir.mkdir(parents=True, exist_ok=True)
-        write_feature_table(pd.DataFrame(
-            {
-                "lc_path": paths,
-                "candidate_id": [Path(path).stem for path in paths],
-                "timescale": ["stv"] * len(paths),
-                "dip_significant": [False] * len(paths),
-                "jump_significant": [False] * len(paths),
-            }
-        ), output_dir / "chunk_000000.parquet")
+        write_feature_table(
+            _cached_event_frame(
+                [
+                    {"lc_path": path, "candidate_id": f"stv_{Path(path).stem}"}
+                    for path in paths
+                ]
+            ),
+            output_dir / "chunk_000000.parquet",
+        )
+        error_path = Path(cmd[cmd.index("--error-output") + 1])
+        pd.DataFrame(
+            {"lc_path": paths, "error": ["stale error after successful retry"] * len(paths)}
+        ).to_parquet(error_path, index=False)
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("malca.stv.pipeline.subprocess.run", fake_run)
@@ -649,6 +880,12 @@ def test_pipeline_event_subprocesses_always_use_parquet_chunk(tmp_path: Path, mo
     )
     assert branch_chunk.exists()
     assert canonical_chunk.exists()
+    assert not (
+        out_dir
+        / "results"
+        / "_branch_events"
+        / f"lc_events_stochastic_branch_{mag_bin}_ERRORS.parquet"
+    ).exists()
 
 
 def test_pipeline_home_accepts_import_bundle_cli(tmp_path: Path, monkeypatch) -> None:
@@ -656,7 +893,12 @@ def test_pipeline_home_accepts_import_bundle_cli(tmp_path: Path, monkeypatch) ->
     bundle_src = tmp_path / "bundle_src"
     filtered = bundle_src / "results" / "lc_events_filtered.parquet"
     filtered.parent.mkdir(parents=True)
-    pd.DataFrame(columns=["lc_path", "candidate_id", "timescale", "failed_any"]).to_parquet(filtered, index=False)
+    write_feature_table(
+        to_layer_first_frame(
+            pd.DataFrame(columns=["lc_path", "candidate_id", "timescale", "failed_any"])
+        ),
+        filtered,
+    )
     (bundle_src / "run_params.json").write_text(
         json.dumps({"mag_bin": ["13_13.5"]}),
         encoding="ascii",
@@ -674,10 +916,12 @@ def test_pipeline_home_accepts_import_bundle_cli(tmp_path: Path, monkeypatch) ->
                     "run_filter": False,
                     "run_characterize": False,
                     "run_dust": False,
+                    "run_sed_photometry": False,
                     "run_classify": False,
                     "run_neighbor_enrich": False,
                     "run_spectra_enrich": False,
                     "run_vetting": False,
+                    "run_gaia_binary": False,
                     "export_bundle_enabled": False,
                     "review_sync_enabled": False,
                 }

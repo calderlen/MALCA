@@ -151,23 +151,88 @@ def skew_gaussian(t, amp, t0, sigma, baseline, alpha):
 
 
 def get_id_col(df: pd.DataFrame) -> str:
-    """Find the ID column in a dataframe."""
-    for candidate in ["asas_sn_id", "id", "source_id", "path"]:
+    """Return the canonical row-identity column for a candidate table.
+
+    ``candidate_id`` is deliberately preferred over catalogue/source identifiers.
+    In particular, attaching a sparse cross-match must never cause a later stage
+    to switch from ``source_id`` to a newly introduced, mostly-null
+    ``asas_sn_id`` column.
+    """
+    for candidate in ["candidate_id", "asas_sn_id", "source_id", "id", "path"]:
         if candidate in df.columns:
             return candidate
-    raise ValueError("No ID column found. Expected one of: asas_sn_id, id, source_id, path")
+    raise ValueError(
+        "No ID column found. Expected one of: candidate_id, asas_sn_id, "
+        "source_id, id, path"
+    )
+
+
+def validate_candidate_ids(
+    df: pd.DataFrame,
+    id_col: str | None = None,
+    *,
+    require_unique: bool = True,
+) -> pd.Series:
+    """Validate and normalize candidate identifiers without changing row order.
+
+    Missing-like string tokens are rejected because converting nullable columns
+    with ``astype(str)`` otherwise turns them into apparently valid identifiers
+    such as ``"nan"`` and ``"<NA>"``.
+    """
+    id_col = get_id_col(df) if id_col is None else str(id_col)
+    if id_col not in df.columns:
+        raise KeyError(f"Missing candidate ID column: {id_col}")
+
+    ids = df[id_col].astype("string").str.strip()
+    invalid_tokens = {"", "nan", "none", "null", "<na>"}
+    invalid = ids.isna() | ids.str.lower().isin(invalid_tokens)
+    if bool(invalid.any()):
+        bad_rows = df.index[invalid].tolist()[:10]
+        raise ValueError(
+            f"Candidate ID column '{id_col}' contains {int(invalid.sum())} "
+            f"missing/invalid value(s); first row indices: {bad_rows}"
+        )
+
+    if require_unique:
+        duplicate = ids.duplicated(keep=False)
+        if bool(duplicate.any()):
+            examples = ids[duplicate].drop_duplicates().astype(str).tolist()[:10]
+            raise ValueError(
+                f"Candidate ID column '{id_col}' contains duplicate values; "
+                f"examples: {examples}"
+            )
+    return ids
 
 
 def clean_lc(df, max_error_absolute=CLEAN_LC_MAX_ERROR_ABSOLUTE, max_error_sigma=CLEAN_LC_MAX_ERROR_SIGMA):
+    """Apply the canonical STV observation-quality cuts.
+
+    The helper is intentionally tolerant of formats that do not provide
+    ``good_bad`` or ``saturated``; when present, however, those flags are always
+    honoured.  All STV measurements should derive from the returned rows.
+    """
+    required = [column for column in ("JD", "mag", "error") if column not in df.columns]
+    if required:
+        raise KeyError(f"Missing required light-curve column(s): {required}")
+
+    df = df.copy()
+    for column in ("JD", "mag", "error"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+
     base_mask = np.ones(len(df), dtype=bool)
-    base_mask &= (df["saturated"] == 0)
-    base_mask &= df["JD"].notna() & df["mag"].notna()
-    base_mask &= df["error"].notna() & (df["error"] > 0.0)
+    if "saturated" in df.columns:
+        saturated = pd.to_numeric(df["saturated"], errors="coerce").fillna(1)
+        base_mask &= saturated.to_numpy() == 0
+    if "good_bad" in df.columns:
+        good = pd.to_numeric(df["good_bad"], errors="coerce").fillna(0)
+        base_mask &= good.to_numpy() == 1
+    base_mask &= df["JD"].notna().to_numpy() & df["mag"].notna().to_numpy()
+    base_mask &= df["error"].notna().to_numpy() & (df["error"].to_numpy() > 0.0)
 
     mask = base_mask.copy()
     if base_mask.sum() > 0:
         errors = df.loc[base_mask, "error"].values
-        mask &= (df["error"] < max_error_absolute)
+        mask &= df["error"].to_numpy() < max_error_absolute
 
         clipped = sigma_clip(
             errors,
@@ -206,12 +271,12 @@ def compute_time_stats(df_lc: pd.DataFrame) -> dict:
     }
 
 
-def compute_n_cameras(df_lc: pd.DataFrame) -> int:
-    """Count unique cameras from a light curve DataFrame."""
-    if df_lc.empty:
+def compute_n_cameras(df_lc: pd.DataFrame, *, min_points: int = 1) -> int:
+    """Count cameras represented by at least ``min_points`` observations."""
+    if df_lc.empty or "camera#" not in df_lc.columns:
         return 0
-    cameras = df_lc["camera#"].dropna().unique()
-    return int(len(cameras))
+    counts = df_lc["camera#"].dropna().value_counts()
+    return int((counts >= max(1, int(min_points))).sum())
 
 
 FIELD_SUMMARY_COLUMNS: tuple[str, ...] = (

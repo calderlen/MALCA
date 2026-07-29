@@ -5,7 +5,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from malca.products.candidates import ensure_candidate_id
+from malca.products.candidates import ensure_candidate_id, validate_candidate_ids
 from malca.products.feature_layers import (
     ALL_FEATURE_LAYER_COLUMNS,
     FEATURE_LAYER_COLUMNS,
@@ -97,6 +97,25 @@ STV_REQUIRED_COLUMNS: tuple[str, ...] = (
     "candidate_id",
     "timescale",
     "lc_path",
+)
+
+STV_EVENT_REQUIRED_COLUMNS: tuple[str, ...] = (
+    *STV_REQUIRED_COLUMNS,
+    "event_schema_version",
+    "event_score_version",
+    "tag_stats_status",
+    "tag_stats_error",
+    "tag_stats_version",
+    "raw_n_points",
+    "clean_n_points",
+    "raw_n_cameras",
+    "raw_camera_ids",
+    "raw_asassn_fields",
+    "raw_camera_names",
+    "baseline_cross_band_calibrated",
+    "baseline_cross_band_details",
+    "dip_best_delta_mag",
+    "jump_best_delta_mag",
 )
 
 LTV_REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -221,7 +240,10 @@ def _has_required_column_or_feature(df: pd.DataFrame, column: str) -> bool:
         return False
     if df.empty:
         return True
-    return bool(df[layer].map(lambda value: key in parse_layer_value(value)).any())
+    # A layer key is part of the row schema, not a table-level suggestion.  An
+    # ``any`` check allowed one populated row to make every other row appear
+    # schema-complete.
+    return bool(df[layer].map(lambda value: key in parse_layer_value(value)).all())
 
 
 def _present_columns(df: pd.DataFrame, forbidden: Iterable[str]) -> tuple[str, ...]:
@@ -242,14 +264,145 @@ def _ltv_forbidden_columns() -> tuple[str, ...]:
 def _assert_timescale_values(df: pd.DataFrame, timescale: str, *, stage: str | None) -> None:
     if "timescale" not in df.columns:
         return
-    values = df["timescale"].dropna().astype(str).str.strip().str.lower()
-    bad = values[values != timescale]
+    values = df["timescale"].astype("string").str.strip().str.lower()
+    bad = values[values.isna() | values.eq("") | values.ne(timescale)]
     if not bad.empty:
         raise ProductSchemaError(
             timescale=timescale,
             stage=stage,
             message=f"Unexpected timescale values for {timescale.upper()} product",
         )
+
+
+def _assert_required_identity_values(
+    df: pd.DataFrame,
+    required: Iterable[str],
+    *,
+    timescale: str,
+    stage: str | None,
+) -> None:
+    required_set = {str(column) for column in required}
+    if "candidate_id" in required_set and "candidate_id" in df.columns:
+        try:
+            validate_candidate_ids(df, key_col="candidate_id", require_unique=True)
+        except ValueError as exc:
+            raise ProductSchemaError(
+                timescale=timescale,
+                stage=stage,
+                message=str(exc),
+            ) from exc
+
+    conditional_tag_error = {"tag_stats_status", "tag_stats_error"}.issubset(required_set)
+    for column in sorted(required_set - {"candidate_id"}):
+        if df.empty or (conditional_tag_error and column == "tag_stats_error"):
+            continue
+        values = _required_value_series(df, column)
+        if values is None:
+            # Missing keys/columns are reported by ``_missing_columns`` before
+            # value validation.  Keep this helper focused on present values.
+            continue
+        missing = values.isna()
+        if pd.api.types.is_object_dtype(values) or pd.api.types.is_string_dtype(values):
+            missing = missing | values.astype("string").str.strip().eq("").fillna(True)
+        if bool(missing.any()):
+            raise ProductSchemaError(
+                timescale=timescale,
+                stage=stage,
+                message=f"Required field {column!r} contains {int(missing.sum())} missing value(s)",
+            )
+
+    if conditional_tag_error and not df.empty:
+        _assert_tag_stats_error_values(
+            df,
+            timescale=timescale,
+            stage=stage,
+        )
+
+
+def _required_value_series(df: pd.DataFrame, column: str) -> pd.Series | None:
+    """Resolve a required value identically from a flat or layer-first frame."""
+    if column in df.columns:
+        return df[column]
+    if "." in column:
+        try:
+            layer, key = split_layer_path(column)
+        except ValueError:
+            return None
+    else:
+        layer = feature_layer_for_column(column)
+        if layer is None:
+            return None
+        key = column
+    if layer not in df.columns:
+        return None
+    return df[layer].map(lambda value: parse_layer_value(value).get(key, pd.NA))
+
+
+def _assert_tag_stats_error_values(
+    df: pd.DataFrame,
+    *,
+    timescale: str,
+    stage: str | None,
+) -> None:
+    """Validate the status-dependent meaning of ``tag_stats_error``.
+
+    Successful rows must carry the key with an explicitly blank error.  Any
+    other terminal status must carry a non-blank diagnostic.  This contract is
+    deliberately evaluated through ``_required_value_series`` so flat and
+    layer-first products behave the same way.
+    """
+    statuses = _required_value_series(df, "tag_stats_status")
+    errors = _required_value_series(df, "tag_stats_error")
+    if statuses is None or errors is None:
+        return
+
+    status_text = statuses.astype("string").str.strip().str.lower()
+    error_text = errors.astype("string").str.strip()
+    error_missing = errors.isna()
+    status_ok = status_text.eq("ok").fillna(False)
+    error_blank = error_text.eq("").fillna(False)
+
+    invalid_ok = status_ok & (error_missing | ~error_blank)
+    invalid_non_ok = ~status_ok & (error_missing | error_blank)
+    invalid = invalid_ok | invalid_non_ok
+    if bool(invalid.any()):
+        raise ProductSchemaError(
+            timescale=timescale,
+            stage=stage,
+            message=(
+                "tag_stats_error must be explicitly blank when tag_stats_status='ok' "
+                "and non-blank otherwise; "
+                f"found {int(invalid.sum())} invalid row(s)"
+            ),
+        )
+
+
+def _assert_layer_values(df: pd.DataFrame, *, timescale: str, stage: str | None) -> None:
+    for layer in FEATURE_LAYER_COLUMNS:
+        if layer not in df.columns:
+            continue
+        invalid: list[object] = []
+        for idx, value in df[layer].items():
+            if isinstance(value, dict):
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith("{") and text.endswith("}"):
+                    try:
+                        import json
+
+                        parsed = json.loads(text)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        continue
+            invalid.append(idx)
+        if invalid:
+            raise ProductSchemaError(
+                timescale=timescale,
+                stage=stage,
+                message=f"Feature layer {layer!r} contains invalid JSON/mapping values at {invalid[:5]}",
+            )
 
 
 def assert_candidate_product_schema(
@@ -260,7 +413,8 @@ def assert_candidate_product_schema(
     required: Iterable[str] | None = None,
     forbidden: Iterable[str] = (),
 ) -> None:
-    missing = _missing_columns(df, (*FEATURE_LAYER_COLUMNS, *(required or ())))
+    required_columns = tuple(required or ())
+    missing = _missing_columns(df, (*FEATURE_LAYER_COLUMNS, *required_columns))
     present_forbidden = _present_columns(df, forbidden)
     flat_features = tuple(non_layer_feature_columns(df.columns))
     present_forbidden = tuple(dict.fromkeys((*present_forbidden, *flat_features)))
@@ -272,6 +426,13 @@ def assert_candidate_product_schema(
             forbidden=present_forbidden,
         )
     _assert_timescale_values(df, timescale, stage=stage)
+    _assert_required_identity_values(
+        df,
+        required_columns,
+        timescale=timescale,
+        stage=stage,
+    )
+    _assert_layer_values(df, timescale=timescale, stage=stage)
 
 
 def assert_stv_product_schema(

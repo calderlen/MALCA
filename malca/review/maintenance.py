@@ -22,12 +22,14 @@ from malca.catalogs.evidence import (
 from malca.config import VSX_CROSSMATCH_PATH, VSX_MAX_SEP_ARCSEC, VSX_RAW_CATALOG_PATH
 from malca.review.store import (
     db_connect,
+    ensure_review_db_schema,
     get_candidate_payload,
     load_candidates_file,
     merge_candidate_results,
     merge_vetting_results,
     replace_candidate_payload_fields,
     upsert_catalog_neighbor_rows,
+    validate_review_db_integrity,
 )
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
@@ -1104,6 +1106,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    validate_db = subparsers.add_parser(
+        "validate-db",
+        help="Run explicit SQLite and SED integrity checks on a review DB",
+    )
+    validate_db.add_argument("--review-db", required=True, type=Path, help="Review SQLite DB")
+
     merge_vetting = subparsers.add_parser(
         "merge-vetting",
         help="Merge vetting results into a review DB",
@@ -1179,6 +1187,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+
+    if args.command == "validate-db":
+        review_db = args.review_db.expanduser().resolve()
+        ensure_review_db_schema(review_db)
+        result = validate_review_db_integrity(review_db)
+        print(
+            f"Review DB validation passed: {result['path']} "
+            f"(schema={result['review_schema_version']}, quick_check=ok, foreign_keys=ok)"
+        )
+        return
 
     if args.command == "repair-catalog-evidence":
         stats = repair_catalog_evidence_run(

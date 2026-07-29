@@ -43,6 +43,13 @@ ALL_FEATURE_LAYER_COLUMNS: tuple[str, ...] = (
     *FEATURE_LAYER_COLUMNS,
 )
 
+# A blank value is normally omitted from a feature-layer mapping.  These
+# columns are exceptions because the blank itself carries state: successful
+# tag-stat computation is encoded as ``tag_stats_status == "ok"`` together
+# with an explicitly empty error string.  Keeping the key lets product-schema
+# validation distinguish that valid state from a dropped/missing field.
+_PRESERVE_EXPLICIT_BLANK_FEATURE_COLUMNS = frozenset({"tag_stats_error"})
+
 
 def is_layer_first_frame(df: pd.DataFrame) -> bool:
     """Return True when a frame has the canonical three feature-layer columns."""
@@ -65,7 +72,6 @@ _IDENTITY_AND_BOOKKEEPING_COLUMNS = {
     "filter_reason",
     "trigger_type",
     "review_pass",
-    "interest_score",
     "workflow_status",
     "event_class",
     "disposition",
@@ -89,6 +95,19 @@ _IDENTITY_AND_BOOKKEEPING_COLUMNS = {
 IDENTITY_AND_BOOKKEEPING_COLUMNS = frozenset(_IDENTITY_AND_BOOKKEEPING_COLUMNS)
 
 _LC_EXACT_COLUMNS = {
+    "event_schema_version",
+    "event_score_version",
+    "raw_n_points",
+    "clean_n_points",
+    "raw_n_cameras",
+    "raw_camera_ids",
+    "raw_asassn_fields",
+    "raw_camera_names",
+    "baseline_cross_band_calibrated",
+    "baseline_cross_band_details",
+    "tag_stats_status",
+    "tag_stats_error",
+    "tag_stats_version",
     "periodicity_score",
     "periodicity_period",
     "periodicity_method",
@@ -100,6 +119,9 @@ _LC_EXACT_COLUMNS = {
     "periodicity_alias_matches",
     "periodicity_bootstrap_sig",
     "periodicity_is_significant",
+    "periodicity_evidence_source",
+    "periodicity_rejection_reason",
+    "periodicity_status",
     "lsp_bootstrap_sig",
     "lsp_power",
     "lsp_period",
@@ -269,7 +291,10 @@ _EXTERNAL_EXACT_COLUMNS = {
     "period_ogle_class",
     "period_ogle_sep_arcsec",
     "ruwe",
+    "ref_epoch",
+    "astrometric_params_solved",
     "radial_velocity",
+    "radial_velocity_error",
     "rv_amplitude_robust",
     "teff_gspphot",
     "logg_gspphot",
@@ -636,6 +661,11 @@ def _is_missing_value(value: Any) -> bool:
 
 
 def _json_ready(value: Any) -> Any:
+    # Preserve strings already stored in layer mappings verbatim.  Row-level
+    # omission is decided by ``row_feature_layers`` below; converting a stored
+    # empty string back to null here would erase its explicit meaning on read.
+    if isinstance(value, str):
+        return value
     if _is_missing_value(value):
         return None
     if isinstance(value, (np.integer,)):
@@ -762,6 +792,12 @@ def with_feature_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFra
     for column in columns:
         name = str(column)
         if name in out.columns:
+            path = name if is_layer_path(name) else layer_path_for_column(name)
+            if path is not None:
+                layer_values = feature_value_series(out, path)
+                missing = out[name].map(_feature_value_is_missing)
+                if bool(missing.any()):
+                    out[name] = _coalesce_feature_series(out[name], layer_values, missing)
             continue
         path = name if is_layer_path(name) else layer_path_for_column(name)
         if path is None:
@@ -791,11 +827,57 @@ def expand_feature_layers(df: pd.DataFrame) -> pd.DataFrame:
                     seen.add(key)
                     keys.append(key)
         for key in keys:
-            if key not in out.columns and key not in additions:
-                additions[key] = parsed.map(lambda mapping, k=key: mapping.get(k, pd.NA))
+            layer_values = parsed.map(lambda mapping, k=key: mapping.get(k, pd.NA))
+            if key in out.columns:
+                missing = out[key].map(_feature_value_is_missing)
+                if bool(missing.any()):
+                    out[key] = _coalesce_feature_series(out[key], layer_values, missing)
+            elif key not in additions:
+                additions[key] = layer_values
     if additions:
         out = pd.concat([out, pd.DataFrame(additions, index=out.index)], axis=1)
     return out
+
+
+def _feature_value_is_missing(value: Any) -> bool:
+    if value is None or value is pd.NA:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
+
+
+def _coalesce_feature_series(
+    flat_values: pd.Series,
+    layer_values: pd.Series,
+    missing: pd.Series,
+) -> pd.Series:
+    """Fill missing flat values without assigning through an incompatible dtype.
+
+    A column read from SQL/parquet can be inferred as ``float64`` when all of
+    its flat values are null even though the canonical layer contains strings.
+    Assigning those strings into the float column currently warns and will be
+    an error in a future pandas release.  Constructing the combined values
+    before assigning the whole column is both positional (duplicate indexes
+    are safe) and lets pandas choose a dtype that can actually represent them.
+    """
+    use_layer = missing.to_numpy(dtype=bool, na_value=False)
+    flat_array = flat_values.to_numpy(dtype=object)
+    layer_array = layer_values.to_numpy(dtype=object)
+    combined = [
+        layer_value if take_layer else flat_value
+        for flat_value, layer_value, take_layer in zip(
+            flat_array,
+            layer_array,
+            use_layer,
+            strict=True,
+        )
+    ]
+    return pd.Series(combined, index=flat_values.index, name=flat_values.name).infer_objects(copy=False)
 
 
 def row_feature_layers(row: Mapping[str, Any], *, include_missing: bool = False) -> dict[str, dict[str, Any]]:
@@ -805,15 +887,21 @@ def row_feature_layers(row: Mapping[str, Any], *, include_missing: bool = False)
         layers[layer].update(_parse_layer_value(row.get(layer)))
 
     for key, raw_value in row.items():
-        layer = feature_layer_for_column(str(key))
+        name = str(key)
+        layer = feature_layer_for_column(name)
         if layer is None:
             continue
-        if not include_missing and _is_missing_value(raw_value):
+        preserve_blank = (
+            name in _PRESERVE_EXPLICIT_BLANK_FEATURE_COLUMNS
+            and isinstance(raw_value, str)
+            and raw_value.strip() == ""
+        )
+        if not include_missing and _is_missing_value(raw_value) and not preserve_blank:
             continue
-        value = _json_ready(raw_value)
+        value = "" if preserve_blank else _json_ready(raw_value)
         if value is None and not include_missing:
             continue
-        layers[layer][str(key)] = value
+        layers[layer][name] = value
     return layers
 
 

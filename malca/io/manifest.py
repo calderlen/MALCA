@@ -56,13 +56,25 @@ def _load_index_metadata(index_file: Path, id_column: str) -> pd.DataFrame:
     keep_cols = [id_column]
     keep_cols.extend(col for col in ("mag_bin", "index_num", "index_csv") if col in df.columns)
     meta = df.loc[:, keep_cols].copy()
-    meta[id_column] = meta[id_column].astype("string")
+    meta[id_column] = meta[id_column].astype("string").str.strip()
     meta = meta.dropna(subset=[id_column]).copy()
+    meta = meta[meta[id_column].ne("")].copy()
     meta[id_column] = meta[id_column].astype(str)
     if "mag_bin" in meta.columns:
         meta["mag_bin"] = meta["mag_bin"].astype("string")
         meta.loc[meta["mag_bin"].isna(), "mag_bin"] = pd.NA
-    return meta.drop_duplicates(subset=[id_column], keep="last").reset_index(drop=True)
+    duplicate_mask = meta[id_column].duplicated(keep=False)
+    if duplicate_mask.any():
+        conflicts: list[str] = []
+        for source_id, group in meta.loc[duplicate_mask].groupby(id_column, sort=False):
+            comparable = group.drop(columns=[id_column]).fillna("<missing>").astype(str)
+            if len(comparable.drop_duplicates()) > 1:
+                conflicts.append(str(source_id))
+        if conflicts:
+            raise ValueError(
+                f"Index metadata contains conflicting duplicate {id_column} rows: {conflicts[:5]}"
+            )
+    return meta.drop_duplicates(subset=[id_column], keep="first").reset_index(drop=True)
 
 
 def _iter_flat_light_curve_entries(
@@ -92,8 +104,8 @@ def _iter_flat_light_curve_entries(
     default_mag_bin = requested_mag_bins[0] if len(requested_mag_bins) == 1 else None
 
     lc_paths = sorted(flat_lc_dir.glob(f"*.{file_ext}"))
-    if not lc_paths and show_progress:
-        tqdm.write(f"[warn] no *.{file_ext} light curves found in {flat_lc_dir}")
+    if not lc_paths:
+        raise FileNotFoundError(f"No *.{file_ext} light curves found in {flat_lc_dir}")
 
     unresolved_mag_bin = 0
     for lc_path in tqdm(lc_paths, desc="flat light curves", disable=not show_progress):
@@ -139,7 +151,7 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
     records: list[dict[str, object]] = []
     match = IDX_PATTERN.search(csv_path.name)
     if not match:
-        return records
+        raise ValueError(f"Index filename does not match index<integer>.csv: {csv_path}")
     idx_num = int(match.group(1))
     lc_dir = lc_root / mag_bin / f"lc{idx_num}_cal"
     try:
@@ -151,12 +163,18 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
             )[id_column]
             .dropna()
             .astype(str)
+            .str.strip()
             .unique()
         )
-    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, KeyError):
-        return records
+    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, KeyError) as exc:
+        raise ValueError(f"Could not read required source IDs from {csv_path}: {exc}") from exc
+
+    if len(ids) == 0:
+        raise ValueError(f"Index file contains no usable {id_column} values: {csv_path}")
 
     for source_id in ids:
+        if not source_id or source_id.lower() in {"nan", "none", "null", "<na>"}:
+            continue
         lc_path = lc_dir / f"{source_id}.{file_ext}"
         file_exists = lc_path.exists()
         records.append({
@@ -190,12 +208,10 @@ def iter_light_curve_entries(
     for mag_bin in tqdm(mag_bins, desc="mag bins", disable=not show_progress):
         idx_dir = index_root / mag_bin
         if not idx_dir.exists():
-            tqdm.write(f"[warn] missing index dir for {mag_bin}: {idx_dir}")
-            continue
+            raise FileNotFoundError(f"Missing index directory for requested mag bin {mag_bin}: {idx_dir}")
         csv_paths = sorted(idx_dir.glob("index*.csv"))
         if not csv_paths:
-            tqdm.write(f"[warn] no index CSVs found in {idx_dir}")
-            continue
+            raise FileNotFoundError(f"No index CSVs found for requested mag bin {mag_bin}: {idx_dir}")
 
         if n_workers > 1:
             with ProcessPoolExecutor(max_workers=n_workers) as ex:
@@ -236,6 +252,7 @@ def build_manifest(
 ) -> pd.DataFrame:
     seen: dict[str, dict[str, object]] = {}
     duplicates = 0
+    conflicting_duplicates: list[tuple[str, str, str]] = []
 
     if flat_lc_dir is not None:
         record_iter = _iter_flat_light_curve_entries(
@@ -262,9 +279,30 @@ def build_manifest(
     for record in record_iter:
         source_id = record["source_id"]
         if source_id in seen:
-            duplicates += 1
+            previous = seen[source_id]
+            previous_path = str(previous.get("dat_path") or "")
+            current_path = str(record.get("dat_path") or "")
+            same_location = (
+                previous_path == current_path
+                and str(previous.get("mag_bin") or "") == str(record.get("mag_bin") or "")
+                and str(previous.get("index_num") or "") == str(record.get("index_num") or "")
+            )
+            if same_location:
+                duplicates += 1
+            else:
+                conflicting_duplicates.append((str(source_id), previous_path, current_path))
             continue
         seen[source_id] = record
+
+    if conflicting_duplicates:
+        examples = [
+            {"source_id": source_id, "first": first, "second": second}
+            for source_id, first, second in conflicting_duplicates[:5]
+        ]
+        raise ValueError(
+            "Manifest input maps the same source_id to conflicting light-curve locations; "
+            f"examples={examples}"
+        )
 
     if duplicates:
         tqdm.write(f"[warn] skipped {duplicates} duplicate source_id entries")

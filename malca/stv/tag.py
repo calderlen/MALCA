@@ -43,10 +43,19 @@ from malca.config import PARQUET_CACHE_COMPRESSION, PARQUET_OUTPUT_COMPRESSION
 from malca.config import VSX_CROSSMATCH_PATH
 from malca.config import WORKERS
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
+from malca.products.stage_state import (
+    StageResult,
+    assert_reusable_stage_state,
+    build_stage_fingerprint,
+    read_stage_state,
+    write_stage_state,
+)
 from malca.vsx.metadata import normalize_vsx_match_columns, select_best_vsx_matches
 from malca.core.utils import (
     read_lc_dat2,
     get_id_col,
+    validate_candidate_ids,
+    clean_lc,
     compute_time_stats,
     compute_n_cameras,
     compute_field_summary,
@@ -54,10 +63,16 @@ from malca.core.utils import (
     log_rejections,
 )
 
-
-
-
-
+TAG_STATS_VERSION = 2
+TAG_MIN_GOOD_POINTS_PER_CAMERA = 2
+TAG_STATS_COLUMNS: tuple[str, ...] = (
+    "tag_stats_status",
+    "tag_stats_error",
+    "tag_stats_version",
+    "raw_n_points",
+    "clean_n_points",
+    "raw_n_cameras",
+)
 
 def _compute_stats_for_row(
     asas_sn_id: str,
@@ -66,34 +81,55 @@ def _compute_stats_for_row(
     compute_cameras: bool,
     compute_fields: bool = False,
     file_ext: str | None = None,
+    lc_source_id: str | None = None,
 ) -> dict:
     """
     Helper function for parallel processing. Computes requested stats for a single light curve.
     Returns a dict with requested stats.
     """
-    result = {"asas_sn_id": asas_sn_id}
+    result = {
+        "asas_sn_id": asas_sn_id,
+        "tag_stats_status": "error",
+        "tag_stats_error": "",
+        "tag_stats_version": TAG_STATS_VERSION,
+        "raw_n_points": np.nan,
+        "clean_n_points": np.nan,
+        "raw_n_cameras": np.nan,
+    }
 
     try:
-        df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
-        df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
+        source_id = str(lc_source_id if lc_source_id is not None else asas_sn_id)
+        df_g, df_v = read_lc_dat2(source_id, dir_path, file_ext=file_ext)
+        df_raw = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
+        df_lc = clean_lc(df_raw) if not df_raw.empty else df_raw.copy()
+
+        result["raw_n_points"] = int(len(df_raw))
+        result["clean_n_points"] = int(len(df_lc))
+        result["raw_n_cameras"] = compute_n_cameras(df_raw)
 
         if compute_time:
             time_stats = compute_time_stats(df_lc)
             result.update(time_stats)
 
         if compute_cameras:
-            result["n_cameras"] = compute_n_cameras(df_lc)
+            result["n_cameras"] = compute_n_cameras(
+                df_lc,
+                min_points=TAG_MIN_GOOD_POINTS_PER_CAMERA,
+            )
 
         if compute_fields:
             result.update(compute_field_summary(df_lc))
 
+        result["tag_stats_status"] = "ok"
+
     except Exception as e:
-        # If there's an error, return default values
+        # Missing/error values must not be confused with genuine zero coverage.
+        result["tag_stats_error"] = f"{type(e).__name__}: {e}"
         if compute_time:
-            result["time_span_days"] = 0.0
-            result["points_per_day"] = 0.0
+            result["time_span_days"] = np.nan
+            result["points_per_day"] = np.nan
         if compute_cameras:
-            result["n_cameras"] = 0
+            result["n_cameras"] = np.nan
         if compute_fields:
             result.update(compute_field_summary(pd.DataFrame()))
 
@@ -101,7 +137,7 @@ def _compute_stats_for_row(
 
 
 def _compute_stats_for_batch(
-    batch: list[tuple[int, str, str]],
+    batch: list[tuple[int, str, str, str]],
     compute_time: bool,
     compute_cameras: bool,
     compute_fields: bool = False,
@@ -118,15 +154,53 @@ def _compute_stats_for_batch(
                 compute_cameras,
                 compute_fields,
                 file_ext,
+                lc_source_id=lc_source_id,
             ),
         )
-        for idx, asas_sn_id, dir_path in batch
+        for idx, asas_sn_id, lc_source_id, dir_path in batch
     ]
 
 
 def _stats_checkpoint_parts_dir(checkpoint_path: Path) -> Path:
     """Directory for incremental stats checkpoint shards."""
     return checkpoint_path.with_name(f"{checkpoint_path.name}.parts")
+
+
+def _stats_checkpoint_state_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_name(f"{checkpoint_path.name}_STAGE.json")
+
+
+def _stats_checkpoint_outputs(checkpoint_path: Path) -> tuple[Path, Path]:
+    """Artifacts whose signatures jointly define resumable tag-stat progress."""
+    return checkpoint_path, _stats_checkpoint_parts_dir(checkpoint_path)
+
+
+def _assert_reusable_stats_checkpoint_state(
+    state: dict | None,
+    *,
+    fingerprint: dict,
+    checkpoint_path: Path,
+) -> None:
+    """Validate provenance and require signatures for both checkpoint layers."""
+    assert_reusable_stage_state(
+        state,
+        fingerprint=fingerprint,
+        require_complete=False,
+    )
+    outputs = state.get("outputs", []) if isinstance(state, dict) else []
+    recorded_paths = {
+        str(Path(str(signature.get("path"))).expanduser())
+        for signature in outputs
+        if isinstance(signature, dict) and signature.get("path")
+    }
+    expected_paths = {
+        str(path.expanduser())
+        for path in _stats_checkpoint_outputs(checkpoint_path)
+    }
+    if recorded_paths != expected_paths:
+        raise ValueError(
+            "Tag-stat stage state must sign both the base checkpoint and its .parts directory"
+        )
 
 
 def _read_stats_checkpoint_frame(path: Path, columns: list[str]) -> pd.DataFrame:
@@ -181,9 +255,9 @@ def _load_stats_checkpoint(
 
 
 def _iter_batches(
-    tasks: list[tuple[int, str, str]],
+    tasks: list[tuple[int, str, str, str]],
     batch_size: int,
-) -> list[list[tuple[int, str, str]]]:
+) -> list[list[tuple[int, str, str, str]]]:
     return [
         tasks[start : start + batch_size]
         for start in range(0, len(tasks), batch_size)
@@ -202,6 +276,7 @@ def _compute_stats_parallel(
     show_tqdm: bool = False,
     checkpoint_path: str | Path | None = None,
     chunk_size: int = 10000,
+    source_id_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Compute stats for all rows in parallel using ProcessPoolExecutor.
@@ -216,6 +291,20 @@ def _compute_stats_parallel(
         Number of rows to process before saving a checkpoint (default 10000).
     """
     df_with_stats = df.copy()
+    normalized_ids = validate_candidate_ids(df_with_stats, id_col)
+    df_with_stats[id_col] = normalized_ids
+    if source_id_col is None:
+        source_id_col = "asas_sn_id" if "asas_sn_id" in df_with_stats.columns else id_col
+    if source_id_col not in df_with_stats.columns:
+        raise KeyError(f"Missing light-curve source ID column: {source_id_col}")
+    source_ids = df_with_stats[source_id_col].astype("string").str.strip()
+    invalid_source = source_ids.isna() | source_ids.str.lower().isin({"", "nan", "none", "null", "<na>"})
+    if bool(invalid_source.any()):
+        raise ValueError(
+            f"Light-curve source ID column '{source_id_col}' contains "
+            f"{int(invalid_source.sum())} invalid value(s)"
+        )
+    df_with_stats[source_id_col] = source_ids
 
     # Initialize columns
     if compute_time:
@@ -226,6 +315,11 @@ def _compute_stats_parallel(
     if compute_fields:
         for col in FIELD_SUMMARY_COLUMNS:
             df_with_stats[col] = "" if col.endswith("_key") or col in {"asassn_fields", "camera_names"} else np.nan
+    for col in TAG_STATS_COLUMNS:
+        if col == "tag_stats_status" or col == "tag_stats_error":
+            df_with_stats[col] = ""
+        else:
+            df_with_stats[col] = np.nan
 
     stats_cols: list[str] = []
     if compute_time:
@@ -234,14 +328,60 @@ def _compute_stats_parallel(
         stats_cols.append("n_cameras")
     if compute_fields:
         stats_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col not in stats_cols])
+    stats_cols.extend([col for col in TAG_STATS_COLUMNS if col not in stats_cols])
 
     checkpoint_cols = [id_col] + stats_cols
 
     # Load checkpoint if exists. New progress is stored in sidecar part files so
     # large legacy checkpoints do not get rewritten on every save.
     checkpoint_df = None
+    checkpoint_fingerprint = None
+    checkpoint_state_path = None
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
+        checkpoint_state_path = _stats_checkpoint_state_path(checkpoint_path)
+        from malca.config import LIGHT_CURVE_FILE_EXTENSION
+
+        effective_extension = str(file_ext or LIGHT_CURVE_FILE_EXTENSION).lstrip(".")
+        input_paths: list[Path] = []
+        for source_id, raw_path in zip(
+            df_with_stats[source_id_col].astype(str),
+            df_with_stats[path_col].astype(str),
+        ):
+            path = Path(raw_path).expanduser()
+            input_paths.append(path if path.is_file() else path / f"{source_id}.{effective_extension}")
+        checkpoint_fingerprint = build_stage_fingerprint(
+            stage="tag_stats",
+            stage_version=str(TAG_STATS_VERSION),
+            candidate_ids=df_with_stats[id_col].astype(str).tolist(),
+            input_paths=input_paths,
+            settings={
+                "compute_time": bool(compute_time),
+                "compute_cameras": bool(compute_cameras),
+                "compute_fields": bool(compute_fields),
+                "file_extension": effective_extension,
+                "min_good_points_per_camera": TAG_MIN_GOOD_POINTS_PER_CAMERA,
+            },
+            code_base=Path(__file__).resolve().parent.parent,
+            code_paths=("stv/tag.py", "core/utils.py"),
+            hash_input_contents=False,
+        )
+        checkpoint_artifacts_exist = (
+            checkpoint_path.exists()
+            or _stats_checkpoint_parts_dir(checkpoint_path).exists()
+        )
+        if checkpoint_artifacts_exist:
+            try:
+                _assert_reusable_stats_checkpoint_state(
+                    read_stage_state(checkpoint_state_path),
+                    fingerprint=checkpoint_fingerprint,
+                    checkpoint_path=checkpoint_path,
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Unsafe tag-stat checkpoint reuse: {exc}. "
+                    "Remove the checkpoint and its .parts directory or start a new run."
+                ) from exc
         checkpoint_df = _load_stats_checkpoint(
             checkpoint_path,
             checkpoint_cols,
@@ -263,11 +403,22 @@ def _compute_stats_parallel(
         if not required_complete_cols and compute_fields:
             required_complete_cols.extend([col for col in FIELD_SUMMARY_COLUMNS if col in checkpoint_df.columns])
 
+        checkpoint_is_current = (
+            "tag_stats_status" in checkpoint_df.columns
+            and "tag_stats_version" in checkpoint_df.columns
+        )
+        if checkpoint_is_current:
+            status_ok = checkpoint_df["tag_stats_status"].astype("string").str.lower().eq("ok")
+            version_ok = pd.to_numeric(checkpoint_df["tag_stats_version"], errors="coerce").eq(TAG_STATS_VERSION)
+        else:
+            status_ok = pd.Series(False, index=checkpoint_df.index)
+            version_ok = pd.Series(False, index=checkpoint_df.index)
+
         if required_complete_cols and all(col in checkpoint_df.columns for col in required_complete_cols):
-            complete_mask = checkpoint_df[required_complete_cols].notna().all(axis=1)
+            complete_mask = checkpoint_df[required_complete_cols].notna().all(axis=1) & status_ok & version_ok
             checkpoint_complete = checkpoint_df.loc[complete_mask].drop_duplicates(subset=[id_col], keep="last")
         else:
-            checkpoint_complete = checkpoint_df.drop_duplicates(subset=[id_col], keep="last")
+            checkpoint_complete = checkpoint_df.loc[status_ok & version_ok].drop_duplicates(subset=[id_col], keep="last")
 
         already_computed = set(checkpoint_complete[id_col].unique())
 
@@ -282,11 +433,12 @@ def _compute_stats_parallel(
     # Prepare tasks for rows not yet computed
     df_with_stats[id_col] = df_with_stats[id_col].astype(str)
     pending_mask = ~df_with_stats[id_col].isin(already_computed) if already_computed else pd.Series(True, index=df_with_stats.index)
-    pending = df_with_stats.loc[pending_mask, [id_col, path_col]]
+    pending = df_with_stats.loc[pending_mask]
     tasks = list(
         zip(
             pending.index.tolist(),
             pending[id_col].astype(str).tolist(),
+            pending[source_id_col].astype(str).tolist(),
             pending[path_col].astype(str).tolist(),
         )
     )
@@ -294,7 +446,32 @@ def _compute_stats_parallel(
     if not tasks:
         if show_tqdm:
             tqdm.write(f"[stats] All {len(df)} rows already computed from checkpoint")
+        if checkpoint_state_path is not None and checkpoint_fingerprint is not None:
+            write_stage_state(
+                checkpoint_state_path,
+                fingerprint=checkpoint_fingerprint,
+                result=StageResult(
+                    stage="tag_stats",
+                    status="success",
+                    expected=len(df_with_stats),
+                    succeeded=len(df_with_stats),
+                ),
+                outputs=_stats_checkpoint_outputs(checkpoint_path),
+            )
         return df_with_stats
+
+    if checkpoint_state_path is not None and checkpoint_fingerprint is not None:
+        write_stage_state(
+            checkpoint_state_path,
+            fingerprint=checkpoint_fingerprint,
+            result=StageResult(
+                stage="tag_stats",
+                status="running",
+                expected=len(df_with_stats),
+                succeeded=len(already_computed),
+            ),
+            outputs=_stats_checkpoint_outputs(checkpoint_path),
+        )
 
     if show_tqdm:
         tqdm.write(f"[stats] {len(already_computed)} rows from checkpoint, {len(tasks)} remaining to compute")
@@ -346,7 +523,7 @@ def _compute_stats_parallel(
     task_batch_size = max(1, min(chunk_size, max(32, min(1000, chunk_size // max(1, n_workers)))))
 
     def process_chunk(
-        chunk_tasks: list[tuple[int, str, str]],
+        chunk_tasks: list[tuple[int, str, str, str]],
         executor: ProcessPoolExecutor | None = None,
     ) -> list[tuple[int, dict]]:
         chunk_results: list[tuple[int, dict]] = []
@@ -386,6 +563,28 @@ def _compute_stats_parallel(
         # on resume and are not rewritten.
         save_checkpoint(chunk_results)
         parts_dir = _stats_checkpoint_parts_dir(checkpoint_path)
+        if checkpoint_state_path is not None and checkpoint_fingerprint is not None:
+            processed = len(already_computed) + int(chunk_end)
+            status_ok = (
+                df_with_stats["tag_stats_status"]
+                .astype("string")
+                .str.lower()
+                .eq("ok")
+                .fillna(False)
+            )
+            n_succeeded = int(status_ok.sum())
+            write_stage_state(
+                checkpoint_state_path,
+                fingerprint=checkpoint_fingerprint,
+                result=StageResult(
+                    stage="tag_stats",
+                    status="running",
+                    expected=len(df_with_stats),
+                    succeeded=n_succeeded,
+                    failed=max(0, processed - n_succeeded),
+                ),
+                outputs=_stats_checkpoint_outputs(checkpoint_path),
+            )
         if show_tqdm:
             tqdm.write(f"[stats] Checkpoint part saved: {chunk_end}/{len(tasks)} rows processed in {parts_dir}")
 
@@ -405,6 +604,37 @@ def _compute_stats_parallel(
     finally:
         pbar.close()
 
+
+    if checkpoint_state_path is not None and checkpoint_fingerprint is not None:
+        status_ok = (
+            df_with_stats["tag_stats_status"]
+            .astype("string")
+            .str.lower()
+            .eq("ok")
+            .fillna(False)
+            .astype(bool)
+        )
+        n_succeeded = int(status_ok.sum())
+        n_failed = int(len(df_with_stats) - n_succeeded)
+        failed_ids = df_with_stats.loc[~status_ok, id_col].astype(str).head(100)
+        failed_errors = df_with_stats.loc[~status_ok, "tag_stats_error"].astype(str).head(100)
+        errors = tuple(
+            f"{row_id}: {error}"
+            for row_id, error in zip(failed_ids, failed_errors)
+        )
+        write_stage_state(
+            checkpoint_state_path,
+            fingerprint=checkpoint_fingerprint,
+            result=StageResult(
+                stage="tag_stats",
+                status="success" if n_failed == 0 else "partial",
+                expected=len(df_with_stats),
+                succeeded=n_succeeded,
+                failed=n_failed,
+                errors=errors,
+            ),
+            outputs=_stats_checkpoint_outputs(checkpoint_path),
+        )
 
     return df_with_stats
 
@@ -431,27 +661,35 @@ def filter_sparse_lightcurves(
 
     if compute_stats:
         id_col = get_id_col(df)
+        validate_candidate_ids(df, id_col)
+        source_id_col = "asas_sn_id" if "asas_sn_id" in df.columns else id_col
         path_col = "path" if "path" in df.columns else None
 
         if path_col is None:
             raise ValueError("Need 'path' column to read dat2 files")
 
         df_with_stats = df.copy()
-        df_with_stats["time_span_days"] = 0.0
-        df_with_stats["points_per_day"] = 0.0
+        df_with_stats["time_span_days"] = np.nan
+        df_with_stats["points_per_day"] = np.nan
 
         pbar = tqdm(total=len(df), desc="filter_sparse_lightcurves (computing stats)", leave=False, disable=not show_tqdm)
         for idx, row in df.iterrows():
             asas_sn_id = str(row[id_col])
+            lc_source_id = str(row[source_id_col])
             dir_path = str(row[path_col])
 
-            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
-            df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
-
-            stats = compute_time_stats(df_lc)
-            df_with_stats.loc[idx, "time_span_days"] = stats["time_span_days"]
-            df_with_stats.loc[idx, "points_per_day"] = stats["points_per_day"]
-            for col, value in compute_field_summary(df_lc).items():
+            stats = _compute_stats_for_row(
+                asas_sn_id,
+                dir_path,
+                compute_time=True,
+                compute_cameras=False,
+                compute_fields=True,
+                file_ext=file_ext,
+                lc_source_id=lc_source_id,
+            )
+            for col, value in stats.items():
+                if col == "asas_sn_id":
+                    continue
                 df_with_stats.loc[idx, col] = value
 
             if pbar:
@@ -482,6 +720,8 @@ def attach_vsx_info(
     df: pd.DataFrame,
     *,
     vsx_crossmatch_csv: str | Path | None = VSX_CROSSMATCH_PATH,
+    id_col: str | None = None,
+    join_id_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Attach VSX crossmatch info (vsx_sep_arcsec/vsx_class) to the dataframe.
@@ -505,10 +745,35 @@ def attach_vsx_info(
 
     vsx_cols = [c for c in ("vsx_sep_arcsec", "vsx_class", "vsx_period") if c in xmatch.columns]
     xmatch = select_best_vsx_matches(xmatch[["asas_sn_id", *vsx_cols]], id_column="asas_sn_id")
-    id_col = get_id_col(df)
+    id_col = get_id_col(df) if id_col is None else str(id_col)
+    if join_id_col is None:
+        join_id_col = "asas_sn_id" if "asas_sn_id" in df.columns else id_col
+    if join_id_col not in df.columns:
+        raise KeyError(f"Missing VSX join ID column: {join_id_col}")
     df = df.copy()
-    df[id_col] = df[id_col].astype(str)
-    df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
+    original_ids = validate_candidate_ids(df, id_col)
+    df[id_col] = original_ids
+    original_len = len(df)
+    df["__vsx_row_order"] = np.arange(original_len, dtype=np.int64)
+    xmatch = xmatch.rename(columns={"asas_sn_id": "_vsx_join_id"})
+    xmatch["_vsx_join_id"] = xmatch["_vsx_join_id"].astype("string").str.strip()
+    df[join_id_col] = df[join_id_col].astype("string").str.strip()
+    df = df.merge(
+        xmatch,
+        left_on=join_id_col,
+        right_on="_vsx_join_id",
+        how="left",
+        suffixes=("", "_vsx"),
+        validate="many_to_one",
+        sort=False,
+    )
+    if len(df) != original_len:
+        raise RuntimeError("VSX attachment changed the candidate row count")
+    df = df.sort_values("__vsx_row_order", kind="stable").drop(
+        columns=["__vsx_row_order", "_vsx_join_id"], errors="ignore"
+    ).reset_index(drop=True)
+    if df[id_col].astype("string").tolist() != original_ids.tolist():
+        raise RuntimeError("VSX attachment changed canonical candidate identity")
     for col in vsx_cols:
         xcol = f"{col}_vsx"
         if xcol not in df.columns:
@@ -524,8 +789,6 @@ def attach_vsx_info(
             fill = pd.to_numeric(df[xcol], errors="coerce")
             df[col] = base.combine_first(fill)
         df = df.drop(columns=[xcol])
-    if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
-        df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
     return df
 
 
@@ -548,6 +811,8 @@ def filter_multi_camera(
 
     if compute_stats:
         id_col = get_id_col(df)
+        validate_candidate_ids(df, id_col)
+        source_id_col = "asas_sn_id" if "asas_sn_id" in df.columns else id_col
         path_col = "path" if "path" in df.columns else None
 
         if path_col is None:
@@ -559,14 +824,21 @@ def filter_multi_camera(
         pbar = tqdm(total=len(df), desc="filter_multi_camera (counting cameras)", leave=False, disable=not show_tqdm)
         for idx, row in df.iterrows():
             asas_sn_id = str(row[id_col])
+            lc_source_id = str(row[source_id_col])
             dir_path = str(row[path_col])
 
-            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path, file_ext=file_ext)
-            df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
-
-            n_cams = compute_n_cameras(df_lc)
-            df_with_cameras.loc[idx, "n_cameras"] = n_cams
-            for col, value in compute_field_summary(df_lc).items():
+            stats = _compute_stats_for_row(
+                asas_sn_id,
+                dir_path,
+                compute_time=False,
+                compute_cameras=True,
+                compute_fields=True,
+                file_ext=file_ext,
+                lc_source_id=lc_source_id,
+            )
+            for col, value in stats.items():
+                if col == "asas_sn_id":
+                    continue
                 df_with_cameras.loc[idx, col] = value
 
             if pbar:
@@ -1097,38 +1369,75 @@ def apply_tags(
     df_filtered = df.copy()
     n_start = len(df_filtered)
 
+    id_col = get_id_col(df_filtered)
+    df_filtered[id_col] = validate_candidate_ids(df_filtered, id_col)
+    source_id_col = "asas_sn_id" if "asas_sn_id" in df_filtered.columns else id_col
+    if source_id_col != id_col:
+        source_ids = df_filtered[source_id_col].astype("string").str.strip()
+        invalid_source = source_ids.isna() | source_ids.str.lower().isin(
+            {"", "nan", "none", "null", "<na>"}
+        )
+        if bool(invalid_source.any()):
+            raise ValueError(
+                f"Light-curve source ID column '{source_id_col}' contains "
+                f"{int(invalid_source.sum())} invalid value(s)"
+            )
+        df_filtered[source_id_col] = source_ids
+
+    row_key = "__tag_row_id"
+    if row_key in df_filtered.columns:
+        raise ValueError(f"Reserved internal tag column already exists: {row_key}")
+    df_filtered[row_key] = np.arange(n_start, dtype=np.int64)
+
+    # These columns are wholly owned by this invocation.  Rerunning tags with a
+    # filter disabled must not preserve a stale failure from an earlier run.
+    owned_failure_columns = {
+        "failed_sparse",
+        "failed_multi_camera",
+        "failed_mag_range",
+        "failed_tag_stats",
+        "failed_any",
+    }
+    df_filtered = df_filtered.drop(
+        columns=[column for column in owned_failure_columns if column in df_filtered.columns],
+        errors="ignore",
+    )
+
     precomputed_time = False
     precomputed_cameras = False
 
-    # Pre-compute stats in parallel if requested and needed
+    # Always compute the light-curve accounting ledger when paths are present.
+    # Even when individual rejection rules are disabled, downstream event
+    # products must say how many raw/clean rows and cameras were actually seen;
+    # a disabled cut is not permission to lose that provenance.
     if "path" in df_filtered.columns:
-        id_col = get_id_col(df_filtered)
-
         compute_time = apply_sparse
         compute_cameras = apply_multi_camera
         compute_fields = compute_time or compute_cameras
 
-        if compute_time or compute_cameras or compute_fields:
-            if show_tqdm:
-                tqdm.write(f"[apply_tags] Pre-computing stats with {n_workers} workers")
-            df_filtered = _compute_stats_parallel(
-                df_filtered, id_col, "path",
-                compute_time=compute_time,
-                compute_cameras=compute_cameras,
-                compute_fields=compute_fields,
-                file_ext=file_ext,
-                n_workers=n_workers,
-                show_tqdm=show_tqdm,
-                checkpoint_path=stats_checkpoint,
-                chunk_size=stats_chunk_size,
-            )
-            precomputed_time = compute_time
-            precomputed_cameras = compute_cameras
+        if show_tqdm:
+            tqdm.write(f"[apply_tags] Pre-computing stats with {n_workers} workers")
+        df_filtered = _compute_stats_parallel(
+            df_filtered, id_col, "path",
+            compute_time=compute_time,
+            compute_cameras=compute_cameras,
+            compute_fields=compute_fields,
+            file_ext=file_ext,
+            n_workers=n_workers,
+            show_tqdm=show_tqdm,
+            checkpoint_path=stats_checkpoint,
+            chunk_size=stats_chunk_size,
+            source_id_col=source_id_col,
+        )
+        precomputed_time = compute_time
+        precomputed_cameras = compute_cameras
 
     if apply_vsx:
         df_filtered = attach_vsx_info(
             df_filtered,
             vsx_crossmatch_csv=vsx_crossmatch_csv,
+            id_col=id_col,
+            join_id_col=source_id_col,
         )
 
     filters = []
@@ -1164,8 +1473,8 @@ def apply_tags(
         }))
 
     # Apply filters and tag failures (all rows kept)
-    id_col = get_id_col(df_filtered)
     total_steps = len(filters)
+    active_failed_cols: list[str] = []
     if total_steps > 0:
         with tqdm(total=total_steps, desc="apply_tags", leave=True, disable=not show_tqdm) as pbar:
             for label, func, kwargs in filters:
@@ -1175,25 +1484,37 @@ def apply_tags(
                 df_passed = func(df_filtered, **kwargs_clean)
                 elapsed = perf_counter() - start
 
-                # Determine which rows failed using stable source IDs.
-                # Path values can be shared directory paths across many sources.
-                passed_ids = set(df_passed[id_col].astype(str))
-                failed_mask = ~df_filtered[id_col].astype(str).isin(passed_ids)
-                df_filtered[f"failed_{label}"] = failed_mask
+                # Compare immutable row keys, not a catalogue ID inferred after
+                # joins.  This also remains correct when paths are shared.
+                passed_rows = set(pd.to_numeric(df_passed[row_key], errors="raise").astype(int))
+                failed_mask = ~df_filtered[row_key].isin(passed_rows)
+                failed_col = f"failed_{label}"
+                df_filtered[failed_col] = failed_mask
+                active_failed_cols.append(failed_col)
 
                 n_failed = int(failed_mask.sum())
                 pbar.set_postfix_str(f"{label}: {n_failed}/{n_start} failed ({elapsed:.2f}s)")
                 pbar.update(1)
 
     # Add summary column
-    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_")]
-    if failed_cols:
-        df_filtered["failed_any"] = df_filtered[failed_cols].any(axis=1)
+    if "tag_stats_status" in df_filtered.columns:
+        df_filtered["failed_tag_stats"] = ~df_filtered["tag_stats_status"].astype("string").str.lower().eq("ok")
+        active_failed_cols.append("failed_tag_stats")
+
+    if active_failed_cols:
+        df_filtered["failed_any"] = df_filtered[active_failed_cols].fillna(True).any(axis=1)
+    else:
+        df_filtered["failed_any"] = False
 
     if show_tqdm:
         n_failed_any = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
         tqdm.write(f"\n[apply_tags] {n_failed_any}/{n_start} failed at least one filter")
 
+    if df_filtered[row_key].nunique(dropna=False) != n_start:
+        raise RuntimeError("Tagging changed or duplicated internal candidate row identity")
+    df_filtered = df_filtered.sort_values(row_key, kind="stable").drop(columns=[row_key])
+    if df_filtered[id_col].astype("string").tolist() != df[id_col].astype("string").str.strip().tolist():
+        raise RuntimeError("Tagging changed canonical candidate identity")
     return df_filtered.reset_index(drop=True)
 
 

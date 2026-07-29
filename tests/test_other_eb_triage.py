@@ -60,7 +60,7 @@ def _write_review_db(
             """
             CREATE TABLE reviews (
                 candidate_id TEXT,
-                interest_score INTEGER,
+                classification_confidence INTEGER,
                 event_class TEXT,
                 review_pass INTEGER,
                 notes TEXT,
@@ -97,7 +97,7 @@ def _write_review_db(
             conn.execute(
                 """
                 INSERT INTO reviews VALUES (
-                    :candidate_id, :interest_score, :event_class, :review_pass,
+                    :candidate_id, :classification_confidence, :event_class, :review_pass,
                     :notes, :status, :reviewer, :updated_at
                 )
                 """,
@@ -184,7 +184,7 @@ def test_load_reviewed_other_subset_filters_reviewed_other_from_db(tmp_path: Pat
         review_rows=[
             {
                 "candidate_id": "C1",
-                "interest_score": 4,
+                "classification_confidence": 4,
                 "event_class": "other",
                 "review_pass": 2,
                 "notes": "keep",
@@ -194,7 +194,7 @@ def test_load_reviewed_other_subset_filters_reviewed_other_from_db(tmp_path: Pat
             },
             {
                 "candidate_id": "C2",
-                "interest_score": 2,
+                "classification_confidence": 2,
                 "event_class": "other",
                 "review_pass": 1,
                 "notes": "unreviewed",
@@ -204,7 +204,7 @@ def test_load_reviewed_other_subset_filters_reviewed_other_from_db(tmp_path: Pat
             },
             {
                 "candidate_id": "C3",
-                "interest_score": 3,
+                "classification_confidence": 3,
                 "event_class": "dipper",
                 "review_pass": 1,
                 "notes": "other class",
@@ -298,8 +298,8 @@ def test_load_reviewed_other_subset_joins_exported_labels_by_candidate_id(tmp_pa
     write_feature_table(
         pd.DataFrame(
             [
-                {"candidate_id": "A1", "timescale": "stv", "event_class": "other", "status": "reviewed", "interest_score": 4},
-                {"candidate_id": "A2", "timescale": "stv", "event_class": "dipper", "status": "reviewed", "interest_score": 2},
+                {"candidate_id": "A1", "timescale": "stv", "event_class": "other", "status": "reviewed", "classification_confidence": 4},
+                {"candidate_id": "A2", "timescale": "stv", "event_class": "dipper", "status": "reviewed", "classification_confidence": 2},
             ]
         ),
         labels_path,
@@ -308,7 +308,7 @@ def test_load_reviewed_other_subset_joins_exported_labels_by_candidate_id(tmp_pa
     subset = load_reviewed_other_subset(labels_path, candidates_path)
 
     assert subset["candidate_id"].tolist() == ["A1"]
-    assert subset.loc[0, "interest_score"] == 4
+    assert subset.loc[0, "classification_confidence"] == 4
     assert subset.loc[0, "dipper_score"] == 8.0
 
 

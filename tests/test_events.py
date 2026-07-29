@@ -15,13 +15,16 @@ import pytest
 from malca.stv.events import (
     build_runs,
     classify_run_morphology,
+    compute_recurrence_stats,
     filter_runs,
     main as events_main,
+    merge_event_result_metadata,
     score_events_bayesian,
     score_lightcurve,
+    signal_amplitude_pass_mask,
 )
 from malca.core.baseline import per_camera_gp_baseline
-from malca.products.feature_layers import with_feature_columns
+from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
 
 
 def _global_constant_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
@@ -35,6 +38,73 @@ def _global_constant_baseline(df: pd.DataFrame, **kwargs) -> pd.DataFrame:
     out["sigma_resid"] = resid / sigma_eff
     out["baseline_source"] = "test_global_constant"
     return out
+
+
+def test_event_metadata_cannot_overwrite_measured_counts() -> None:
+    result = {
+        "lc_path": "candidate.dat2",
+        "raw_n_points": 10,
+        "raw_n_cameras": 2,
+        "n_points": 6,
+    }
+    metadata = {
+        "raw_n_points": 10,
+        "raw_n_cameras": 2,
+        "clean_n_points": 8,
+        "tag_stats_status": "ok",
+        "tag_stats_error": "",
+    }
+
+    merged = merge_event_result_metadata(result, metadata, lc_path="candidate.dat2")
+
+    assert merged["raw_n_points"] == 10
+    assert merged["clean_n_points"] == 8
+    assert merged["tag_stats_status"] == "ok"
+    with pytest.raises(ValueError, match="raw_n_points"):
+        merge_event_result_metadata(
+            result,
+            {**metadata, "raw_n_points": 11},
+            lc_path="candidate.dat2",
+        )
+    with pytest.raises(ValueError, match="Point-count invariant"):
+        merge_event_result_metadata(
+            result,
+            {**metadata, "clean_n_points": 5},
+            lc_path="candidate.dat2",
+        )
+
+
+def test_event_metadata_comparison_is_column_aware_and_camera_counts_balance() -> None:
+    with pytest.raises(ValueError, match="candidate_id"):
+        merge_event_result_metadata(
+            {"candidate_id": "001"},
+            {"candidate_id": 1},
+            lc_path="candidate.dat2",
+        )
+    with pytest.raises(ValueError, match="pre_periodic_flag"):
+        merge_event_result_metadata(
+            {"pre_periodic_flag": True},
+            {"pre_periodic_flag": "false"},
+            lc_path="candidate.dat2",
+        )
+    merged = merge_event_result_metadata(
+        {"pre_periodic_flag": False},
+        {"pre_periodic_flag": "no"},
+        lc_path="candidate.dat2",
+    )
+    assert merged["pre_periodic_flag"] is False
+    with pytest.raises(ValueError, match="raw_n_points"):
+        merge_event_result_metadata(
+            {"raw_n_points": 10},
+            {"raw_n_points": 10.0000000001},
+            lc_path="candidate.dat2",
+        )
+    with pytest.raises(ValueError, match="Camera-count invariant"):
+        merge_event_result_metadata(
+            {"raw_n_cameras": 1, "n_cameras": 2},
+            {},
+            lc_path="candidate.dat2",
+        )
 
 
 def _write_events_config(tmp_path: Path, **options: object) -> Path:
@@ -178,6 +248,54 @@ class TestBuildRuns:
         
         assert len(runs_short) == 2
         assert len(runs_long) == 1
+
+    def test_default_gap_never_bridges_an_observing_season(self):
+        jd = np.array([0.0, 1.0, 2.0, 300.0, 301.0, 302.0])
+        trig_idx = np.arange(len(jd))
+
+        runs = build_runs(trig_idx, jd, max_gap_points=0)
+
+        assert [run.tolist() for run in runs] == [[0, 1, 2], [3, 4, 5]]
+
+
+def test_signal_amplitude_uses_delta_mag_without_subtracting_baseline() -> None:
+    rows = pd.DataFrame(
+        {
+            "baseline_mag": [14.0, 19.0, 14.0],
+            "dip_significant": [True, True, True],
+            "jump_significant": [False, False, False],
+            "dip_best_delta_mag": [0.05, 0.15, 0.10],
+            "jump_best_delta_mag": [np.nan, np.nan, np.nan],
+        }
+    )
+
+    passed = signal_amplitude_pass_mask(rows, 0.10)
+
+    assert passed.tolist() == [False, True, True]
+
+
+def test_recurrence_separates_photometric_depth_from_trigger_strength() -> None:
+    summaries = [
+        {
+            "start_jd": 0.0,
+            "end_jd": 2.0,
+            "duration_days": 2.0,
+            "run_max": 10.0,
+            "peak_delta_mag": 0.20,
+        },
+        {
+            "start_jd": 10.0,
+            "end_jd": 12.0,
+            "duration_days": 2.0,
+            "run_max": 20.0,
+            "peak_delta_mag": 0.20,
+        },
+    ]
+
+    result = compute_recurrence_stats(summaries)
+
+    assert result["amplitude_consistency"] == pytest.approx(0.0)
+    assert result["trigger_strength_cv"] > 0.0
 
 
 class TestFilterRuns:
@@ -621,6 +739,163 @@ def test_events_main_fails_on_high_error_fraction_and_only_checkpoints_successes
     error_log = output_path.with_name(f"{output_path.stem}_ERRORS.parquet")
     errors = pd.read_parquet(error_log)
     assert set(errors["lc_path"]) == {"bad1.dat2", "bad2.dat2"}
+
+
+@pytest.mark.parametrize(
+    ("metadata_paths", "message"),
+    [
+        ([None], "null or blank"),
+        (["   "], "null or blank"),
+        (["same.dat2", "same.dat2"], "duplicate"),
+    ],
+)
+def test_events_main_rejects_invalid_metadata_paths(
+    tmp_path: Path,
+    monkeypatch,
+    metadata_paths: list[str | None],
+    message: str,
+) -> None:
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("candidate.dat2\n", encoding="ascii")
+    metadata_file = tmp_path / "metadata.parquet"
+    pd.DataFrame({"lc_path": metadata_paths}).to_parquet(metadata_file, index=False)
+    output_path = tmp_path / "lc_events_results.parquet"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.stv.events",
+            "--input-file",
+            str(input_file),
+            "--metadata",
+            str(metadata_file),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match=message):
+        events_main()
+
+
+@pytest.mark.parametrize("output_format", ["parquet", "parquet_chunk"])
+def test_events_main_reconciles_resume_output_and_clears_resolved_errors(
+    tmp_path: Path,
+    monkeypatch,
+    output_format: str,
+) -> None:
+    paths = ["good.dat2", "duplicate.dat2", "checkpoint_only.dat2"]
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("\n".join(paths) + "\n", encoding="ascii")
+    output_path = (
+        tmp_path / "lc_events_results.parquet"
+        if output_format == "parquet"
+        else tmp_path / "lc_events_results"
+    )
+    existing = to_layer_first_frame(
+        pd.DataFrame(
+            {
+                "candidate_id": ["stv_good", "stv_duplicate", "stv_duplicate"],
+                "timescale": ["stv", "stv", "stv"],
+                "lc_path": ["good.dat2", "duplicate.dat2", "duplicate.dat2"],
+                "dip_significant": [False, False, False],
+                "jump_significant": [False, False, False],
+            }
+        )
+    )
+    if output_format == "parquet":
+        existing.to_parquet(output_path, index=False)
+    else:
+        output_path.mkdir()
+        existing.to_parquet(output_path / "chunk_000000.parquet", index=False)
+    checkpoint = output_path.with_name(f"{output_path.stem}_PROCESSED.txt")
+    checkpoint.write_text("\n".join(paths) + "\n", encoding="ascii")
+    error_output = (
+        output_path.with_name(f"{output_path.stem}_ERRORS.parquet")
+        if output_format == "parquet"
+        else output_path.parent / f"{output_path.name}_ERRORS.parquet"
+    )
+    pd.DataFrame(
+        {
+            "lc_path": ["duplicate.dat2", "checkpoint_only.dat2", "unresolved.dat2"],
+            "error": ["old duplicate", "old missing row", "still unresolved"],
+            "traceback": ["", "", ""],
+        }
+    ).to_parquet(error_output, index=False)
+    config_path = _write_events_config(
+        tmp_path,
+        output_format=output_format,
+        min_mag_offset=0,
+    )
+    attempted: list[str] = []
+
+    def fake_process_one(path: str, path_metadata: dict | None) -> dict:
+        attempted.append(path)
+        return {
+            "lc_path": path,
+            "dip_significant": False,
+            "jump_significant": False,
+        }
+
+    monkeypatch.setattr("malca.stv.events.ProcessPoolExecutor", ThreadPoolExecutor)
+    monkeypatch.setattr("malca.stv.events._process_one", fake_process_one)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.stv.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+            "--config",
+            str(config_path),
+            "--workers",
+            "1",
+        ],
+    )
+
+    events_main()
+
+    assert set(attempted) == {"duplicate.dat2", "checkpoint_only.dat2"}
+    if output_format == "parquet":
+        out = pd.read_parquet(output_path)
+    else:
+        out = pd.concat(
+            [pd.read_parquet(path) for path in sorted(output_path.glob("chunk_*.parquet"))],
+            ignore_index=True,
+        )
+    assert sorted(out["lc_path"].tolist()) == sorted(paths)
+    assert out["lc_path"].is_unique
+    assert out["candidate_id"].is_unique
+    assert set(checkpoint.read_text(encoding="ascii").splitlines()) == set(paths)
+    unresolved = pd.read_parquet(error_output)
+    assert unresolved[["lc_path", "error"]].to_dict("records") == [
+        {"lc_path": "unresolved.dat2", "error": "still unresolved"}
+    ]
+
+
+def test_events_main_rejects_candidate_id_collisions_before_processing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_file = tmp_path / "paths.txt"
+    input_file.write_text("first/shared.dat2\nsecond/shared.dat2\n", encoding="ascii")
+    output_path = tmp_path / "lc_events_results.parquet"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "malca.stv.events",
+            "--input-file",
+            str(input_file),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="same canonical candidate_id"):
+        events_main()
 
 
 def test_events_main_preserves_existing_rows_when_parquet_metadata_type_changes(
