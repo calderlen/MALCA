@@ -38,7 +38,11 @@ from malca.review.dustycult_visualization import (
     occulter_absorption_grid,
     occulter_parameters_from_fit,
 )
-from malca.review.store import db_connect
+from malca.review.store import db_connect, upsert_candidates_frame
+
+
+def _insert_candidate(conn, candidate_id: str = "cand-1") -> None:
+    upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": candidate_id}]))
 
 
 _DUSTYCULT_REQUIRED_SAMPLE_COLUMNS = (
@@ -445,6 +449,7 @@ def test_upsert_dustycult_fit_replaces_mode_and_curve_rows(tmp_path: Path) -> No
         }
     )
     with db_connect(db_path) as conn:
+        _insert_candidate(conn)
         upsert_dustycult_fit(
             conn,
             {
@@ -505,6 +510,7 @@ def test_run_dustycult_fit_imports_mocked_artifacts(tmp_path: Path, monkeypatch)
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -551,6 +557,7 @@ def test_run_dustycult_fit_preflight_failure_skips_julia(tmp_path: Path, monkeyp
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -589,6 +596,7 @@ def test_run_dustycult_fit_one_band_result_is_warning(tmp_path: Path, monkeypatc
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
@@ -626,6 +634,7 @@ def test_run_dustycult_fit_all_divergent_degenerate_samples_fail(tmp_path: Path,
     controls = dict(DEFAULT_CONTROLS)
     controls.update({"start_jd": 0.0, "end_jd": 20.0, "t0_jd": 10.0})
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn)
         row = run_dustycult_fit(
             conn,
             "cand-1",
