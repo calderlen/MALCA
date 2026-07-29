@@ -5,12 +5,14 @@ def _load_sed_figure_for_candidate(candidate_id, extinction_mode, theme_mode):
         external_rows = load_sed_rows(conn, str(candidate_id))
         model_curve_rows = load_sed_model_curves(conn, str(candidate_id))
         model_fit_rows = load_sed_model_fits(conn, str(candidate_id))
+        model_point_rows = load_sed_model_points(conn, str(candidate_id))
     return build_sed_figure(
         payload,
         candidate_id=str(candidate_id),
         external_rows=external_rows,
         model_curve_rows=model_curve_rows,
         model_fit_rows=model_fit_rows,
+        model_point_rows=model_point_rows,
         extinction_mode=str(extinction_mode or "observed"),
         theme=str(theme_mode or DEFAULT_THEME),
     )

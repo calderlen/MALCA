@@ -15,6 +15,7 @@ from malca.products.feature_layers import with_feature_columns
 from malca.enrichment.sed_model import (
     SED_MODEL_CURVE_COLUMNS,
     SED_MODEL_FIT_COLUMNS,
+    SED_MODEL_POINT_COLUMNS,
     fit_sed_models,
     upsert_sed_model_results,
 )
@@ -25,11 +26,17 @@ from malca.enrichment.sed_alpha import (
 )
 from malca.review.sed import (
     ALL_CATALOG_SOURCES,
+    CANONICAL_SED_COLUMNS,
     DEFAULT_PIPELINE_SED_SOURCES,
-    SED_COLUMNS,
+    SED_FETCH_CHUNK_SIZE,
+    SED_FETCH_MANIFEST_ATTR,
+    SED_FETCH_MAX_ATTEMPTS,
+    SED_FETCH_RETRY_BASE_SECONDS,
+    build_sed_fetch_manifest,
     fetch_sed_photometry,
     resolve_sed_sources,
     upsert_sed_rows,
+    validate_sed_fetch_manifest,
 )
 from malca.review.store import db_connect
 from malca.io.table_io import read_feature_table, write_parquet_table
@@ -59,8 +66,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="default",
         help=(
-            "Comma-separated source keys, 'default', 'all', or 'far-ir'. "
-            "Default is the broad-classification set; far-IR sources are explicit. "
+            "Comma-separated source keys, 'default'/'all', 'broad', or 'far-ir'. "
+            "Default uses the bounded payload/PS1/SkyMapper/SDSS profile; "
+            "'all' explicitly fetches every registered SED catalog. "
             f"Default: {', '.join(DEFAULT_PIPELINE_SED_SOURCES)}. "
             f"Available: {', '.join(ALL_CATALOG_SOURCES)}"
         ),
@@ -82,6 +90,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--all-candidates",
         action="store_true",
         help="Fetch SED photometry for all input rows instead of only failed_any=False passers.",
+    )
+    parser.add_argument(
+        "--fit-workers",
+        type=int,
+        default=1,
+        help="Parallel threads for atmosphere fitting (default: 1).",
+    )
+    parser.add_argument(
+        "--fetch-chunk-size",
+        type=int,
+        default=SED_FETCH_CHUNK_SIZE,
+        help=f"Candidates checkpointed per source fetch chunk (default: {SED_FETCH_CHUNK_SIZE}).",
+    )
+    parser.add_argument(
+        "--fetch-max-attempts",
+        type=int,
+        default=SED_FETCH_MAX_ATTEMPTS,
+        help=f"Attempts for retryable source errors (default: {SED_FETCH_MAX_ATTEMPTS}).",
+    )
+    parser.add_argument(
+        "--fetch-retry-base-seconds",
+        type=float,
+        default=SED_FETCH_RETRY_BASE_SECONDS,
+        help=(
+            "Initial exponential-backoff delay for retryable source errors "
+            f"(default: {SED_FETCH_RETRY_BASE_SECONDS:g} s)."
+        ),
     )
     parser.add_argument(
         "--no-alpha",
@@ -112,6 +147,18 @@ def _default_model_output_paths(output_path: Path) -> tuple[Path, Path]:
     )
 
 
+def _default_model_point_output_path(output_path: Path) -> Path:
+    stem = output_path.stem
+    if stem == "sed_photometry":
+        prefix = ""
+    elif stem.endswith("_sed_photometry"):
+        prefix = stem[: -len("_sed_photometry")]
+    else:
+        prefix = stem
+    prefix_text = f"{prefix}_" if prefix else ""
+    return output_path.with_name(f"{prefix_text}sed_model_points.parquet")
+
+
 def _default_alpha_output_path(output_path: Path) -> Path:
     stem = output_path.stem
     if stem == "sed_photometry":
@@ -122,6 +169,18 @@ def _default_alpha_output_path(output_path: Path) -> Path:
         prefix = stem
     prefix_text = f"{prefix}_" if prefix else ""
     return output_path.with_name(f"{prefix_text}sed_alpha.parquet")
+
+
+def _default_fetch_manifest_output_path(output_path: Path) -> Path:
+    stem = output_path.stem
+    if stem == "sed_photometry":
+        prefix = ""
+    elif stem.endswith("_sed_photometry"):
+        prefix = stem[: -len("_sed_photometry")]
+    else:
+        prefix = stem
+    prefix_text = f"{prefix}_" if prefix else ""
+    return output_path.with_name(f"{prefix_text}sed_fetch_manifest.parquet")
 
 
 def _is_sqlite_input(path: Path) -> bool:
@@ -213,13 +272,55 @@ def run(args: argparse.Namespace) -> Path:
         df,
         sources=requested_sources,
         progress_callback=lambda msg: print(msg, flush=True),
+        fetch_chunk_size=max(int(getattr(args, "fetch_chunk_size", SED_FETCH_CHUNK_SIZE)), 1),
+        max_attempts=max(int(getattr(args, "fetch_max_attempts", SED_FETCH_MAX_ATTEMPTS)), 1),
+        retry_base_seconds=max(
+            float(getattr(args, "fetch_retry_base_seconds", SED_FETCH_RETRY_BASE_SECONDS)),
+            0.0,
+        ),
     )
-    for col in SED_COLUMNS:
+    requested = resolve_sed_sources(requested_sources)
+    manifest = rows.attrs.get(SED_FETCH_MANIFEST_ATTR)
+    if not isinstance(manifest, pd.DataFrame):
+        manifest = build_sed_fetch_manifest(df, sources=requested, fetched_rows=rows)
+    # The manifest is a DataFrame stored as transient fetch metadata.  Detach it
+    # before slicing/writing rows: pandas compares DataFrame.attrs during the
+    # chunked writer's schema concat, and DataFrame-valued attrs cannot be
+    # reduced to a single truth value.
+    rows.attrs.pop(SED_FETCH_MANIFEST_ATTR, None)
+    for col in CANONICAL_SED_COLUMNS:
         if col not in rows.columns:
             rows[col] = None
-    rows = rows[SED_COLUMNS]
+    rows = rows[CANONICAL_SED_COLUMNS]
     write_parquet_table(rows, output_path)
     print(f"Saved {len(rows)} SED rows to {output_path}")
+
+    manifest_output_path = _default_fetch_manifest_output_path(output_path)
+    write_parquet_table(manifest, manifest_output_path)
+    manifest_counts = (
+        manifest.groupby(["source_key", "status"], dropna=False).size().unstack(fill_value=0)
+        if not manifest.empty
+        else pd.DataFrame()
+    )
+    n_incomplete = int((~manifest["is_complete"].astype(bool)).sum()) if not manifest.empty else 0
+    print(
+        f"Saved {len(manifest)} candidate-source fetch statuses to {manifest_output_path} "
+        f"({n_incomplete} incomplete)"
+    )
+    if not manifest_counts.empty:
+        print("\nFetch status by source:")
+        print(manifest_counts.to_string())
+
+    fetch_complete, manifest_errors = validate_sed_fetch_manifest(
+        manifest,
+        df,
+        sources=requested,
+    )
+    if not fetch_complete:
+        raise RuntimeError(
+            "SED fetch is incomplete; resumable photometry and manifest were saved. "
+            + "; ".join(manifest_errors)
+        )
 
     if not rows.empty and "source" in rows.columns:
         counts = rows.groupby("source", dropna=False).size().sort_index()
@@ -229,6 +330,7 @@ def run(args: argparse.Namespace) -> Path:
 
     fits = pd.DataFrame(columns=SED_MODEL_FIT_COLUMNS)
     curves = pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS)
+    model_points = pd.DataFrame(columns=SED_MODEL_POINT_COLUMNS)
     alpha_rows = pd.DataFrame(columns=SED_ALPHA_COLUMNS)
     alpha_output_path = _default_alpha_output_path(output_path)
     if bool(getattr(args, "compute_alpha", True)):
@@ -246,11 +348,14 @@ def run(args: argparse.Namespace) -> Path:
         print(f"Saved {len(alpha_rows)} SED alpha rows to {alpha_output_path} ({n_ok_alpha} ok)")
 
     fit_output_path, curve_output_path = _default_model_output_paths(output_path)
+    point_output_path = _default_model_point_output_path(output_path)
     if fit_atmosphere:
-        fits, curves = fit_sed_models(
+        fits, curves, model_points = fit_sed_models(
             df,
             rows,
             progress_callback=lambda msg: print(msg, flush=True),
+            return_points=True,
+            workers=max(int(getattr(args, "fit_workers", 1)), 1),
         )
         for col in SED_MODEL_FIT_COLUMNS:
             if col not in fits.columns:
@@ -258,13 +363,19 @@ def run(args: argparse.Namespace) -> Path:
         for col in SED_MODEL_CURVE_COLUMNS:
             if col not in curves.columns:
                 curves[col] = None
+        for col in SED_MODEL_POINT_COLUMNS:
+            if col not in model_points.columns:
+                model_points[col] = None
         fits = fits[SED_MODEL_FIT_COLUMNS]
         curves = curves[SED_MODEL_CURVE_COLUMNS]
+        model_points = model_points[SED_MODEL_POINT_COLUMNS]
         write_parquet_table(fits, fit_output_path)
         write_parquet_table(curves, curve_output_path)
+        write_parquet_table(model_points, point_output_path)
         n_ok = int((fits["status"].astype(str) == "ok").sum()) if "status" in fits.columns else 0
         print(f"Saved {len(fits)} SED model fit rows to {fit_output_path} ({n_ok} ok)")
         print(f"Saved {len(curves)} SED model curve rows to {curve_output_path}")
+        print(f"Saved {len(model_points)} SED model point rows to {point_output_path}")
 
     if review_db_path:
         with closing(db_connect(review_db_path)) as conn:
@@ -275,7 +386,7 @@ def run(args: argparse.Namespace) -> Path:
                 else 0
             )
             if fit_atmosphere:
-                n_fits, n_curves = upsert_sed_model_results(conn, fits, curves)
+                n_fits, n_curves = upsert_sed_model_results(conn, fits, curves, model_points)
             else:
                 n_fits, n_curves = 0, 0
         print(f"\nUpserted {updated} SED rows into {review_db_path}")

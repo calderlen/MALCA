@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+import json
 
 import numpy as np
 import pandas as pd
@@ -87,6 +88,42 @@ def test_sed_alpha_requires_valid_points_and_wavelength_anchors() -> None:
         "cand",
         _sed_rows(waves_micron=(3.4, 12.0, 22.0)),
     )["sed_alpha_status"] == "missing_blue_anchor"
+
+
+def test_sed_alpha_excludes_confused_points_and_deduplicates_overlapping_bands() -> None:
+    rows = _sed_rows(alpha=-0.7)
+    rows.loc[0, ["source", "band"]] = ["2MASS", "Ks"]
+    rows.loc[0, ["flux_lambda_err", "lambda_l_lambda_err"]] = [1.0e-6, 1.0e-6]
+
+    preferred = rows.iloc[[1]].copy()
+    preferred["source"] = "Spitzer SEIP"
+    preferred["band"] = "IRAC1"
+    preferred["lambda_eff_angstrom"] = 3.55e4
+    preferred["flux_lambda_err"] = 1.0e-8
+    preferred["lambda_l_lambda_err"] = 1.0e-8
+
+    overlapping = preferred.copy()
+    overlapping["source"] = "CatWISE2020"
+    overlapping["band"] = "W1"
+    overlapping["lambda_eff_angstrom"] = 3.40e4
+    overlapping["flux_lambda_err"] = 1.0
+    overlapping["lambda_l_lambda_err"] = 1.0
+
+    confused = rows.iloc[[2]].copy()
+    confused["source"] = "AKARI"
+    confused["band"] = "S9W"
+    confused["quality_flags"] = "ambiguous_counterpart;bad_quality"
+
+    combined = pd.concat([rows, preferred, overlapping, confused], ignore_index=True)
+    result = fit_sed_alpha_for_candidate("sed-alpha-cand", combined)
+    bands = json.loads(result["sed_alpha_bands_json"])
+
+    assert result["sed_alpha_status"] == "ok"
+    assert result["sed_alpha_n_points"] == 4
+    selected = {(row["source"], row["band"]) for row in bands}
+    assert ("Spitzer SEIP", "IRAC1") in selected
+    assert ("CatWISE2020", "W1") not in selected
+    assert ("AKARI", "S9W") not in selected
 
 
 def test_sed_alpha_upsert_updates_review_columns_and_payload(tmp_path) -> None:

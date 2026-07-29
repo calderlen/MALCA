@@ -27,6 +27,28 @@ SED_ALPHA_LAMBDA_MAX_MICRON = 24.0
 SED_ALPHA_BLUE_ANCHOR_MAX_MICRON = 3.0
 SED_ALPHA_RED_ANCHOR_MIN_MICRON = 10.0
 SED_ALPHA_MIN_POINTS = 3
+SED_ALPHA_DEDUP_LOG10_TOLERANCE = 0.04
+SED_ALPHA_EXCLUDED_QUALITY_TOKENS = (
+    "bad_quality",
+    "ambiguous_counterpart",
+    "catalog_match_row_limit_reached",
+    "match_separation_unavailable",
+    "non_simultaneous_pointed",
+    "proper_motion_sensitive_match",
+)
+
+_SED_ALPHA_SOURCE_PRIORITY = {
+    "spitzer seip": 0,
+    "vista/vvv": 1,
+    "vista/vhs": 1,
+    "vista/viking": 1,
+    "ukidss": 1,
+    "2mass": 2,
+    "allwise": 3,
+    "catwise2020": 3,
+    "akari": 4,
+    "iras": 5,
+}
 
 
 def _safe_float(value: object) -> float | None:
@@ -111,6 +133,57 @@ def classify_sed_alpha(alpha: float | None) -> str:
     return "Class III/photosphere"
 
 
+def _alpha_point_preference(row: pd.Series) -> tuple:
+    luminosity = _safe_float(row.get("lambda_l_lambda"))
+    luminosity_error = _safe_float(row.get("lambda_l_lambda_err"))
+    flux = _safe_float(row.get("flux_lambda"))
+    flux_error = _safe_float(row.get("flux_lambda_err"))
+    if luminosity and luminosity > 0 and luminosity_error and luminosity_error > 0:
+        fractional_error = luminosity_error / luminosity
+    elif flux and flux > 0 and flux_error and flux_error > 0:
+        fractional_error = flux_error / flux
+    else:
+        fractional_error = float("inf")
+    source = str(row.get("source") or "").strip().casefold()
+    separation = _safe_float(row.get("sep_arcsec"))
+    return (
+        not math.isfinite(fractional_error),
+        fractional_error,
+        _SED_ALPHA_SOURCE_PRIORITY.get(source, 99),
+        separation if separation is not None else float("inf"),
+        source,
+        str(row.get("band") or ""),
+    )
+
+
+def _deduplicate_alpha_wavelengths(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep one best-quality representative for each overlapping IR anchor."""
+    if frame.empty or len(frame) == 1:
+        return frame
+    ordered = frame.sort_values("lambda_micron", kind="mergesort").copy()
+    clusters: list[list[object]] = []
+    current: list[object] = []
+    previous_log_lambda: float | None = None
+    for index, row in ordered.iterrows():
+        log_lambda = math.log10(float(row["lambda_micron"]))
+        if (
+            current
+            and previous_log_lambda is not None
+            and log_lambda - previous_log_lambda > SED_ALPHA_DEDUP_LOG10_TOLERANCE
+        ):
+            clusters.append(current)
+            current = []
+        current.append(index)
+        previous_log_lambda = log_lambda
+    if current:
+        clusters.append(current)
+    keep = [
+        min(cluster, key=lambda index: _alpha_point_preference(ordered.loc[index]))
+        for cluster in clusters
+    ]
+    return ordered.loc[keep].sort_values("lambda_micron", kind="mergesort").copy()
+
+
 def _prepared_alpha_points(
     sed_rows: pd.DataFrame,
     candidate: dict | pd.Series | None,
@@ -135,9 +208,16 @@ def _prepared_alpha_points(
         good &= ~frame["is_upper_limit"].map(_to_bool)
     if "is_synthetic" in frame.columns:
         good &= ~frame["is_synthetic"].map(_to_bool)
+    if "quality_flags" in frame.columns:
+        quality = frame["quality_flags"].fillna("").astype(str).str.casefold()
+        excluded = pd.Series(False, index=frame.index)
+        for token in SED_ALPHA_EXCLUDED_QUALITY_TOKENS:
+            excluded |= quality.str.contains(token, regex=False)
+        good &= ~excluded
     frame = frame.loc[good].copy()
     if frame.empty:
         return frame
+    frame = _deduplicate_alpha_wavelengths(frame)
 
     lum = (
         pd.to_numeric(frame["lambda_l_lambda"], errors="coerce")

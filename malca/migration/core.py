@@ -81,6 +81,7 @@ _SIDE_TABLE_NAME_HINTS = (
     "sed_photometry",
     "sed_model_fits",
     "sed_model_curves",
+    "sed_model_points",
     "dustycult_fits",
     "dustycult_predictive_curves",
     "phoebe_fits",
@@ -716,6 +717,11 @@ def migrate_review_db(artifact: Artifact, output_path: Path) -> ArtifactReport:
         _input_root, output_root = _artifact_roots(artifact, output_path)
         with sqlite3.connect(str(output_path)) as conn:
             conn.row_factory = sqlite3.Row
+            # Review schema initialization now validates the immutable SED
+            # ledger's foreign keys.  Migration connections must enforce the
+            # same contract as ``malca.review.store.db_connect`` before
+            # initializing or rewriting a copied review database.
+            conn.execute("PRAGMA foreign_keys = ON")
             init_review_db(conn)
             existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
             for col, dtype in _CAMERA_NAME_SQL_COLUMN_TYPES.items():
