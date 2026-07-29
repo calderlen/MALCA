@@ -31,14 +31,14 @@ def _seed_review_db(
             conn.execute(
                 """
                 INSERT INTO reviews (
-                    candidate_id, interest_score, event_class, review_pass, notes,
+                    candidate_id, classification_confidence, event_class, review_pass, notes,
                     status, workflow_status, reviewer, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     review["candidate_id"],
-                    review.get("interest_score", 1),
+                    review.get("classification_confidence", 1),
                     review.get("event_class", "unclassified"),
                     review.get("review_pass", 1),
                     review.get("notes", ""),

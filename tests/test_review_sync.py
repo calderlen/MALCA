@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from malca.review.diagnostic_plots import build_cmd_figure
 from malca.review import sync
@@ -12,6 +13,7 @@ from malca.review.store import (
     REVIEW_CANDIDATES_SCHEMA_KEY,
     REVIEW_CANDIDATES_SCHEMA_VERSION,
     db_connect,
+    ensure_review_db_schema,
     get_candidate_payload,
     get_review,
     upsert_candidates_frame,
@@ -62,7 +64,7 @@ def _seed_candidate_and_review(
             conn.execute(
                 """
                 INSERT INTO reviews (
-                    candidate_id, interest_score, event_class, review_pass, notes, status, workflow_status,
+                    candidate_id, classification_confidence, event_class, review_pass, notes, status, workflow_status,
                     morphology_primary, morphology_secondary, morphology_secondary_json,
                     physical_primary, physical_secondary, priority_tags_json,
                     taxonomy_version, legacy_review_json, reviewer, updated_at
@@ -71,7 +73,7 @@ def _seed_candidate_and_review(
                 """,
                 (
                     review["candidate_id"],
-                    review.get("interest_score"),
+                    review.get("classification_confidence"),
                     review.get("event_class", "unclassified"),
                     review.get("review_pass", 1),
                     review.get("notes", ""),
@@ -118,7 +120,7 @@ def test_review_sync_export_import_roundtrip_and_manifest_hashes(tmp_path: Path)
         },
         {
             "candidate_id": "C1",
-            "interest_score": 4,
+            "classification_confidence": 4,
             "event_class": "dipper",
             "review_pass": 2,
             "notes": "line one,\nline two",
@@ -275,6 +277,8 @@ def test_review_db_migrates_old_layer_columns_to_flat_schema(tmp_path: Path) -> 
         )
         conn.commit()
 
+    assert ensure_review_db_schema(db_path) is True
+
     with db_connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
         row = conn.execute(
@@ -404,7 +408,7 @@ def test_review_sync_import_merge_keeps_newer_target_review(tmp_path: Path) -> N
         {"candidate_id": "C1", "asas_sn_id": "C1"},
         {
             "candidate_id": "C1",
-            "interest_score": 4,
+            "classification_confidence": 4,
             "event_class": "other",
             "review_pass": 2,
             "notes": "target newer",
@@ -420,10 +424,79 @@ def test_review_sync_import_merge_keeps_newer_target_review(tmp_path: Path) -> N
     assert result["reviews_inserted"] == 1
     with db_connect(db_path) as conn:
         assert get_review(conn, "C1")["notes"] == "target newer"
-        assert get_review(conn, "C2")["notes"] == "source inserted"
+        imported = get_review(conn, "C2")
+        assert imported["notes"] == "source inserted"
+        assert imported["workflow_status"] == "reviewed"
+        assert imported["event_class"] == "dipper"
+        assert imported["morphology_primary"] == "dimming_event"
 
 
-def test_review_sync_import_replace_drops_stale_rows(tmp_path: Path) -> None:
+def test_review_sync_import_rejects_candidate_identity_collision(tmp_path: Path) -> None:
+    in_dir = tmp_path / "reviews"
+    _write_jsonl(
+        in_dir / "candidates.jsonl",
+        [{"schema_version": 1, "candidate_id": "C1", "asas_sn_id": "OTHER", "payload": {}}],
+    )
+    _write_jsonl(
+        in_dir / "reviews.jsonl",
+        [
+            {
+                "schema_version": 1,
+                "candidate_id": "C1",
+                "event_class": "dipper",
+                "status": "reviewed",
+                "updated_at": "2026-03-13T10:00:00+00:00",
+            }
+        ],
+    )
+    _write_manifest(in_dir / "assets_manifest.json")
+
+    db_path = tmp_path / "target.db"
+    _seed_candidate_and_review(
+        db_path,
+        {"candidate_id": "C1", "asas_sn_id": "C1"},
+        {
+            "candidate_id": "C1",
+            "notes": "correct target review",
+            "status": "reviewed",
+            "updated_at": "2026-03-12T10:00:00+00:00",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Candidate identity collision"):
+        sync.import_review_bundle(in_dir, db_path=db_path)
+    with db_connect(db_path) as conn:
+        assert get_review(conn, "C1")["notes"] == "correct target review"
+
+
+def test_review_sync_import_rejects_unsupported_schema_before_writing(tmp_path: Path) -> None:
+    in_dir = tmp_path / "reviews"
+    _write_jsonl(
+        in_dir / "candidates.jsonl",
+        [{"schema_version": 999, "candidate_id": "C1", "asas_sn_id": "C1", "payload": {}}],
+    )
+    _write_jsonl(in_dir / "reviews.jsonl", [])
+    _write_manifest(in_dir / "assets_manifest.json")
+    db_path = tmp_path / "target.db"
+
+    with pytest.raises(ValueError, match="Unsupported schema_version 999"):
+        sync.import_review_bundle(in_dir, db_path=db_path)
+
+    assert not db_path.exists()
+
+
+def test_review_sync_import_rejects_duplicate_candidate_context(tmp_path: Path) -> None:
+    in_dir = tmp_path / "reviews"
+    candidate = {"schema_version": 1, "candidate_id": "C1", "asas_sn_id": "C1", "payload": {}}
+    _write_jsonl(in_dir / "candidates.jsonl", [candidate, candidate])
+    _write_jsonl(in_dir / "reviews.jsonl", [])
+    _write_manifest(in_dir / "assets_manifest.json")
+
+    with pytest.raises(ValueError, match="Duplicate candidate_id"):
+        sync.import_review_bundle(in_dir, db_path=tmp_path / "target.db")
+
+
+def test_review_sync_import_replace_refuses_to_drop_existing_rows(tmp_path: Path) -> None:
     in_dir = tmp_path / "reviews"
     _write_jsonl(
         in_dir / "candidates.jsonl",
@@ -453,7 +526,7 @@ def test_review_sync_import_replace_drops_stale_rows(tmp_path: Path) -> None:
         {"candidate_id": "OLD", "asas_sn_id": "OLD"},
         {
             "candidate_id": "OLD",
-            "interest_score": 1,
+            "classification_confidence": 1,
             "event_class": "other",
             "review_pass": 1,
             "notes": "stale",
@@ -463,12 +536,46 @@ def test_review_sync_import_replace_drops_stale_rows(tmp_path: Path) -> None:
         },
     )
 
-    result = sync.import_review_bundle(in_dir, db_path=db_path, replace=True)
-
-    assert result["replace"] is True
+    with pytest.raises(ValueError, match="cannot replace"):
+        sync.import_review_bundle(in_dir, db_path=db_path, replace=True)
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT candidate_id FROM candidates ORDER BY candidate_id").fetchall()
-    assert rows == [("C1",)]
+    assert rows == [("OLD",)]
+
+
+def test_review_bundle_preserves_existing_pipeline_science(tmp_path: Path) -> None:
+    source_db = tmp_path / "source.db"
+    target_db = tmp_path / "target.db"
+    _seed_candidate_and_review(
+        source_db,
+        {"candidate_id": "C1", "asas_sn_id": "C1", "dipper_score": 1.0},
+        {
+            "candidate_id": "C1",
+            "notes": "new review",
+            "status": "reviewed",
+            "updated_at": "2026-03-13T10:00:00+00:00",
+        },
+    )
+    _seed_candidate_and_review(
+        target_db,
+        {"candidate_id": "C1", "asas_sn_id": "C1", "dipper_score": 99.0},
+        {
+            "candidate_id": "C1",
+            "notes": "old review",
+            "status": "reviewed",
+            "updated_at": "2026-03-12T10:00:00+00:00",
+        },
+    )
+    bundle = tmp_path / "bundle"
+    sync.export_review_bundle(source_db, bundle)
+
+    result = sync.import_review_bundle(bundle, db_path=target_db)
+
+    with db_connect(target_db) as conn:
+        assert get_candidate_payload(conn, "C1")["dipper_score"] == 99.0
+        assert get_review(conn, "C1")["notes"] == "new review"
+    assert result["candidates_preserved"] == 1
+    assert Path(str(result["backup_path"])).exists()
 
 
 def test_review_sync_cli_export_import_smoke(tmp_path: Path) -> None:
@@ -478,7 +585,7 @@ def test_review_sync_cli_export_import_smoke(tmp_path: Path) -> None:
         {"candidate_id": "CLI1", "asas_sn_id": "CLI1", "dipper_score": 5.0},
         {
             "candidate_id": "CLI1",
-            "interest_score": 2,
+            "classification_confidence": 2,
             "event_class": "dipper",
             "review_pass": 1,
             "notes": "cli",
@@ -504,7 +611,7 @@ def test_auto_export_review_bundle_is_best_effort(tmp_path: Path) -> None:
         {"candidate_id": "AUTO1", "asas_sn_id": "AUTO1"},
         {
             "candidate_id": "AUTO1",
-            "interest_score": 2,
+            "classification_confidence": 2,
             "event_class": "dipper",
             "review_pass": 1,
             "notes": "auto",

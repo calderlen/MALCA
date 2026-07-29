@@ -41,6 +41,11 @@ from malca.catalogs.evidence import (
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
+from malca.review.dipper_recurrence import (
+    DIPPER_RECURRENCE_CLASS_COLUMN,
+    DIPPER_RECURRENCE_EVIDENCE_COLUMN,
+    add_observed_dipper_recurrence,
+)
 from malca.review.metadata import has_catalog_vetting_context, has_known_catalog_evidence, normalize_vsx_record
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table, write_parquet_table
 from malca.review.taxonomy import (
@@ -65,6 +70,9 @@ DEFAULT_STANDALONE_DB_PATH = Path(__file__).resolve().parents[2] / DEFAULT_OUTPU
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 REVIEW_CANDIDATES_SCHEMA_KEY = "review_candidates_schema"
 REVIEW_CANDIDATES_SCHEMA_VERSION = "flat_v1"
+REVIEW_DB_SCHEMA_KEY = "review_db_schema_version"
+REVIEW_DB_SCHEMA_VERSION = 23
+REVIEW_CONTENT_REVISION_SCOPE = "candidates_reviews"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
     "unclassified",
@@ -73,13 +81,149 @@ EVENT_CLASS_OPTIONS = [
     "microlensing",
     "flare",
     "instrumental",
-    "unknown_interesting",
     "other",
 ]
 
 
+# These are class-balanced, eight-way LightGBM ranking scores.  The rejection
+# class intentionally combines artifact/bad-photometry and nonvariable/low-SNR
+# human labels.  They remain separate from the older binary
+# ``prob_dipper_like`` score so a review run retains both model products.
+EIGHT_CLASS_PROBABILITY_COLUMNS = (
+    "prob_artifact_or_nonvariable",
+    "prob_brightening_event",
+    "prob_dipper",
+    "prob_eclipsing_binary_like",
+    "prob_long_period_variable",
+    "prob_long_term_variable",
+    "prob_microlensing",
+    "prob_quasi_periodic",
+)
+
+HIERARCHICAL_ML_PROBABILITY_COLUMNS = (
+    "prob_hierarchical_artifact_or_nonvariable",
+    "prob_usable_astrophysical_variable",
+    "prob_primary_dipper_dimming_given_usable",
+    "prob_primary_eb_geometric_periodic_given_usable",
+    "prob_primary_long_timescale_variable_given_usable",
+    "prob_primary_brightening_transient_given_usable",
+    "prob_primary_other_structured_variable_given_usable",
+    "prob_dipper_dimming",
+    "prob_eb_geometric_periodic",
+    "prob_long_timescale_variable",
+    "prob_brightening_transient",
+    "prob_other_structured_variable",
+    "prob_quasi_periodic_given_usable",
+    "prob_quasi_periodic_hierarchical",
+    "prob_microlensing_given_brightening",
+    "prob_microlensing_hierarchical",
+    "prob_long_period_variable_given_long_timescale",
+    "prob_long_term_variable_given_long_timescale",
+    "prob_long_period_variable_hierarchical",
+    "prob_long_term_variable_hierarchical",
+    "prob_recurrent_given_dipper",
+    "prob_single_given_dipper",
+    "prob_recurrent_dipper_hierarchical",
+    "prob_single_dipper_hierarchical",
+)
+
+HIERARCHICAL_ML_PREDICTION_COLUMNS = (
+    "predicted_hierarchy_gate",
+    "predicted_primary_morphology",
+    "predicted_hierarchical_class",
+    "predicted_quasi_periodic",
+    "predicted_microlensing_like",
+    "predicted_long_timescale_subtype",
+    "predicted_dipper_recurrence",
+)
+
+# Retained only so pre-existing nine-class artifacts remain importable.
+NINE_CLASS_PROBABILITY_COLUMNS = (
+    "prob_artifact_or_bad_photometry",
+    "prob_brightening_event",
+    "prob_dipper",
+    "prob_eclipsing_binary_like",
+    "prob_long_period_variable",
+    "prob_long_term_variable",
+    "prob_microlensing",
+    "prob_nonvariable_or_low_snr",
+    "prob_quasi_periodic",
+)
+
+DIPPER_RECURRENCE_ML_PROBABILITY_COLUMNS = (
+    "prob_recurrent_given_dipper",
+    "prob_recurrent_dipper_binary",
+    "prob_recurrent_dipper_eight_class",
+    "prob_recurrent_dipper_nine_class",
+)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (str(table_name),),
+    ).fetchone()
+    return row is not None
+
+
+def _stored_review_db_schema_version(conn: sqlite3.Connection) -> int | None:
+    if not _table_exists(conn, "app_state"):
+        return None
+    row = conn.execute(
+        "SELECT value FROM app_state WHERE key = ?",
+        (REVIEW_DB_SCHEMA_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _ensure_review_content_revision_tracking(conn: sqlite3.Connection) -> None:
+    """Install revision tracking for candidate/review content only.
+
+    App state, cache metadata, SED tables, and other bookkeeping deliberately do
+    not affect this revision.  Review caches therefore refresh only when a
+    candidate or review row actually changes.
+    """
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS review_content_revision (
+            scope TEXT PRIMARY KEY,
+            revision INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO review_content_revision (scope, revision, updated_at)
+        VALUES (?, 1, ?)
+        """,
+        (REVIEW_CONTENT_REVISION_SCOPE, _utc_now()),
+    )
+    for table_name in ("candidates", "reviews"):
+        for operation in ("insert", "update", "delete"):
+            trigger_name = f"review_content_revision_{table_name}_{operation}"
+            conn.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS {trigger_name}
+                AFTER {operation.upper()} ON {table_name}
+                BEGIN
+                    UPDATE review_content_revision
+                    SET revision = revision + 1,
+                        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE scope = '{REVIEW_CONTENT_REVISION_SCOPE}';
+                END
+                """
+            )
 
 
 def _as_bool(v) -> bool:
@@ -201,6 +345,33 @@ def _is_payload_missing(value: Any) -> bool:
     return bool(missing) if isinstance(missing, (bool, np.bool_)) else False
 
 
+_REVIEW_PAYLOAD_ALIASES: dict[str, tuple[str, ...]] = {
+    "gaia_id": ("source_id_gaia",),
+    "ruwe": ("ruwe_gaia",),
+    "parallax": ("parallax_gaia",),
+    "parallax_error": ("parallax_error_gaia",),
+    "pmra": ("pmra_gaia",),
+    "pmra_error": ("pmra_error_gaia",),
+    "pmdec": ("pmdec_gaia",),
+    "pmdec_error": ("pmdec_error_gaia",),
+    "gaia_eb_period": ("period_gaia_eb_days",),
+    "gaia_eb_morph": ("period_gaia_eb_class",),
+}
+
+
+def _canonicalize_review_payload_aliases(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill canonical Review fields from known pipeline aliases."""
+    out = dict(payload)
+    for canonical, aliases in _REVIEW_PAYLOAD_ALIASES.items():
+        if not _is_payload_missing(out.get(canonical)):
+            continue
+        for alias in aliases:
+            if not _is_payload_missing(out.get(alias)):
+                out[canonical] = out[alias]
+                break
+    return out
+
+
 def _flatten_review_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return a flat review payload, unpacking any old layer/nested wrappers."""
     out: dict[str, Any] = {}
@@ -235,13 +406,8 @@ def _payload_layer_value(payload: dict[str, Any], key: str) -> Any:
 
 def _drop_payload_keys(payload: dict[str, Any], keys: set[str]) -> dict[str, Any]:
     out = _flatten_review_payload(payload)
-    clear_stats_family = any(str(key).startswith("stats_") for key in keys)
     for key in keys:
         out.pop(key, None)
-    if clear_stats_family:
-        for key in list(out):
-            if str(key).startswith("stats_"):
-                out.pop(key, None)
     return out
 
 
@@ -305,6 +471,7 @@ def _candidate_insert_tuple_from_row_dict(
     normalized = _flatten_review_payload(normalized)
     normalized = normalize_vsx_record(normalized)
     normalized = _canonicalize_wise_fields(normalized)
+    normalized = _canonicalize_review_payload_aliases(normalized)
 
     candidate_id = _normalize_large_integer_like_id(normalized.get("candidate_id"))
     if not candidate_id:
@@ -614,6 +781,31 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("periodicity_alias_matches","TEXT",    "text"),
     ("periodicity_bootstrap_sig","REAL",    "float"),
     ("periodicity_is_significant","INTEGER","bool"),
+    ("periodicity_evidence_source", "TEXT",  "text"),
+    ("periodicity_rejection_reason", "TEXT", "text"),
+    ("periodicity_status",         "TEXT",    "text"),
+    ("period_confidence",        "TEXT",    "text"),
+    ("period_method",            "TEXT",    "text"),
+    ("period_baseline_cycles",   "REAL",    "float"),
+    ("period_confidence_reason", "TEXT",    "text"),
+    ("period_native_days",       "REAL",    "float"),
+    ("period_corrected_days",    "REAL",    "float"),
+    ("period_for_fold_days",     "REAL",    "float"),
+    ("period_evidence_summary",  "TEXT",    "text"),
+    ("event_period_days",        "REAL",    "float"),
+    ("event_period_method",      "TEXT",    "text"),
+    ("event_period_n_events",    "REAL",    "float"),
+    ("event_period_is_high_confidence", "INTEGER", "bool"),
+    ("dip_run_epochs_json",      "TEXT",    "text"),
+    ("jump_run_epochs_json",     "TEXT",    "text"),
+    ("dip_epochs_source",        "TEXT",    "text"),
+    ("dip_epochs_count",         "REAL",    "float"),
+    ("long_ls_period_days",      "REAL",    "float"),
+    ("long_ls_peak_power",       "REAL",    "float"),
+    ("long_ls_fap_bootstrap",    "REAL",    "float"),
+    ("long_ls_baseline_cycles",  "REAL",    "float"),
+    ("long_ls_is_significant",   "INTEGER", "bool"),
+    ("long_ls_status",           "TEXT",    "text"),
     ("pdm_period",               "REAL",    "float"),
     ("pdm_corrected_period",     "REAL",    "float"),
     ("pdm_harmonic_factor",      "REAL",    "float"),
@@ -697,6 +889,16 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("jump_max_run_cameras",     "REAL",    "float"),
     ("jump_max_log_bf_local",    "REAL",    "float"),
     # -- dip recurrence --
+    ("dipper_recurrence_class",         "TEXT",    "select"),
+    ("dipper_recurrence_evidence",      "TEXT",    "text"),
+    ("prob_recurrent_given_dipper",      "REAL",    "float"),
+    ("prob_single_given_dipper",         "REAL",    "float"),
+    ("prob_recurrent_dipper_binary",     "REAL",    "float"),
+    ("prob_recurrent_dipper_eight_class", "REAL",   "float"),
+    ("prob_recurrent_dipper_hierarchical", "REAL",  "float"),
+    ("prob_single_dipper_hierarchical",  "REAL",    "float"),
+    ("prob_recurrent_dipper_nine_class",  "REAL",   "float"),
+    ("predicted_dipper_recurrence",      "TEXT",    "select"),
     ("dip_is_single_event",              "INTEGER", "bool"),
     ("dip_inter_event_spacing_median",   "REAL",    "float"),
     ("dip_inter_event_spacing_std",      "REAL",    "float"),
@@ -709,6 +911,43 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("jump_amplitude_consistency",       "REAL",    "float"),
     ("jump_duration_consistency",        "REAL",    "float"),
     # -- event scoring --
+    ("prob_dipper_like",         "REAL",    "float"),
+    ("prob_hierarchical_artifact_or_nonvariable", "REAL", "float"),
+    ("prob_usable_astrophysical_variable", "REAL", "float"),
+    ("prob_primary_dipper_dimming_given_usable", "REAL", "float"),
+    ("prob_primary_eb_geometric_periodic_given_usable", "REAL", "float"),
+    ("prob_primary_long_timescale_variable_given_usable", "REAL", "float"),
+    ("prob_primary_brightening_transient_given_usable", "REAL", "float"),
+    ("prob_primary_other_structured_variable_given_usable", "REAL", "float"),
+    ("prob_dipper_dimming", "REAL", "float"),
+    ("prob_eb_geometric_periodic", "REAL", "float"),
+    ("prob_long_timescale_variable", "REAL", "float"),
+    ("prob_brightening_transient", "REAL", "float"),
+    ("prob_other_structured_variable", "REAL", "float"),
+    ("prob_quasi_periodic_given_usable", "REAL", "float"),
+    ("prob_quasi_periodic_hierarchical", "REAL", "float"),
+    ("prob_microlensing_given_brightening", "REAL", "float"),
+    ("prob_microlensing_hierarchical", "REAL", "float"),
+    ("prob_long_period_variable_given_long_timescale", "REAL", "float"),
+    ("prob_long_term_variable_given_long_timescale", "REAL", "float"),
+    ("prob_long_period_variable_hierarchical", "REAL", "float"),
+    ("prob_long_term_variable_hierarchical", "REAL", "float"),
+    ("predicted_hierarchy_gate", "TEXT", "select"),
+    ("predicted_primary_morphology", "TEXT", "select"),
+    ("predicted_hierarchical_class", "TEXT", "select"),
+    ("predicted_quasi_periodic", "TEXT", "select"),
+    ("predicted_microlensing_like", "TEXT", "select"),
+    ("predicted_long_timescale_subtype", "TEXT", "select"),
+    ("prob_artifact_or_nonvariable", "REAL", "float"),
+    ("prob_artifact_or_bad_photometry", "REAL", "float"),
+    ("prob_brightening_event",   "REAL",    "float"),
+    ("prob_dipper",              "REAL",    "float"),
+    ("prob_eclipsing_binary_like", "REAL",  "float"),
+    ("prob_long_period_variable", "REAL",   "float"),
+    ("prob_long_term_variable",  "REAL",    "float"),
+    ("prob_microlensing",        "REAL",    "float"),
+    ("prob_nonvariable_or_low_snr", "REAL", "float"),
+    ("prob_quasi_periodic",      "REAL",    "float"),
     ("dipper_score",             "REAL",    "float"),
     ("dipper_n_dips",            "REAL",    "float"),
     ("dipper_n_valid_dips",      "REAL",    "float"),
@@ -717,23 +956,67 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("jumper_n_valid_jumps",     "REAL",    "float"),
     # -- stellar parameters --
     ("ruwe",                     "REAL",    "float"),
+    ("ref_epoch",                "REAL",    "float"),
+    ("astrometric_params_solved", "REAL",   "float"),
     ("radial_velocity",          "REAL",    "float"),
+    ("radial_velocity_error",    "REAL",    "float"),
     ("rv_amplitude_robust",      "REAL",    "float"),
+    ("rv_nb_transits",           "REAL",    "float"),
+    ("rv_chisq_pvalue",          "REAL",    "float"),
+    ("rv_renormalised_gof",      "REAL",    "float"),
+    ("rv_time_duration",         "REAL",    "float"),
+    ("rv_method_used",           "REAL",    "float"),
+    ("grvs_mag",                 "REAL",    "float"),
     ("teff_gspphot",             "REAL",    "float"),
     ("logg_gspphot",             "REAL",    "float"),
     ("mh_gspphot",               "REAL",    "float"),
     ("distance_gspphot",         "REAL",    "float"),
     ("parallax",                 "REAL",    "float"),
     ("parallax_error",           "REAL",    "float"),
+    ("parallax_over_error",      "REAL",    "float"),
     ("pmra",                     "REAL",    "float"),
+    ("pmra_error",               "REAL",    "float"),
     ("pmdec",                    "REAL",    "float"),
+    ("pmdec_error",              "REAL",    "float"),
+    ("parallax_pmra_corr",       "REAL",    "float"),
+    ("parallax_pmdec_corr",      "REAL",    "float"),
+    ("pmra_pmdec_corr",          "REAL",    "float"),
+    ("astrometric_excess_noise", "REAL",    "float"),
+    ("astrometric_excess_noise_sig", "REAL", "float"),
+    ("astrometric_n_good_obs_al", "REAL",   "float"),
+    ("astrometric_sigma5d_max",  "REAL",    "float"),
+    ("visibility_periods_used",  "REAL",    "float"),
+    ("ipd_frac_multi_peak",      "REAL",    "float"),
+    ("ipd_frac_odd_win",         "REAL",    "float"),
+    ("ipd_gof_harmonic_amplitude", "REAL",  "float"),
+    ("duplicated_source",        "INTEGER", "bool"),
+    ("non_single_star",          "REAL",    "float"),
+    ("phot_variable_flag",       "TEXT",    "select"),
+    ("has_epoch_photometry",     "INTEGER", "bool"),
+    ("has_epoch_rv",             "INTEGER", "bool"),
+    ("has_rvs",                  "INTEGER", "bool"),
     ("pm_total",                 "REAL",    "float"),
     ("high_pm_flag",             "INTEGER", "bool"),
+    ("gaia_fetch_schema_version", "TEXT",   "text"),
+    ("gaia_fetch_updated_at",    "TEXT",    "text"),
+    ("gaia_enrichment_status",   "TEXT",    "select"),
+    ("gaia_enrichment_source",   "TEXT",    "text"),
+    ("gaia_astrometry_complete", "INTEGER", "bool"),
+    ("gaia_banyan_input_complete", "INTEGER", "bool"),
+    ("gaia_missing_fields_json", "TEXT",    "text"),
+    ("gaia_enrichment_updated_at", "TEXT",  "text"),
     # -- photometry --
     ("phot_g_mean_mag",          "REAL",    "float"),
     ("phot_bp_mean_mag",         "REAL",    "float"),
     ("phot_rp_mean_mag",         "REAL",    "float"),
     ("bp_rp",                    "REAL",    "float"),
+    ("phot_bp_rp_excess_factor", "REAL",    "float"),
+    ("phot_bp_n_obs",            "REAL",    "float"),
+    ("phot_rp_n_obs",            "REAL",    "float"),
+    ("phot_bp_n_blended_transits", "REAL",  "float"),
+    ("phot_rp_n_blended_transits", "REAL",  "float"),
+    ("phot_bp_n_contaminated_transits", "REAL", "float"),
+    ("phot_rp_n_contaminated_transits", "REAL", "float"),
     ("mg",                       "REAL",    "float"),
     ("mg0",                      "REAL",    "float"),
     ("bprp0",                    "REAL",    "float"),
@@ -817,7 +1100,41 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("age50",                    "REAL",    "float"),
     ("mass50",                   "REAL",    "float"),
     ("banyan_field_prob",        "REAL",    "float"),
+    ("banyan_ya_prob",           "REAL",    "float"),
     ("banyan_best_assoc",        "TEXT",    "text"),
+    ("banyan_best_assoc_prob",   "REAL",    "float"),
+    ("banyan_probabilities_json", "TEXT",   "text"),
+    ("banyan_input_mode",        "TEXT",    "select"),
+    ("banyan_status",            "TEXT",    "select"),
+    ("banyan_error",             "TEXT",    "text"),
+    ("banyan_version",           "TEXT",    "text"),
+    ("banyan_adapter_version",   "TEXT",    "text"),
+    ("banyan_updated_at",        "TEXT",    "text"),
+    # -- SFR environment versus stellar-association membership --
+    ("sfr_environment_matches",  "TEXT",    "text"),
+    ("sfr_environment_consistent", "INTEGER", "bool"),
+    ("banyan_sfr_name",          "TEXT",    "text"),
+    ("banyan_sfr_prob",          "REAL",    "float"),
+    ("banyan_sfr_best_assoc",    "TEXT",    "text"),
+    ("banyan_sfr_best_assoc_prob", "REAL",  "float"),
+    ("banyan_sfr_agrees",        "INTEGER", "bool"),
+    ("sfr_catalog_member",       "INTEGER", "bool"),
+    ("sfr_catalog_match_status", "TEXT",    "select"),
+    ("sfr_catalog_name",         "TEXT",    "text"),
+    ("sfr_catalog_reference",    "TEXT",    "text"),
+    ("sfr_catalog_membership_prob", "REAL", "float"),
+    ("sfr_kinematic_name",       "TEXT",    "text"),
+    ("sfr_kinematic_method",     "TEXT",    "select"),
+    ("sfr_kinematic_consistent", "INTEGER", "bool"),
+    ("sfr_kinematic_mahalanobis_sq", "REAL", "float"),
+    ("sfr_kinematic_p_value",    "REAL",    "float"),
+    ("sfr_kinematic_n_members",  "REAL",    "float"),
+    ("sfr_membership_class",     "TEXT",    "select"),
+    ("sfr_membership_name",      "TEXT",    "text"),
+    ("sfr_membership_evidence",  "TEXT",    "select"),
+    ("sfr_membership_status",    "TEXT",    "select"),
+    ("sfr_membership_threshold", "REAL",    "float"),
+    ("sfr_membership_version",   "TEXT",    "text"),
     # -- crossmatch details --
     ("vsx_class",                "TEXT",    "select"),
     ("vsx_sep_arcsec",           "REAL",    "float"),
@@ -913,6 +1230,83 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("gaia_eb_period",           "REAL",    "float"),
     ("gaia_eb_morph",            "TEXT",    "text"),
     ("gaia_eb_global_ranking",   "REAL",    "float"),
+    ("gaia_eb_solution_id",       "TEXT",    "text"),
+    ("gaia_eb_period_error",      "REAL",    "float"),
+    ("gaia_eb_reference_time",    "REAL",    "float"),
+    ("gaia_eb_frequency",         "REAL",    "float"),
+    ("gaia_eb_frequency_error",   "REAL",    "float"),
+    ("gaia_eb_model_type",        "TEXT",    "text"),
+    ("gaia_eb_reduced_chi2",      "REAL",    "float"),
+    ("gaia_eb_geom_model_reference_level", "REAL", "float"),
+    ("gaia_eb_geom_model_reference_level_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_phase", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_phase_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_sigma", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_sigma_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_depth", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian1_depth_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_phase", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_phase_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_sigma", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_sigma_error", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_depth", "REAL", "float"),
+    ("gaia_eb_geom_model_gaussian2_depth_error", "REAL", "float"),
+    ("gaia_eb_geom_model_cosine_half_period_amplitude", "REAL", "float"),
+    ("gaia_eb_geom_model_cosine_half_period_amplitude_error", "REAL", "float"),
+    ("gaia_eb_geom_model_cosine_half_period_phase", "REAL", "float"),
+    ("gaia_eb_geom_model_cosine_half_period_phase_error", "REAL", "float"),
+    ("gaia_eb_primary_phase",     "REAL",    "float"),
+    ("gaia_eb_primary_phase_error", "REAL", "float"),
+    ("gaia_eb_primary_duration",  "REAL",    "float"),
+    ("gaia_eb_primary_duration_error", "REAL", "float"),
+    ("gaia_eb_primary_depth",     "REAL",    "float"),
+    ("gaia_eb_primary_depth_error", "REAL", "float"),
+    ("gaia_eb_secondary_phase",   "REAL",    "float"),
+    ("gaia_eb_secondary_phase_error", "REAL", "float"),
+    ("gaia_eb_secondary_duration", "REAL",   "float"),
+    ("gaia_eb_secondary_duration_error", "REAL", "float"),
+    ("gaia_eb_secondary_depth",   "REAL",    "float"),
+    ("gaia_eb_secondary_depth_error", "REAL", "float"),
+    ("gaia_eb_depth_ratio",       "REAL",    "float"),
+    ("gaia_eb_eclipse_phase_separation", "REAL", "float"),
+    ("gaia_eb_two_eclipses",      "INTEGER", "bool"),
+    # -- Gaia NSS and evidence-family summary --
+    ("gaia_nss_solution_count",   "REAL",    "float"),
+    ("gaia_nss_solution_types",   "TEXT",    "text"),
+    ("gaia_nss_solution_type",    "TEXT",    "text"),
+    ("gaia_nss_period",           "REAL",    "float"),
+    ("gaia_nss_period_error",     "REAL",    "float"),
+    ("gaia_nss_has_sb1",          "INTEGER", "bool"),
+    ("gaia_nss_has_sb2",          "INTEGER", "bool"),
+    ("gaia_nss_has_spectroscopic", "INTEGER", "bool"),
+    ("gaia_nss_has_astrometric",  "INTEGER", "bool"),
+    ("gaia_nss_has_eclipsing",    "INTEGER", "bool"),
+    ("gaia_nss_has_eclipsing_spectro", "INTEGER", "bool"),
+    ("gaia_nss_photometric_duplicate_of_eb", "INTEGER", "bool"),
+    ("gaia_nss_semi_amplitude_primary", "REAL", "float"),
+    ("gaia_nss_semi_amplitude_secondary", "REAL", "float"),
+    ("gaia_nss_mass_ratio",       "REAL",    "float"),
+    ("gaia_nss_inclination",      "REAL",    "float"),
+    ("gaia_rv_variable_flag",     "INTEGER", "bool"),
+    ("gaia_rv_large_amplitude_flag", "INTEGER", "bool"),
+    ("gaia_astrometric_anomaly_flag", "INTEGER", "bool"),
+    ("gaia_blend_contamination_flag", "INTEGER", "bool"),
+    ("gaia_binary_reference_period", "REAL", "float"),
+    ("gaia_binary_reference_period_source", "TEXT", "select"),
+    ("gaia_binary_period_n_independent", "REAL", "float"),
+    ("gaia_binary_period_agreement", "INTEGER", "bool"),
+    ("gaia_binary_period_agreement_sources", "TEXT", "text"),
+    ("gaia_binary_period_conflict", "INTEGER", "bool"),
+    ("gaia_binary_period_conflict_sources", "TEXT", "text"),
+    ("gaia_binary_evidence_families", "TEXT", "text"),
+    ("gaia_binary_evidence_version", "TEXT", "select"),
+    ("gaia_binary_evidence_score_kind", "TEXT", "select"),
+    ("gaia_binary_n_evidence_families", "REAL", "float"),
+    ("gaia_binary_evidence_level", "TEXT", "select"),
+    ("gaia_binary_evidence_score", "REAL", "float"),
+    ("gaia_eb_evidence_level",    "TEXT",    "select"),
+    ("gaia_eb_evidence_score",    "REAL",    "float"),
+    ("gaia_binary_evidence_summary", "TEXT", "text"),
     # -- vetting details: Gaia epoch --
     ("gaia_epoch_available",     "INTEGER", "bool"),
     ("gaia_epoch_n_obs",         "REAL",    "float"),
@@ -969,6 +1363,10 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("atlas_n_det_orange",       "REAL",    "float"),
     ("atlas_cyan_range",         "REAL",    "float"),
     ("atlas_orange_range",       "REAL",    "float"),
+    ("atlas_preprocess_version", "TEXT",    "text"),
+    ("atlas_n_raw",              "INTEGER", "float"),
+    ("atlas_n_good",             "INTEGER", "float"),
+    ("atlas_n_rejected",         "INTEGER", "float"),
     # -- vetting details: NEOWISE --
     ("neowise_n_epochs",         "REAL",    "float"),
     ("neowise_w1_range",         "REAL",    "float"),
@@ -977,6 +1375,12 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("ztf_lc_n_det",             "INTEGER", "float"),
     ("ztf_lc_g_range",           "REAL",    "float"),
     ("ztf_lc_r_range",           "REAL",    "float"),
+    # -- external light curves: ZTF forced difference photometry --
+    ("ztf_forced_lc_n_epochs",   "INTEGER", "float"),
+    ("ztf_forced_lc_n_good",     "INTEGER", "float"),
+    ("ztf_forced_lc_n_zg",       "INTEGER", "float"),
+    ("ztf_forced_lc_n_zr",       "INTEGER", "float"),
+    ("ztf_forced_lc_n_zi",       "INTEGER", "float"),
     # -- external light curves: Gaia epoch --
     ("gaia_epoch_lc_n_g",        "INTEGER", "float"),
     ("gaia_epoch_lc_g_range",    "REAL",    "float"),
@@ -1016,8 +1420,27 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("vvvx_virac_ks_range",      "REAL",    "float"),
     # -- external light curves: Pan-STARRS --
     ("ps1_lc_n_points",          "INTEGER", "float"),
+    # -- external light curves: legacy transit surveys --
+    ("superwasp_lc_n_points",    "INTEGER", "float"),
+    ("superwasp_lc_time_span_days", "REAL", "float"),
+    ("superwasp_lc_state",       "TEXT",    "select"),
+    ("kelt_lc_n_points",         "INTEGER", "float"),
+    ("kelt_lc_time_span_days",   "REAL",    "float"),
+    ("kelt_lc_state",            "TEXT",    "select"),
+    ("nsvs_lc_n_points",         "INTEGER", "float"),
+    ("nsvs_lc_time_span_days",   "REAL",    "float"),
+    ("nsvs_lc_state",            "TEXT",    "select"),
+    ("asas3_lc_n_points",        "INTEGER", "float"),
+    ("asas3_lc_time_span_days",  "REAL",    "float"),
+    ("asas3_lc_state",           "TEXT",    "select"),
     # -- external light curves: CRTS --
     ("crts_lc_n_points",         "INTEGER", "float"),
+    ("crts_lc_time_span_days",   "REAL",    "float"),
+    ("crts_lc_state",            "TEXT",    "select"),
+    # -- external light curves: DASCH --
+    ("dasch_lc_n_points",        "INTEGER", "float"),
+    ("dasch_lc_time_span_days",  "REAL",    "float"),
+    ("dasch_lc_state",           "TEXT",    "select"),
     # -- multi-survey event-relative features --
     *MS_FEATURE_COLUMN_SPECS,
     # -- vetting details: other --
@@ -1061,6 +1484,11 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("failed_signal_amplitude",  "INTEGER", "bool"),
     ("bad_cameras_filtered",     "INTEGER", "bool"),
     # -- light curve statistics (from stats.py / enrichment) --
+    ("stats_photometry_band_mode",                  "TEXT", "text"),
+    ("stats_photometry_band_alignment",             "TEXT", "text"),
+    ("stats_photometry_g_points",                   "INTEGER", "float"),
+    ("stats_photometry_v_points",                   "INTEGER", "float"),
+    ("stats_photometry_v_minus_g_offset_mag",       "REAL", "float"),
     ("stats_file_points_total",                    "REAL", "float"),
     ("stats_file_points_kept_after_filter",         "REAL", "float"),
     ("stats_jd_start",                             "REAL", "float"),
@@ -1085,6 +1513,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_photometry_p84_mag",                   "REAL", "float"),
     ("stats_photometry_p95_mag",                   "REAL", "float"),
     ("stats_clipped_mean_mag_3sigma_about_median", "REAL", "float"),
+    ("stats_clipped_mean_mag_3sigma_about_median_g", "REAL", "float"),
+    ("stats_clipped_mean_mag_3sigma_about_median_vband", "REAL", "float"),
     ("stats_clipped_std_mag_3sigma_about_median",  "REAL", "float"),
     ("stats_n_outliers_removed_robust_3sigma",     "REAL", "float"),
     ("stats_error_and_snr_stats_error_mean",       "REAL", "float"),
@@ -1097,6 +1527,9 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_variability_reduced_chi2_vs_constant", "REAL", "float"),
     ("stats_variability_von_neumann_ratio",        "REAL", "float"),
     ("stats_variability_roms",                     "REAL", "float"),
+    ("stats_variability_sokolovsky_v",             "REAL", "float"),
+    ("stats_variability_sokolovsky_v_g",           "REAL", "float"),
+    ("stats_variability_sokolovsky_v_vband",       "REAL", "float"),
     ("stats_variability_lag1_autocorr",             "REAL", "float"),
     ("stats_variability_stetson_I",                "REAL", "float"),
     ("stats_variability_stetson_J",                "REAL", "float"),
@@ -1117,6 +1550,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_variability_quasi_periodicity_resid_scatter", "REAL", "float"),
     ("stats_variability_quasi_periodicity_scatter_ratio", "REAL", "float"),
     ("stats_variability_quasi_periodicity_status", "TEXT", "text"),
+    ("stats_variability_quasi_periodicity_evaluation", "TEXT", "text"),
+    ("stats_variability_quasi_periodicity_n_folds", "REAL", "float"),
     ("stats_variability_periodic_feature_period_days", "REAL", "float"),
     ("stats_variability_periodic_feature_period_source", "TEXT", "text"),
     ("stats_variability_string_length_resid_total", "REAL", "float"),
@@ -1213,6 +1648,7 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- stochastic model features --
     ("stats_gp_drw_sigma",                         "REAL", "float"),
     ("stats_gp_drw_tau",                           "REAL", "float"),
+    ("stats_gp_drw_model",                         "TEXT", "text"),
     ("stats_iar_phi",                              "REAL", "float"),
     ("stats_mhps_high",                            "REAL", "float"),
     ("stats_mhps_low",                             "REAL", "float"),
@@ -1222,6 +1658,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("stats_camera_loo_corr_min",                    "REAL", "float"),
     ("stats_camera_loo_corr_median",                 "REAL", "float"),
     ("stats_camera_loo_rms_max",                     "REAL", "float"),
+    ("stats_compute_status",                        "TEXT", "text"),
+    ("stats_compute_error",                         "TEXT", "text"),
     # -- derived statistics and color-magnitude quantities --
     *((col, "REAL", "float") for col in DERIVED_FEATURE_COLUMNS),
     # -- LTV: long-term variability core metrics --
@@ -1354,6 +1792,7 @@ _TEXT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "text"}
 _SELECT_COLS = {c[0] for c in _CANDIDATE_COLUMNS if c[2] == "select"}
 _COL_TYPE_MAP = {c[0]: c[2] for c in _CANDIDATE_COLUMNS}
 _FALSE_INCLUDES_UNSET_BOOL_COLS = {
+    "high_pm_flag",
     "microlens_match",
     "nearby_vsx_dipper_contaminant",
     "vetting_likely_known",
@@ -1434,6 +1873,107 @@ def get_distinct_values(
         if val_str and val_str not in ("None", "NaN", "nan"):
             cleaned.add(val_str)
     return sorted(list(cleaned))
+
+
+def get_distinct_values_bulk(
+    conn: sqlite3.Connection,
+    columns: list[str] | tuple[str, ...],
+    *,
+    source_path: str | None = None,
+    source_paths: list[str] | None = None,
+    source_path_fallback_like_any: list[str] | None = None,
+    source_path_like: str | None = None,
+    source_path_like_any: list[str] | None = None,
+) -> dict[str, list[str]]:
+    """Return distinct values for many filter columns with one candidate scan.
+
+    Sidebar hydration previously issued one ``SELECT DISTINCT`` per field.  The
+    review schema has more than one hundred categorical/text filters, so opening
+    the sidebar repeatedly scanned the wide candidates table.  Fetching just the
+    requested columns in one pass is substantially cheaper and keeps ordinary UI
+    hydration read-only.
+    """
+    valid_columns: list[str] = []
+    seen: set[str] = set()
+    for column in columns:
+        column = str(column)
+        is_review_col = column in _REVIEW_SELECT_COLS or column in _REVIEW_TEXT_COLS
+        if column in seen or (
+            column not in _SELECT_COLS and column not in _TEXT_COLS and not is_review_col
+        ):
+            continue
+        seen.add(column)
+        valid_columns.append(column)
+
+    if not valid_columns:
+        return {}
+
+    where: list[str] = []
+    params: list[str] = []
+    source_scope_terms: list[str] = []
+    source_scope_params: list[str] = []
+    if source_path:
+        source_scope_terms.append("c.source_path = ?")
+        source_scope_params.append(str(source_path))
+    if source_paths:
+        source_paths = [str(p) for p in source_paths if str(p)]
+        if source_paths:
+            placeholders = ",".join(["?"] * len(source_paths))
+            source_scope_terms.append(f"c.source_path IN ({placeholders})")
+            source_scope_params.extend(source_paths)
+    if source_path_fallback_like_any:
+        fallback_values = [str(v) for v in source_path_fallback_like_any if str(v)]
+        if fallback_values:
+            source_scope_terms.extend(["c.source_path LIKE ?"] * len(fallback_values))
+            source_scope_params.extend([f"%{value}%" for value in fallback_values])
+    if source_scope_terms:
+        where.append("(" + " OR ".join(source_scope_terms) + ")")
+        params.extend(source_scope_params)
+    if source_path_like:
+        where.append("c.source_path LIKE ?")
+        params.append(f"%{str(source_path_like)}%")
+    if source_path_like_any:
+        like_values = [str(v) for v in source_path_like_any if str(v)]
+        if like_values:
+            where.append("(" + " OR ".join(["c.source_path LIKE ?"] * len(like_values)) + ")")
+            params.extend([f"%{value}%" for value in like_values])
+
+    expressions = [
+        _review_filter_expr(column)
+        if column in _REVIEW_SELECT_COLS or column in _REVIEW_TEXT_COLS
+        else f"c.{column}"
+        for column in valid_columns
+    ]
+    sql = (
+        f"SELECT {', '.join(expressions)} FROM candidates c "
+        "LEFT JOIN reviews r ON r.candidate_id = c.candidate_id"
+    )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    distinct: list[set[str]] = [set() for _ in valid_columns]
+    cursor = conn.execute(sql, params)
+    while True:
+        rows = cursor.fetchmany(512)
+        if not rows:
+            break
+        for row in rows:
+            for index, value in enumerate(row):
+                if value is None:
+                    continue
+                if isinstance(value, (bytes, bytearray)):
+                    try:
+                        value = value.decode("utf-8", errors="replace")
+                    except Exception:
+                        value = str(value)
+                value_text = str(value).strip()
+                if value_text and value_text not in {"None", "NaN", "nan"}:
+                    distinct[index].add(value_text)
+
+    return {
+        column: sorted(values)
+        for column, values in zip(valid_columns, distinct)
+    }
 
 
 def get_numeric_bounds(
@@ -1598,7 +2138,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         f"""
         CREATE TABLE IF NOT EXISTS reviews (
             candidate_id TEXT PRIMARY KEY,
-            interest_score INTEGER,
             event_class TEXT DEFAULT 'unclassified',
             review_pass INTEGER,
             notes TEXT,
@@ -1776,22 +2315,61 @@ def init_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_candidate_known_sep
+        ON catalog_neighbors(candidate_id, is_known_variable, sep_arcsec)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_catalog_neighbors_candidate_dipper_sep
+        ON catalog_neighbors(candidate_id, is_dipper_contaminant, sep_arcsec)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS sed_model_fits (
             candidate_id TEXT PRIMARY KEY,
             model_family TEXT,
+            fit_version TEXT,
+            photometry_method TEXT,
+            extinction_law TEXT,
             teff_k REAL,
+            teff_err_k REAL,
             logg REAL,
             z REAL,
             av_fixed REAL,
+            av_fit REAL,
+            av_err REAL,
+            rv REAL,
+            apparent_scale REAL,
             scale REAL,
             luminosity_lsun REAL,
             radius_rsun REAL,
             chi2 REAL,
             reduced_chi2 REAL,
             n_fit_points INTEGER,
+            n_available_points INTEGER,
+            n_rejected_points INTEGER,
             fit_lambda_min REAL,
             fit_lambda_max REAL,
             fit_bands_json TEXT,
+            priors_json TEXT,
+            fit_param_names_json TEXT,
+            fit_param_values_json TEXT,
+            fit_covariance_json TEXT,
+            fit_covariance_status TEXT,
+            robust_objective REAL,
+            response_manifest_hash TEXT,
+            measurement_set_hash TEXT,
+            candidate_context_hash TEXT,
+            calibration_manifest_hash TEXT,
+            input_policy_manifest_hash TEXT,
+            fit_recipe_hash TEXT,
+            model_grid_hash TEXT,
+            model_grid_provenance_json TEXT,
+            fit_run_hash TEXT,
+            fit_run_id TEXT,
+            boundary_flags TEXT,
             status TEXT,
             warning TEXT,
             FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
@@ -1805,19 +2383,46 @@ def init_db(conn: sqlite3.Connection) -> None:
     sed_model_fit_column_defs = {
         "candidate_id": "TEXT",
         "model_family": "TEXT",
+        "fit_version": "TEXT",
+        "photometry_method": "TEXT",
+        "extinction_law": "TEXT",
         "teff_k": "REAL",
+        "teff_err_k": "REAL",
         "logg": "REAL",
         "z": "REAL",
         "av_fixed": "REAL",
+        "av_fit": "REAL",
+        "av_err": "REAL",
+        "rv": "REAL",
+        "apparent_scale": "REAL",
         "scale": "REAL",
         "luminosity_lsun": "REAL",
         "radius_rsun": "REAL",
         "chi2": "REAL",
         "reduced_chi2": "REAL",
         "n_fit_points": "INTEGER",
+        "n_available_points": "INTEGER",
+        "n_rejected_points": "INTEGER",
         "fit_lambda_min": "REAL",
         "fit_lambda_max": "REAL",
         "fit_bands_json": "TEXT",
+        "priors_json": "TEXT",
+        "fit_param_names_json": "TEXT",
+        "fit_param_values_json": "TEXT",
+        "fit_covariance_json": "TEXT",
+        "fit_covariance_status": "TEXT",
+        "robust_objective": "REAL",
+        "response_manifest_hash": "TEXT",
+        "measurement_set_hash": "TEXT",
+        "candidate_context_hash": "TEXT",
+        "calibration_manifest_hash": "TEXT",
+        "input_policy_manifest_hash": "TEXT",
+        "fit_recipe_hash": "TEXT",
+        "model_grid_hash": "TEXT",
+        "model_grid_provenance_json": "TEXT",
+        "fit_run_hash": "TEXT",
+        "fit_run_id": "TEXT",
+        "boundary_flags": "TEXT",
         "status": "TEXT",
         "warning": "TEXT",
     }
@@ -1834,10 +2439,18 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS sed_model_curves (
             candidate_id TEXT NOT NULL,
             model_family TEXT,
+            fit_version TEXT,
+            fit_run_hash TEXT,
+            fit_run_id TEXT,
             wavelength_angstrom REAL NOT NULL,
             lambda_l_lambda REAL,
             flux_lambda REAL,
+            lambda_l_lambda_intrinsic REAL,
+            lambda_l_lambda_observed REAL,
+            flux_lambda_intrinsic REAL,
+            flux_lambda_observed REAL,
             teff_k REAL,
+            av_fit REAL,
             scale REAL,
             FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
         )
@@ -1850,10 +2463,18 @@ def init_db(conn: sqlite3.Connection) -> None:
     sed_model_curve_column_defs = {
         "candidate_id": "TEXT",
         "model_family": "TEXT",
+        "fit_version": "TEXT",
+        "fit_run_hash": "TEXT",
+        "fit_run_id": "TEXT",
         "wavelength_angstrom": "REAL",
         "lambda_l_lambda": "REAL",
         "flux_lambda": "REAL",
+        "lambda_l_lambda_intrinsic": "REAL",
+        "lambda_l_lambda_observed": "REAL",
+        "flux_lambda_intrinsic": "REAL",
+        "flux_lambda_observed": "REAL",
         "teff_k": "REAL",
+        "av_fit": "REAL",
         "scale": "REAL",
     }
     for col, dtype in sed_model_curve_column_defs.items():
@@ -1874,6 +2495,143 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_sed_model_curves_candidate
         ON sed_model_curves(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sed_model_points (
+            candidate_id TEXT NOT NULL,
+            fit_version TEXT NOT NULL,
+            fit_run_hash TEXT,
+            fit_run_id TEXT,
+            measurement_id TEXT,
+            normalization_version TEXT,
+            source TEXT NOT NULL,
+            band TEXT NOT NULL,
+            fit_role TEXT,
+            used INTEGER DEFAULT 0,
+            exclusion_reason TEXT,
+            prediction_status TEXT,
+            prediction_reason TEXT,
+            observed_flux_nu_jy REAL,
+            observed_flux_nu_jy_err REAL,
+            observed_flux_lambda REAL,
+            observed_flux_lambda_err REAL,
+            observed_lambda_l_lambda REAL,
+            observed_lambda_l_lambda_err REAL,
+            model_flux_nu_jy REAL,
+            model_flux_nu_jy_intrinsic REAL,
+            observed_mag REAL,
+            model_mag REAL,
+            mag_system TEXT,
+            residual_sigma REAL,
+            lambda_eff_angstrom REAL,
+            lambda_pivot_angstrom REAL,
+            lambda_mean_angstrom REAL,
+            lambda_nominal_angstrom REAL,
+            lambda_reference_angstrom REAL,
+            lambda_isophotal_angstrom REAL,
+            plot_lambda_angstrom REAL,
+            plot_lambda_kind TEXT,
+            model_flux_lambda REAL,
+            model_flux_lambda_intrinsic REAL,
+            model_lambda_l_lambda REAL,
+            model_lambda_l_lambda_intrinsic REAL,
+            svo_filter_id TEXT,
+            response_hash TEXT,
+            calibration_id TEXT,
+            calibration_hash TEXT,
+            normalization_hash TEXT,
+            normalization_method TEXT,
+            normalization_provenance_json TEXT,
+            passband_fidelity TEXT,
+            fit_policy TEXT,
+            quality_flags TEXT,
+            fit_sigma_log REAL,
+            fit_sigma_log_stat REAL,
+            fit_sigma_log_systematic REAL,
+            input_hash TEXT,
+            correlation_group TEXT,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    existing_sed_model_point_lower = {
+        str(row[1]).lower()
+        for row in conn.execute("PRAGMA table_info(sed_model_points)").fetchall()
+    }
+    sed_model_point_column_defs = {
+        "candidate_id": "TEXT",
+        "fit_version": "TEXT",
+        "fit_run_hash": "TEXT",
+        "fit_run_id": "TEXT",
+        "measurement_id": "TEXT",
+        "normalization_version": "TEXT",
+        "source": "TEXT",
+        "band": "TEXT",
+        "fit_role": "TEXT",
+        "used": "INTEGER DEFAULT 0",
+        "exclusion_reason": "TEXT",
+        "prediction_status": "TEXT",
+        "prediction_reason": "TEXT",
+        "observed_flux_nu_jy": "REAL",
+        "observed_flux_nu_jy_err": "REAL",
+        "observed_flux_lambda": "REAL",
+        "observed_flux_lambda_err": "REAL",
+        "observed_lambda_l_lambda": "REAL",
+        "observed_lambda_l_lambda_err": "REAL",
+        "model_flux_nu_jy": "REAL",
+        "model_flux_nu_jy_intrinsic": "REAL",
+        "observed_mag": "REAL",
+        "model_mag": "REAL",
+        "mag_system": "TEXT",
+        "residual_sigma": "REAL",
+        "lambda_eff_angstrom": "REAL",
+        "lambda_pivot_angstrom": "REAL",
+        "lambda_mean_angstrom": "REAL",
+        "lambda_nominal_angstrom": "REAL",
+        "lambda_reference_angstrom": "REAL",
+        "lambda_isophotal_angstrom": "REAL",
+        "plot_lambda_angstrom": "REAL",
+        "plot_lambda_kind": "TEXT",
+        "model_flux_lambda": "REAL",
+        "model_flux_lambda_intrinsic": "REAL",
+        "model_lambda_l_lambda": "REAL",
+        "model_lambda_l_lambda_intrinsic": "REAL",
+        "svo_filter_id": "TEXT",
+        "response_hash": "TEXT",
+        "calibration_id": "TEXT",
+        "calibration_hash": "TEXT",
+        "normalization_hash": "TEXT",
+        "normalization_method": "TEXT",
+        "normalization_provenance_json": "TEXT",
+        "passband_fidelity": "TEXT",
+        "fit_policy": "TEXT",
+        "quality_flags": "TEXT",
+        "fit_sigma_log": "REAL",
+        "fit_sigma_log_stat": "REAL",
+        "fit_sigma_log_systematic": "REAL",
+        "input_hash": "TEXT",
+        "correlation_group": "TEXT",
+    }
+    for col, dtype in sed_model_point_column_defs.items():
+        if col.lower() not in existing_sed_model_point_lower:
+            try:
+                conn.execute(f"ALTER TABLE sed_model_points ADD COLUMN {col} {dtype}")
+                existing_sed_model_point_lower.add(col.lower())
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sed_model_points_candidate
+        ON sed_model_points(candidate_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_sed_model_points_measurement
+        ON sed_model_points(measurement_id)
         """
     )
     conn.execute(
@@ -2119,20 +2877,189 @@ def init_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column name" not in str(e).lower():
                     raise
 
+    # Schema v6 has exactly one 1--4 review-score column.  Older databases
+    # stored those integers in interest_score and carried a second, unused
+    # classification_confidence column.  Prefer the original integers, use a
+    # numeric/categorical confidence value only when the original is missing,
+    # then remove the duplicate column and rename the integer column.
+    review_columns = {
+        str(row[1]).lower(): str(row[1])
+        for row in conn.execute("PRAGMA table_info(reviews)").fetchall()
+    }
+    legacy_score_col = review_columns.get("interest_score")
+    confidence_col = review_columns.get("classification_confidence")
+    if legacy_score_col is not None:
+        if confidence_col is not None:
+            conn.execute(
+                f"""
+                UPDATE reviews
+                SET {legacy_score_col} = COALESCE(
+                    {legacy_score_col},
+                    CASE LOWER(TRIM(CAST({confidence_col} AS TEXT)))
+                        WHEN '1' THEN 1
+                        WHEN '2' THEN 2
+                        WHEN '3' THEN 3
+                        WHEN '4' THEN 4
+                        WHEN 'morphology_only' THEN 1
+                        WHEN 'possible' THEN 2
+                        WHEN 'likely' THEN 3
+                        WHEN 'secure' THEN 4
+                    END
+                )
+                """
+            )
+            conn.execute(f"ALTER TABLE reviews DROP COLUMN {confidence_col}")
+        conn.execute(
+            f"ALTER TABLE reviews RENAME COLUMN {legacy_score_col} TO classification_confidence"
+        )
+
+    # Schema v5 removes the old synthetic ``lsp_*`` compatibility values from
+    # candidate rows.  Match the complete alias signature so an independently
+    # computed Lomb--Scargle result (which has a finite lsp_power or differs
+    # from the selected PDM/CE solution) is never erased.  A fresh periodicity
+    # run will repopulate these columns with real Lomb--Scargle measurements.
+    conn.execute(
+        """
+        UPDATE candidates
+        SET lsp_period = NULL,
+            lsp_bootstrap_sig = NULL,
+            lsp_is_alias = NULL,
+            lsp_is_significant = NULL
+        WHERE lsp_power IS NULL
+          AND lsp_period IS NOT NULL
+          AND lsp_period IS periodicity_period
+          AND lsp_bootstrap_sig IS periodicity_bootstrap_sig
+          AND lsp_is_alias IS periodicity_alias_flag
+          AND lsp_is_significant IS periodicity_is_significant
+        """
+    )
+
+    _ensure_review_content_revision_tracking(conn)
+
+    # The provenance-preserving SED schema is additive.  Keep its definition in
+    # a focused module so the legacy review tables remain available throughout
+    # the v2 -> v3 shadow migration.
+    from malca.review.sed_storage import ensure_sed_storage_schema
+
+    ensure_sed_storage_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO app_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        WHERE app_state.value IS NOT excluded.value
+        """,
+        (REVIEW_DB_SCHEMA_KEY, str(REVIEW_DB_SCHEMA_VERSION), _utc_now()),
+    )
     conn.commit()
 
 
-def db_connect(db_path: Path) -> sqlite3.Connection:
+def db_connect(
+    db_path: Path,
+    *,
+    initialize_if_missing: bool = True,
+) -> sqlite3.Connection:
+    """Open and configure a review SQLite connection.
+
+    Existing databases are never migrated here.  ``initialize_if_missing`` is
+    retained only so established callers can create a brand-new review DB in a
+    single step; application startup performs existing-schema migration via
+    :func:`ensure_review_db_schema`.
+    """
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
         str(db_path),
         timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
         check_same_thread=False,
     )
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
-    init_db(conn)
+    if initialize_if_missing and not _table_exists(conn, "candidates"):
+        init_db(conn)
     return conn
+
+
+def ensure_review_db_schema(db_path: str | Path) -> bool:
+    """Migrate a review DB once when its stored schema version is outdated.
+
+    Returns ``True`` when initialization/migration ran and ``False`` when the
+    database was already current.  The current-schema path performs no write.
+    """
+
+    path = Path(db_path).expanduser()
+    with db_connect(path, initialize_if_missing=False) as conn:
+        stored_version = _stored_review_db_schema_version(conn)
+        if stored_version == REVIEW_DB_SCHEMA_VERSION:
+            return False
+        if stored_version is not None and stored_version > REVIEW_DB_SCHEMA_VERSION:
+            raise RuntimeError(
+                "This MALCA build only understands review DB schema "
+                f"{REVIEW_DB_SCHEMA_VERSION}, but the database is version {stored_version}"
+            )
+        init_db(conn)
+        return True
+
+
+def validate_review_db_integrity(db_path: str | Path) -> dict[str, object]:
+    """Run expensive review/SED integrity checks only when explicitly asked."""
+
+    from malca.review.sed_storage import validate_sed_storage_integrity
+
+    path = Path(db_path).expanduser()
+    with db_connect(path, initialize_if_missing=False) as conn:
+        quick_check_rows = conn.execute("PRAGMA quick_check").fetchall()
+        quick_check = [str(row[0]) for row in quick_check_rows]
+        if quick_check != ["ok"]:
+            raise sqlite3.IntegrityError(
+                "SQLite quick_check failed: " + "; ".join(quick_check[:10])
+            )
+        foreign_key_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if foreign_key_violations:
+            preview = "; ".join(str(tuple(row)) for row in foreign_key_violations[:10])
+            raise sqlite3.IntegrityError("SQLite foreign-key violations: " + preview)
+        validate_sed_storage_integrity(conn)
+        return {
+            "path": str(path.resolve()),
+            "quick_check": "ok",
+            "foreign_key_violations": 0,
+            "review_schema_version": _stored_review_db_schema_version(conn),
+        }
+
+
+def review_content_signature(db_path: str | Path) -> str:
+    """Return a cache signature changed only by candidate/review row writes."""
+
+    path = Path(db_path).expanduser()
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    try:
+        uri = resolved.as_uri() + "?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=5.0) as conn:
+            row = conn.execute(
+                "SELECT revision FROM review_content_revision WHERE scope = ?",
+                (REVIEW_CONTENT_REVISION_SCOPE,),
+            ).fetchone()
+        if row is not None:
+            return f"{resolved}|content:{int(row[0])}"
+    except Exception:
+        pass
+
+    # Compatibility fallback for hand-built/legacy DBs not yet migrated.
+    parts = [str(resolved)]
+    for suffix, label in (("", "db"), ("-wal", "wal")):
+        candidate = resolved if not suffix else Path(f"{resolved}{suffix}")
+        try:
+            stat = candidate.stat()
+            parts.append(f"{label}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
+        except Exception:
+            parts.append(f"{label}:missing")
+    return "|".join(parts)
 
 
 def save_app_state(conn: sqlite3.Connection, key: str, value: str) -> None:
@@ -2452,10 +3379,49 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
     select_filter_mode = str(filters.get("select_filter_mode") or "exclude").strip().lower()
     if select_filter_mode not in {"include", "exclude"}:
         select_filter_mode = "exclude"
+    select_filter_logic = str(filters.get("select_filter_logic") or "and").strip().lower()
+    if select_filter_logic not in {"and", "or"}:
+        select_filter_logic = "and"
 
     # --- review status ---
     if filters.get('only_unreviewed'):
         where.append("(r.workflow_status IS NULL OR r.workflow_status='unreviewed')")
+    workflow_status_exact = str(
+        filters.get("workflow_status_exact") or ""
+    ).strip()
+    if workflow_status_exact:
+        where.append("(COALESCE(r.workflow_status, 'unreviewed') = ?)")
+        params.append(workflow_status_exact)
+
+    # Manifest-backed TUI external-photometry availability. JSON membership
+    # keeps even large campaign ID sets within SQLite's bound-parameter limit.
+    candidate_id_membership = filters.get("candidate_id_membership")
+    if isinstance(candidate_id_membership, dict):
+        if "required" in candidate_id_membership:
+            required_ids = [
+                str(value).strip()
+                for value in (candidate_id_membership.get("required") or [])
+                if str(value).strip()
+            ]
+            if required_ids:
+                where.append(
+                    "c.candidate_id IN "
+                    "(SELECT CAST(value AS TEXT) FROM json_each(?))"
+                )
+                params.append(json.dumps(required_ids))
+            else:
+                where.append("(0 = 1)")
+        excluded_ids = [
+            str(value).strip()
+            for value in (candidate_id_membership.get("excluded") or [])
+            if str(value).strip()
+        ]
+        if excluded_ids:
+            where.append(
+                "c.candidate_id NOT IN "
+                "(SELECT CAST(value AS TEXT) FROM json_each(?))"
+            )
+            params.append(json.dumps(excluded_ids))
 
     # --- failed_any shortcut ---
     if filters.get('require_failed_any_false'):
@@ -2492,6 +3458,42 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
             """.strip()
         )
         params.append(catalog_neighbor_radius)
+
+    # Campaign-local TUI catalog menus maintain explicit per-type keep/exclude
+    # decisions.  These exclusions are independent of the legacy select-filter
+    # include/exclude mode used by the browser and taxonomy controls.
+    catalog_type_exclusions = filters.get("catalog_type_exclusions")
+    if isinstance(catalog_type_exclusions, dict):
+        allowed_catalog_columns = {
+            "vsx_class",
+            "gaia_var_class",
+            "asassn_var_type",
+            "simbad_otype",
+            "ztf_var_type",
+            "microlens_catalog",
+            "tns_type",
+            "alerce_lc_class",
+            "yso_class",
+        }
+        for column in sorted(allowed_catalog_columns):
+            raw_values = catalog_type_exclusions.get(column)
+            if isinstance(raw_values, str):
+                raw_values = [raw_values]
+            if not isinstance(raw_values, (list, tuple, set)):
+                continue
+            values = [
+                str(value).strip()
+                for value in raw_values
+                if str(value).strip()
+            ]
+            if not values:
+                continue
+            placeholders = ",".join(["?"] * len(values))
+            where.append(
+                f"(c.{column} IS NULL OR TRIM(c.{column}) = '' "
+                f"OR TRIM(c.{column}) NOT IN ({placeholders}))"
+            )
+            params.extend(values)
 
     # --- optional source-path scoping (exact path, with portable run-token fallback) ---
     source_scope_terms: list[str] = []
@@ -2569,17 +3571,23 @@ def _queue_where_params(filters: dict | None = None) -> tuple[list[str], list[ob
                 where.append(f"({expr} IS NOT NULL AND {expr} = ?)")
                 params.append(val)
 
-    # --- select-exclude filters (multi-value dropdown) ---
+    # --- select filters (multi-value dropdowns, grouped with AND or OR) ---
+    select_where: list[str] = []
+    select_params: list[object] = []
     for col in sorted(_SELECT_COLS | _REVIEW_SELECT_COLS):
         expr = _review_filter_expr(col) if col in _REVIEW_SELECT_COLS else f"c.{col}"
         exc = filters.get(f"exclude_{col}")
         if exc:
             placeholders = ",".join(["?"] * len(exc))
             if select_filter_mode == "include":
-                where.append(f"({expr} IS NOT NULL AND {expr} IN ({placeholders}))")
+                select_where.append(f"({expr} IS NOT NULL AND {expr} IN ({placeholders}))")
             else:
-                where.append(f"({expr} IS NULL OR {expr} NOT IN ({placeholders}))")
-            params.extend(exc)
+                select_where.append(f"({expr} IS NULL OR {expr} NOT IN ({placeholders}))")
+            select_params.extend(exc)
+    if select_where:
+        joiner = " OR " if select_filter_logic == "or" else " AND "
+        where.append("(" + joiner.join(select_where) + ")")
+        params.extend(select_params)
 
     return where, params
 
@@ -2593,8 +3601,7 @@ def _queue_order_clause(filters: dict | None = None) -> str:
     _sortable = {c: f"c.{c}" for c in _FLOAT_COLS}
     _sortable.update({c: _review_filter_expr(c) for c in _REVIEW_FLOAT_COLS})
     _sortable["candidate_id"] = "c.candidate_id"
-    _sortable.update({"updated_at": "r.updated_at", "interest_score": "r.interest_score",
-                       "review_pass": "r.review_pass"})
+    _sortable.update({"updated_at": "r.updated_at", "review_pass": "r.review_pass"})
     sort_cols = filters.get('sort_cols') or [filters.get('sort_col', 'candidate_id')]
     direction = "DESC" if filters.get('sort_desc') else "ASC"
     order_parts = []
@@ -2672,7 +3679,7 @@ def query_queue(
                 c.lsp_period,
                 c.dip_best_log_bf,
                 c.jump_best_log_bf,
-                r.interest_score,
+                r.classification_confidence,
                 r.review_pass,
                 r.workflow_status AS status,
                 r.notes,
@@ -3078,7 +4085,10 @@ VETTING_COLUMNS = [
     "nearby_vsx_dipper_sep_arcsec", "nearby_vsx_dipper_period",
     "sfr_name", "sfr_sep_arcmin",
     "cluster_name", "cluster_dist_pc",
-    "banyan_best_assoc", "banyan_field_prob",
+    "banyan_best_assoc", "banyan_field_prob", "banyan_ya_prob",
+    "banyan_best_assoc_prob", "banyan_probabilities_json", "banyan_input_mode",
+    "banyan_status", "banyan_error", "banyan_version", "banyan_adapter_version",
+    "banyan_updated_at",
     "yso_class",
     "iphas_r_mag", "iphas_r_err", "iphas_i_mag", "iphas_i_err",
     "iphas_ha_mag", "iphas_ha_err", "iphas_r_i", "iphas_r_i_err",
@@ -3090,7 +4100,8 @@ VETTING_COLUMNS = [
     "vphas_ha_excess",
     "pm_cluster_offset_sigma",
     "atlas_has_phot", "atlas_n_det_cyan", "atlas_n_det_orange",
-    "atlas_cyan_range", "atlas_orange_range",
+    "atlas_cyan_range", "atlas_orange_range", "atlas_preprocess_version",
+    "atlas_n_raw", "atlas_n_good", "atlas_n_rejected",
     "neowise_n_epochs", "neowise_w1_range", "neowise_w2_range",
     "kepler_n_quarters", "kepler_total_points", "kepler_flux_range",
     "aavso_lc_n_points",
@@ -3183,15 +4194,17 @@ def merge_candidate_results(
     conn: sqlite3.Connection,
     candidate_df: pd.DataFrame,
     id_column: str | None = None,
+    *,
+    clear_columns: Iterable[str] = (),
 ) -> int:
     """Merge candidate-table columns into existing review candidates.
 
     Matches by ``candidate_id`` or ``asas_sn_id``. Only candidate payload/SQL
     columns are updated; review tables are untouched.
 
-    Columns present in ``candidate_df`` are treated as authoritative for the
-    matched rows: null values clear previously stored values for those keys,
-    while columns absent from ``candidate_df`` are left untouched.
+    Non-null values present in ``candidate_df`` update pipeline-owned fields.
+    Null values are sparse/no-op by default. Callers must explicitly name
+    fields in ``clear_columns`` when a refresh intends to remove stale values.
     """
     if candidate_df.empty:
         return 0
@@ -3204,6 +4217,10 @@ def merge_candidate_results(
     if id_column is None:
         raise ValueError("Candidate DataFrame must have 'candidate_id' or 'asas_sn_id' column")
 
+    from malca.products.candidates import validate_candidate_ids
+    from malca.products.feature_layers import expand_feature_layers
+
+    candidate_df = expand_feature_layers(candidate_df)
     ignored_cols = {
         "candidate_id",
         "source_path",
@@ -3218,7 +4235,35 @@ def merge_candidate_results(
         return 0
 
     candidate_df = candidate_df.copy()
-    candidate_df[id_column] = candidate_df[id_column].astype(str).str.strip()
+    if id_column == "candidate_id":
+        candidate_df[id_column] = validate_candidate_ids(
+            candidate_df,
+            key_col=id_column,
+            require_unique=True,
+        )
+    else:
+        candidate_df[id_column] = candidate_df[id_column].astype("string").str.strip()
+        invalid = candidate_df[id_column].isna() | candidate_df[id_column].eq("")
+        if bool(invalid.any()):
+            raise ValueError(f"{id_column} contains blank/null match values")
+        if bool(candidate_df[id_column].duplicated().any()):
+            raise ValueError(f"{id_column} contains duplicate match values")
+
+    requested_clears = {str(column) for column in clear_columns}
+    protected_clears = requested_clears & {
+        "candidate_id", "asas_sn_id", "source_path", "payload_json", "imported_at"
+    }
+    if protected_clears:
+        raise ValueError(
+            "clear_columns cannot clear candidate identity/provenance fields: "
+            + ", ".join(sorted(protected_clears))
+        )
+    unknown_clears = requested_clears - set(merge_cols)
+    if unknown_clears:
+        raise ValueError(
+            "clear_columns must also be present in the incoming product: "
+            + ", ".join(sorted(unknown_clears))
+        )
 
     rows = conn.execute("SELECT candidate_id, asas_sn_id FROM candidates").fetchall()
     candidate_ids: set[str] = set()
@@ -3245,11 +4290,14 @@ def merge_candidate_results(
         raw_match = str(row[id_column]).strip()
         if not raw_match:
             continue
-        matched_candidate_id = raw_match if raw_match in candidate_ids else asas_to_candidate.get(raw_match)
+        if id_column == "candidate_id":
+            matched_candidate_id = raw_match if raw_match in candidate_ids else None
+        else:
+            matched_candidate_id = asas_to_candidate.get(raw_match)
         if not matched_candidate_id:
             continue
 
-        clear_keys = set(merge_cols)
+        clear_keys = set(requested_clears)
         updates: dict[str, object] = {}
         for col in merge_cols:
             value = row[col]
@@ -3264,8 +4312,9 @@ def merge_candidate_results(
         updates = normalize_vsx_record(updates)
         if has_known_catalog_evidence(updates):
             updates["vetting_likely_known"] = True
-        elif has_catalog_vetting_context(updates):
-            updates["vetting_likely_known"] = False
+
+        if not updates and not clear_keys:
+            continue
 
         replace_candidate_payload_fields(
             conn,
@@ -3281,11 +4330,515 @@ def merge_candidate_results(
     return updated
 
 
+def refresh_dipper_recurrence_classifications(conn: sqlite3.Connection) -> int:
+    """Refresh deterministic observed dip-recurrence fields for all candidates.
+
+    This is intentionally separate from ML-score merging: recurrence is a
+    direct summary of the triggered-dip extraction, not a probability emitted
+    by either the binary dipper ranker or the eight-class model.
+    """
+
+    required = {
+        "candidate_id",
+        "dip_run_count",
+        "dip_is_single_event",
+        DIPPER_RECURRENCE_CLASS_COLUMN,
+        DIPPER_RECURRENCE_EVIDENCE_COLUMN,
+    }
+    actual = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
+    }
+    missing = sorted(required.difference(actual))
+    if missing:
+        raise RuntimeError(
+            "Review DB is missing recurrence columns; run ensure_review_db_schema first: "
+            f"{missing}"
+        )
+
+    source = pd.read_sql_query(
+        "SELECT candidate_id, dip_run_count, dip_is_single_event FROM candidates",
+        conn,
+    )
+    classified = add_observed_dipper_recurrence(source)
+    temp_table = "temp_dipper_recurrence_classes"
+    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+    try:
+        conn.execute(
+            f"""
+            CREATE TEMP TABLE {temp_table} (
+                candidate_id TEXT PRIMARY KEY,
+                {DIPPER_RECURRENCE_CLASS_COLUMN} TEXT NOT NULL,
+                {DIPPER_RECURRENCE_EVIDENCE_COLUMN} TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            f"""
+            INSERT INTO {temp_table} (
+                candidate_id,
+                {DIPPER_RECURRENCE_CLASS_COLUMN},
+                {DIPPER_RECURRENCE_EVIDENCE_COLUMN}
+            ) VALUES (?, ?, ?)
+            """,
+            [
+                (
+                    str(row.candidate_id),
+                    str(getattr(row, DIPPER_RECURRENCE_CLASS_COLUMN)),
+                    str(getattr(row, DIPPER_RECURRENCE_EVIDENCE_COLUMN)),
+                )
+                for row in classified.itertuples(index=False)
+            ],
+        )
+        changed = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM candidates AS c
+                JOIN {temp_table} AS t USING (candidate_id)
+                WHERE c.{DIPPER_RECURRENCE_CLASS_COLUMN}
+                    IS NOT t.{DIPPER_RECURRENCE_CLASS_COLUMN}
+                   OR c.{DIPPER_RECURRENCE_EVIDENCE_COLUMN}
+                    IS NOT t.{DIPPER_RECURRENCE_EVIDENCE_COLUMN}
+                """
+            ).fetchone()[0]
+        )
+        if changed:
+            conn.execute(
+                f"""
+                UPDATE candidates
+                SET {DIPPER_RECURRENCE_CLASS_COLUMN} = (
+                        SELECT t.{DIPPER_RECURRENCE_CLASS_COLUMN}
+                        FROM {temp_table} AS t
+                        WHERE t.candidate_id = candidates.candidate_id
+                    ),
+                    {DIPPER_RECURRENCE_EVIDENCE_COLUMN} = (
+                        SELECT t.{DIPPER_RECURRENCE_EVIDENCE_COLUMN}
+                        FROM {temp_table} AS t
+                        WHERE t.candidate_id = candidates.candidate_id
+                    )
+                WHERE candidate_id IN (SELECT candidate_id FROM {temp_table})
+                  AND (
+                    {DIPPER_RECURRENCE_CLASS_COLUMN} IS NOT (
+                        SELECT t.{DIPPER_RECURRENCE_CLASS_COLUMN}
+                        FROM {temp_table} AS t
+                        WHERE t.candidate_id = candidates.candidate_id
+                    )
+                    OR {DIPPER_RECURRENCE_EVIDENCE_COLUMN} IS NOT (
+                        SELECT t.{DIPPER_RECURRENCE_EVIDENCE_COLUMN}
+                        FROM {temp_table} AS t
+                        WHERE t.candidate_id = candidates.candidate_id
+                    )
+                  )
+                """
+            )
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        conn.commit()
+
+    print(f"Updated dip-recurrence class for {changed} candidate(s)")
+    return changed
+
+
+def merge_model_probability_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+    *,
+    probability_columns: Iterable[str],
+    require_complete_candidate_coverage: bool = False,
+) -> int:
+    """Merge one or more bounded ML score columns into review candidates.
+
+    ``require_complete_candidate_coverage`` is for run-level model products:
+    it rejects a score table whose candidate IDs do not exactly match the
+    review database, preventing a partially scored or wrong-run artifact from
+    silently changing a live review queue.
+    """
+    path = Path(scores_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"ML score file not found: {path}")
+
+    columns = tuple(dict.fromkeys(str(column).strip() for column in probability_columns))
+    if not columns or any(not column for column in columns):
+        raise ValueError("At least one non-empty ML score column is required")
+    unknown_columns = set(columns).difference(_COL_NAMES)
+    if unknown_columns:
+        raise ValueError(f"Unknown candidate score column(s): {sorted(unknown_columns)}")
+
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        scores = pd.read_csv(path)
+    else:
+        scores = read_parquet_table(path)
+
+    missing_columns = [column for column in columns if column not in scores.columns]
+    if missing_columns:
+        raise ValueError(f"Score file is missing required column(s): {missing_columns}")
+    if "candidate_id" not in scores.columns and "asas_sn_id" not in scores.columns:
+        raise ValueError("Score file must include candidate_id or asas_sn_id")
+
+    id_column = "candidate_id" if "candidate_id" in scores.columns else "asas_sn_id"
+    merge_frame = scores[[id_column, *columns]].copy()
+    merge_frame[id_column] = merge_frame[id_column].astype("string").str.strip()
+    for column in columns:
+        merge_frame[column] = pd.to_numeric(
+            merge_frame[column], errors="coerce"
+        ).clip(lower=0.0, upper=1.0)
+
+    invalid_rows = merge_frame[id_column].isna() | merge_frame[id_column].eq("")
+    invalid_rows |= merge_frame[list(columns)].isna().any(axis=1)
+    if require_complete_candidate_coverage and bool(invalid_rows.any()):
+        raise ValueError(
+            "Complete score coverage requires a finite ID and every requested "
+            f"score; found {int(invalid_rows.sum())} invalid row(s) in {path}"
+        )
+    if require_complete_candidate_coverage and bool(
+        merge_frame[id_column].duplicated(keep=False).any()
+    ):
+        duplicates = int(merge_frame[id_column].duplicated(keep=False).sum())
+        raise ValueError(f"Complete score coverage rejects {duplicates} duplicate IDs in {path}")
+
+    merge_frame = merge_frame.dropna(subset=[id_column, *columns])
+    merge_frame = merge_frame.loc[merge_frame[id_column].ne("")]
+    merge_frame = merge_frame.drop_duplicates(subset=[id_column], keep="last")
+    if merge_frame.empty:
+        return 0
+
+    if require_complete_candidate_coverage:
+        if id_column != "candidate_id":
+            raise ValueError("Complete score coverage requires a candidate_id column")
+        artifact_ids = set(merge_frame[id_column].astype(str))
+        db_ids = {
+            str(row[0])
+            for row in conn.execute("SELECT candidate_id FROM candidates").fetchall()
+        }
+        missing = db_ids.difference(artifact_ids)
+        unexpected = artifact_ids.difference(db_ids)
+        if missing or unexpected:
+            raise ValueError(
+                "Score artifact does not match the review DB candidate set: "
+                f"missing={len(missing)}, unexpected={len(unexpected)}"
+            )
+
+    temp_table = "temp_ml_probability_scores"
+    quoted_columns = tuple(_quote_sql_identifier(column) for column in columns)
+    column_definitions = ", ".join(f"{column} REAL NOT NULL" for column in quoted_columns)
+    insert_columns = ", ".join(("match_id", *quoted_columns))
+    placeholders = ", ".join("?" for _ in range(len(columns) + 1))
+    changes = " OR ".join(
+        f"c.{column} IS NOT s.{column}" for column in quoted_columns
+    )
+    target_id = "candidate_id" if id_column == "candidate_id" else "asas_sn_id"
+    unique_asassn_clause = (
+        ""
+        if id_column == "candidate_id"
+        else """
+        AND (
+            SELECT COUNT(*) FROM candidates c2
+            WHERE c2.asas_sn_id = c.asas_sn_id
+        ) = 1
+        """
+    )
+    assignments = ", ".join(
+        f"{column} = (SELECT s.{column} FROM {temp_table} s "
+        f"WHERE s.match_id = candidates.{target_id})"
+        for column in quoted_columns
+    )
+    update_uniqueness_clause = (
+        ""
+        if id_column == "candidate_id"
+        else """
+        AND (
+            SELECT COUNT(*) FROM candidates c2
+            WHERE c2.asas_sn_id = candidates.asas_sn_id
+        ) = 1
+        """
+    )
+    changed_subquery = " OR ".join(
+        f"candidates.{column} IS NOT (SELECT s.{column} FROM {temp_table} s "
+        f"WHERE s.match_id = candidates.{target_id})"
+        for column in quoted_columns
+    )
+
+    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+    try:
+        conn.execute(
+            f"CREATE TEMP TABLE {temp_table} (match_id TEXT PRIMARY KEY, {column_definitions})"
+        )
+        conn.executemany(
+            f"INSERT INTO {temp_table} ({insert_columns}) VALUES ({placeholders})",
+            [
+                (str(row[id_column]), *(float(row[column]) for column in columns))
+                for _, row in merge_frame.iterrows()
+            ],
+        )
+        updated = int(conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM candidates c
+            JOIN {temp_table} s ON s.match_id = c.{target_id}
+            WHERE ({changes})
+            {unique_asassn_clause}
+            """
+        ).fetchone()[0])
+        if updated:
+            conn.execute(
+                f"""
+                UPDATE candidates
+                SET {assignments}
+                WHERE {target_id} IN (SELECT match_id FROM {temp_table})
+                {update_uniqueness_clause}
+                  AND ({changed_subquery})
+                """
+            )
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        conn.commit()
+
+    print(f"Updated {len(columns)} ML score column(s) for {updated} candidate(s)")
+    return updated
+
+
+def merge_dipper_probability_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+    *,
+    probability_column: str = "prob_dipper_like",
+) -> int:
+    """Merge a legacy binary ML dipper score into review candidates."""
+    return merge_model_probability_scores(
+        conn,
+        scores_path,
+        probability_columns=(probability_column,),
+    )
+
+
+def merge_nine_class_probability_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+) -> int:
+    """Merge a complete nine-class score artifact into the matching review DB."""
+    return merge_model_probability_scores(
+        conn,
+        scores_path,
+        probability_columns=NINE_CLASS_PROBABILITY_COLUMNS,
+        require_complete_candidate_coverage=True,
+    )
+
+
+def merge_eight_class_probability_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+) -> int:
+    """Merge a complete eight-class score artifact into the matching Review DB."""
+    return merge_model_probability_scores(
+        conn,
+        scores_path,
+        probability_columns=EIGHT_CLASS_PROBABILITY_COLUMNS,
+        require_complete_candidate_coverage=True,
+    )
+
+
+def merge_hierarchical_ml_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+) -> int:
+    """Merge a complete hierarchical score artifact into the Review DB."""
+
+    path = Path(scores_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Hierarchical score file not found: {path}")
+    scores = (
+        pd.read_csv(path)
+        if path.suffix.lower() == ".csv"
+        else read_parquet_table(path)
+    )
+    required = {
+        "candidate_id",
+        *HIERARCHICAL_ML_PROBABILITY_COLUMNS,
+        *HIERARCHICAL_ML_PREDICTION_COLUMNS,
+    }
+    missing = sorted(required.difference(scores.columns))
+    if missing:
+        raise ValueError(
+            f"Hierarchical score file is missing required columns: {missing}"
+        )
+    numeric_updated = merge_model_probability_scores(
+        conn,
+        path,
+        probability_columns=HIERARCHICAL_ML_PROBABILITY_COLUMNS,
+        require_complete_candidate_coverage=True,
+    )
+    incoming_predictions = scores[
+        ["candidate_id", *HIERARCHICAL_ML_PREDICTION_COLUMNS]
+    ].copy()
+    for column in HIERARCHICAL_ML_PREDICTION_COLUMNS:
+        invalid = (
+            incoming_predictions[column].isna()
+            | incoming_predictions[column].astype("string").str.strip().eq("")
+        )
+        if bool(invalid.any()):
+            raise ValueError(
+                f"Hierarchical score file has blank/null predictions in {column}"
+            )
+    current_predictions = pd.read_sql_query(
+        "SELECT candidate_id, "
+        + ", ".join(HIERARCHICAL_ML_PREDICTION_COLUMNS)
+        + " FROM candidates",
+        conn,
+    )
+    comparison = incoming_predictions.merge(
+        current_predictions,
+        on="candidate_id",
+        how="left",
+        validate="one_to_one",
+        suffixes=("", "__current"),
+    )
+    changed = pd.Series(False, index=comparison.index, dtype=bool)
+    for column in HIERARCHICAL_ML_PREDICTION_COLUMNS:
+        changed |= (
+            comparison[column].astype("string").fillna("<NULL>")
+            != comparison[f"{column}__current"].astype("string").fillna("<NULL>")
+        )
+    prediction_updated = merge_candidate_results(
+        conn,
+        comparison.loc[
+            changed, ["candidate_id", *HIERARCHICAL_ML_PREDICTION_COLUMNS]
+        ],
+    )
+    return max(numeric_updated, prediction_updated)
+
+
+def merge_dipper_recurrence_ml_scores(
+    conn: sqlite3.Connection,
+    scores_path: str | Path,
+) -> int:
+    """Merge conditional dipper-recurrence ML predictions into Review.
+
+    The same conditional recurrence head is attached to the binary and active
+    eight-class parent rankers, so each overlay supplies the shared conditional
+    score plus the corresponding parent-gated recurrent-dipper score. Legacy
+    nine-class overlays remain readable.
+    """
+
+    path = Path(scores_path).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Dipper-recurrence score file not found: {path}")
+    scores = pd.read_csv(path) if path.suffix.lower() == ".csv" else read_parquet_table(path)
+    required = {"candidate_id", "prob_recurrent_given_dipper", "predicted_dipper_recurrence"}
+    missing = sorted(required.difference(scores.columns))
+    if missing:
+        raise ValueError(f"Dipper-recurrence score file is missing required columns: {missing}")
+    available_probabilities = tuple(
+        column for column in DIPPER_RECURRENCE_ML_PROBABILITY_COLUMNS if column in scores.columns
+    )
+    if len(available_probabilities) < 2:
+        raise ValueError(
+            "Dipper-recurrence overlay must include the conditional score and "
+            "one parent-gated recurrent-dipper score"
+        )
+    numeric_updated = merge_model_probability_scores(
+        conn,
+        path,
+        probability_columns=available_probabilities,
+        require_complete_candidate_coverage=True,
+    )
+
+    classes = scores[["candidate_id", "predicted_dipper_recurrence"]].copy()
+    classes["candidate_id"] = classes["candidate_id"].astype("string").str.strip()
+    classes["predicted_dipper_recurrence"] = (
+        classes["predicted_dipper_recurrence"].astype("string").str.strip()
+    )
+    valid_classes = {"recurrent", "non_recurrent"}
+    invalid = (
+        classes["candidate_id"].isna()
+        | classes["candidate_id"].eq("")
+        | ~classes["predicted_dipper_recurrence"].isin(valid_classes)
+        | classes["candidate_id"].duplicated(keep=False)
+    )
+    if bool(invalid.any()):
+        raise ValueError(
+            "Dipper-recurrence overlay requires one valid recurrent/non_recurrent "
+            f"prediction per candidate; found {int(invalid.sum())} invalid row(s)"
+        )
+    artifact_ids = set(classes["candidate_id"].astype(str))
+    db_ids = {
+        str(row[0]) for row in conn.execute("SELECT candidate_id FROM candidates").fetchall()
+    }
+    if artifact_ids != db_ids:
+        raise ValueError(
+            "Dipper-recurrence overlay does not match the review DB candidate set: "
+            f"missing={len(db_ids.difference(artifact_ids))}, "
+            f"unexpected={len(artifact_ids.difference(db_ids))}"
+        )
+
+    temp_table = "temp_dipper_recurrence_ml_classes"
+    conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+    try:
+        conn.execute(
+            f"""
+            CREATE TEMP TABLE {temp_table} (
+                candidate_id TEXT PRIMARY KEY,
+                predicted_dipper_recurrence TEXT NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            f"INSERT INTO {temp_table} (candidate_id, predicted_dipper_recurrence) VALUES (?, ?)",
+            [
+                (str(row.candidate_id), str(row.predicted_dipper_recurrence))
+                for row in classes.itertuples(index=False)
+            ],
+        )
+        class_updated = int(
+            conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM candidates AS c
+                JOIN {temp_table} AS t USING (candidate_id)
+                WHERE c.predicted_dipper_recurrence IS NOT t.predicted_dipper_recurrence
+                """
+            ).fetchone()[0]
+        )
+        if class_updated:
+            conn.execute(
+                f"""
+                UPDATE candidates
+                SET predicted_dipper_recurrence = (
+                    SELECT t.predicted_dipper_recurrence
+                    FROM {temp_table} AS t
+                    WHERE t.candidate_id = candidates.candidate_id
+                )
+                WHERE candidate_id IN (SELECT candidate_id FROM {temp_table})
+                  AND predicted_dipper_recurrence IS NOT (
+                    SELECT t.predicted_dipper_recurrence
+                    FROM {temp_table} AS t
+                    WHERE t.candidate_id = candidates.candidate_id
+                  )
+                """
+            )
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        conn.commit()
+
+    updated = max(numeric_updated, class_updated)
+    print(f"Updated dipper-recurrence ML fields for {updated} candidate(s)")
+    return updated
+
+
 def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     taxonomy_cols = ", ".join(REVIEW_TAXONOMY_FIELDS)
     row = conn.execute(
         f"""
-        SELECT interest_score, review_pass, notes, status, reviewer, updated_at, event_class,
+        SELECT review_pass, notes, status, reviewer, updated_at, event_class,
                {taxonomy_cols}
         FROM reviews WHERE candidate_id=?
         """,
@@ -3293,7 +4846,6 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
     ).fetchone()
     if row is None:
         base = {
-            "interest_score": None,
             "event_class": "unclassified",
             "review_pass": 1,
             "notes": "",
@@ -3310,22 +4862,18 @@ def get_review(conn: sqlite3.Connection, candidate_id: str) -> dict:
         base["model_tags_json"] = "[]"
         base["legacy_review_json"] = "{}"
         return base
-    score = None if row[0] is None else int(row[0])
-    if score is not None:
-        score = int(np.clip(score, 1, 4))
-    taxonomy_values = dict(zip(REVIEW_TAXONOMY_FIELDS, row[7:]))
+    taxonomy_values = dict(zip(REVIEW_TAXONOMY_FIELDS, row[6:]))
     workflow_status = str(taxonomy_values.get("workflow_status") or "unreviewed")
     selection = selection_from_review(taxonomy_values)
-    event_class = str(row[6]) if row[6] else derive_event_class(selection)
+    event_class = str(row[5]) if row[5] else derive_event_class(selection)
     out = {
-        "interest_score": score,
         "event_class": event_class,
-        "review_pass": 1 if row[1] is None else max(1, int(row[1])),
-        "notes": "" if row[2] is None else str(row[2]),
+        "review_pass": 1 if row[0] is None else max(1, int(row[0])),
+        "notes": "" if row[1] is None else str(row[1]),
         "status": workflow_status,
         "workflow_status": workflow_status,
-        "reviewer": "" if row[4] is None else str(row[4]),
-        "updated_at": row[5],
+        "reviewer": "" if row[3] is None else str(row[3]),
+        "updated_at": row[4],
     }
     out.update(taxonomy_values)
     out.update(selection)
@@ -3341,7 +4889,6 @@ def save_review(
     conn: sqlite3.Connection,
     *,
     candidate_id: str,
-    interest_score: int | None,
     event_class: str = "unclassified",
     review_pass: int,
     notes: str,
@@ -3356,7 +4903,7 @@ def save_review(
     baseline_behavior: str | None = None,
     physical_primary: str | None = None,
     physical_secondary: str | None = None,
-    classification_confidence: str | None = None,
+    classification_confidence: int | None = None,
     priority_tags: Any = None,
     evidence_flags: Any = None,
     model_tags: Any = None,
@@ -3368,10 +4915,6 @@ def save_review(
     event_type: str = "save",
 ) -> None:
     ts = _utc_now()
-    if interest_score is None:
-        score_int = None
-    else:
-        score_int = int(np.clip(int(interest_score), 1, 4))
     pass_int = max(1, int(review_pass))
     workflow = str(workflow_status or status or "reviewed")
     selection = normalize_selection(
@@ -3421,7 +4964,6 @@ def save_review(
     taxonomy_cols = list(REVIEW_TAXONOMY_FIELDS)
     insert_cols = [
         "candidate_id",
-        "interest_score",
         "event_class",
         "review_pass",
         "notes",
@@ -3442,7 +4984,6 @@ def save_review(
         """,
         (
             candidate_id,
-            score_int,
             ec,
             pass_int,
             notes,
@@ -3453,7 +4994,6 @@ def save_review(
         ),
     )
     payload = {
-        "interest_score": score_int,
         "event_class": ec,
         "review_pass": pass_int,
         "notes": notes,
@@ -3548,7 +5088,6 @@ def find_phase_plot_image(payload: dict, plot_dir: Path) -> Path | None:
 def export_reviews(conn: sqlite3.Connection, out_path: Path, only_reviewed: bool = True) -> None:
     candidate_cols = ["candidate_id", "source_path"] + _COL_NAMES
     review_cols = [
-        "interest_score",
         "review_pass",
         "notes",
         "workflow_status",

@@ -1,21 +1,7 @@
 # This file was mechanically split from malca.review.app; preserve behavior when editing.
 def _review_db_state_signature(db_path: str | Path | None = None) -> str:
-    """Return a cache signature that tracks review DB state, including WAL writes."""
-    base = Path(db_path or DB_PATH).expanduser()
-    try:
-        resolved = base.resolve()
-    except Exception:
-        resolved = base
-
-    parts = [str(resolved)]
-    for suffix, label in (("", "db"), ("-wal", "wal")):
-        path = resolved if not suffix else Path(f"{resolved}{suffix}")
-        try:
-            stat = path.stat()
-            parts.append(f"{label}:{int(stat.st_mtime_ns)}:{int(stat.st_size)}")
-        except Exception:
-            parts.append(f"{label}:missing")
-    return "|".join(parts)
+    """Return a cache signature changed only by candidate/review writes."""
+    return review_content_signature(db_path or DB_PATH)
 
 
 def _diagnostic_background_signature(db_path: str | Path | None = None) -> str:
@@ -145,5 +131,4 @@ def _clear_review_state_caches() -> None:
     """Clear in-process caches derived from the review DB."""
     _candidate_context_cached.cache_clear()
     _progress_counts_cached.cache_clear()
-
 

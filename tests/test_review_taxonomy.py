@@ -10,6 +10,9 @@ import pytest
 from malca.review.taxonomy import (
     PHYSICAL_PRIMARY,
     PHYSICAL_SECONDARY,
+    classification_confidence_from_score,
+    classification_confidence_score,
+    derive_event_class,
     keyboard_payload,
     legacy_review_to_taxonomy,
     migrate_legacy_review_db,
@@ -31,9 +34,15 @@ EXPECTED_PHYSICAL_SECONDARY_COUNTS = {
     "flare_star_or_magnetically_active_star": 7,
     "extragalactic_or_nuclear_variable": 13,
     "solar_system_or_moving_object": 6,
-    "false_positive_or_contaminant": 24,
+    "false_positive_or_contaminant": 21,
     "unknown": 17,
 }
+
+
+@pytest.mark.parametrize("score", [1, 2, 3, 4])
+def test_label_confidence_score_mapping_round_trips(score: int) -> None:
+    assert classification_confidence_from_score(score) == score
+    assert classification_confidence_score(str(score)) == score
 
 
 def test_keyboard_payload_keeps_dimming_recurrent_dip_shortcuts() -> None:
@@ -48,7 +57,39 @@ def test_keyboard_payload_keeps_dimming_recurrent_dip_shortcuts() -> None:
     }
 
     assert primary_by_key["e"] == "dimming_event"
+    assert primary_by_key["p"] == "long_period_variability"
     assert dimming_detail_by_key["k"] == "recurrent_dips"
+    assert {
+        primary: len(details)
+        for primary, details in payload["morphology_secondary"].items()
+    } == {
+        "artifact_or_bad_photometry": 11,
+        "nonvariable_or_low_snr": 4,
+        "dimming_event": 20,
+        "brightening_event": 22,
+        "mixed_dip_and_burst": 6,
+        "periodic": 13,
+        "quasi_periodic": 5,
+        "stochastic": 11,
+        "long_term_trend": 9,
+        "long_period_variability": 6,
+    }
+
+
+def test_retired_unclear_legacy_reviews_are_requeued() -> None:
+    mapped = legacy_review_to_taxonomy(
+        {"event_class": "unknown_interesting", "status": "reviewed"}
+    )
+
+    assert mapped["workflow_status"] == "unreviewed"
+    assert mapped["disposition"] is None
+    assert mapped["morphology_primary"] is None
+
+
+def test_long_period_variability_derives_to_ltv() -> None:
+    assert derive_event_class(
+        {"morphology_primary": "long_period_variability"}
+    ) == "ltv"
 
 
 def test_physical_taxonomy_has_broad_review_secondary_counts() -> None:
@@ -60,7 +101,7 @@ def test_physical_taxonomy_has_broad_review_secondary_counts() -> None:
         family: len(PHYSICAL_SECONDARY.get(family, ()))
         for family in primary_values
     } == EXPECTED_PHYSICAL_SECONDARY_COUNTS
-    assert sum(EXPECTED_PHYSICAL_SECONDARY_COUNTS.values()) == 204
+    assert sum(EXPECTED_PHYSICAL_SECONDARY_COUNTS.values()) == 201
 
 
 def test_keyboard_payload_uses_scientific_labels_for_broad_hypothesis_subclasses() -> None:
@@ -87,7 +128,7 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
         save_review(
             conn,
             candidate_id="TAX1",
-            interest_score=4,
+            classification_confidence=4,
             review_pass=1,
             notes="taxonomy",
             workflow_status="reviewed",
@@ -97,7 +138,6 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
             morphology_secondary_json=["big_dipper", "recurrent_dips", "multi_depth_dips"],
             physical_primary="young_stellar_object_or_pms",
             physical_secondary="yso_dipper",
-            classification_confidence="likely",
             priority_tags=["priority_dipper", "priority_followup"],
             evidence_flags=["stable_baseline"],
             model_tags=["bic_prefers_dip"],
@@ -113,6 +153,7 @@ def test_save_review_round_trips_taxonomy_fields(tmp_path: Path) -> None:
     assert json.loads(review["morphology_secondary_json"]) == ["big_dipper", "recurrent_dips", "multi_depth_dips"]
     assert review["physical_primary"] == "young_stellar_object_or_pms"
     assert review["physical_secondary"] == "yso_dipper"
+    assert review["classification_confidence"] == 4
     assert review["priority_tags"] == ["priority_dipper", "priority_followup"]
     assert review["evidence_flags"] == ["stable_baseline"]
     assert review["model_tags"] == ["bic_prefers_dip"]
@@ -125,7 +166,7 @@ def test_save_review_round_trips_new_physical_secondary(tmp_path: Path) -> None:
         save_review(
             conn,
             candidate_id="PULSE1",
-            interest_score=3,
+            classification_confidence=3,
             review_pass=1,
             notes="new pulsator subtype",
             workflow_status="reviewed",
@@ -140,6 +181,7 @@ def test_save_review_round_trips_new_physical_secondary(tmp_path: Path) -> None:
     assert review["morphology_primary"] == "periodic"
     assert review["physical_primary"] == "pulsating_variable"
     assert review["physical_secondary"] == "rr_lyrae"
+    assert review["classification_confidence"] == 3
 
 
 def test_normalize_selection_promotes_legacy_single_detail_to_list() -> None:
@@ -204,16 +246,6 @@ def test_normalize_selection_promotes_legacy_single_detail_to_list() -> None:
                 "morphology_primary": "artifact_or_bad_photometry",
                 "morphology_secondary": None,
                 "physical_primary": "false_positive_or_contaminant",
-                "physical_secondary": None,
-                "priority_tags": [],
-            },
-        ),
-        (
-            "unknown_interesting",
-            {
-                "morphology_primary": "unclear",
-                "morphology_secondary": None,
-                "physical_primary": "unknown",
                 "physical_secondary": None,
                 "priority_tags": [],
             },
@@ -297,6 +329,7 @@ def test_migrate_legacy_review_db_preserves_old_review_payload(tmp_path: Path) -
     assert review["review_pass"] == 2
     assert review["reviewer"] == "legacy"
     assert review["updated_at"] == "2026-03-12T00:00:00+00:00"
+    assert review["classification_confidence"] == 4
     assert review["morphology_primary"] == "dimming_event"
     assert review["priority_tags"] == ["priority_dipper"]
     assert history_count == 1

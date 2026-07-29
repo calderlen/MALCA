@@ -27,13 +27,14 @@ def load_review_form(candidate_id, queue_size):
         event_class = 'other'
 
     selection = selection_from_review(review)
+    confidence_score = classification_confidence_score(review.get('classification_confidence'))
 
     return (
         event_class,
         review.get('workflow_status', 'unreviewed') == 'needs_followup',
         review.get('review_pass', 1),
         review.get('notes', ''),
-        review.get('interest_score'),
+        confidence_score,
         selection,
         '',
         '',
@@ -73,7 +74,7 @@ app.clientside_callback(
 
         return [
             score,
-            '✓ Confidence: ' + String(score),
+            '✓ Label confidence: ' + String(score),
             {
                 nonce: nextNonce,
                 candidate_id: String(candidateId),
@@ -167,7 +168,7 @@ def done_callback(n_clicks, idx, queue_size, candidate_id, score,
         return no_update, no_update, no_update
 
     if score is None:
-        return no_update, "⚠ Confidence required", no_update
+        return no_update, "⚠ Label confidence required", no_update
 
     taxonomy_selection = taxonomy_selection if isinstance(taxonomy_selection, dict) else {}
     if not taxonomy_selection.get('morphology_primary'):
@@ -204,5 +205,3 @@ app.clientside_callback(
     Input('current-score', 'data'),
     prevent_initial_call=False,
 )
-
-

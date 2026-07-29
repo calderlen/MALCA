@@ -7,10 +7,12 @@ def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, eve
         new_pass = current_pass + 1 if increment_pass else current_pass
         workflow_status = 'needs_followup' if needs_followup else 'reviewed'
         selection = selection_from_review(taxonomy_selection if isinstance(taxonomy_selection, dict) else {})
+        confidence_value = classification_confidence_from_score(score)
+        if confidence_value is None:
+            confidence_value = selection.get('classification_confidence') or review.get('classification_confidence')
         save_review(
             conn,
             candidate_id=candidate_id,
-            interest_score=score,
             review_pass=new_pass,
             notes=notes or '',
             workflow_status=workflow_status,
@@ -23,7 +25,7 @@ def _do_save(candidate_id, score, taxonomy_selection, needs_followup, notes, eve
             baseline_behavior=selection.get('baseline_behavior'),
             physical_primary=selection.get('physical_primary'),
             physical_secondary=selection.get('physical_secondary'),
-            classification_confidence=selection.get('classification_confidence'),
+            classification_confidence=confidence_value,
             priority_tags=selection.get('priority_tags'),
             evidence_flags=selection.get('evidence_flags'),
             model_tags=selection.get('model_tags'),
@@ -228,7 +230,7 @@ app.clientside_callback(
 
         if (key === '1' || key === '2' || key === '3' || key === '4') {
             nextScore = parseInt(key, 10);
-            notice = '✓ Confidence: ' + String(nextScore);
+            notice = '✓ Label confidence: ' + String(nextScore);
             saveReq = buildSaveRequest(nextScore, false);
             return [no, notice, nextScore, no, no, prefixOut, saveReq, no, no, no];
         }
@@ -357,7 +359,7 @@ app.clientside_callback(
 
         if (key === 'Enter') {
             if (currentScore == null || currentScore === '') {
-                return [no, '⚠ Confidence required', no, no, no, prefixOut, no, no, no, no];
+                return [no, '⚠ Label confidence required', no, no, no, prefixOut, no, no, no, no];
             }
             if (!selection.morphology_primary) {
                 return [no, '⚠ Morphology required', no, no, no, prefixOut, no, no, no, no];

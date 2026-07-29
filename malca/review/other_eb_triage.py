@@ -420,7 +420,7 @@ def load_reviewed_other_subset(
             for column in (
                 "candidate_id",
                 "event_class",
-                "interest_score",
+                "classification_confidence",
                 "review_pass",
                 "notes",
                 "status",

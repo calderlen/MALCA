@@ -14,7 +14,11 @@ from malca.review.phoebe_fit import (
     parse_phoebe_json,
     run_phoebe_fit,
 )
-from malca.review.store import db_connect
+from malca.review.store import db_connect, upsert_candidates_frame
+
+
+def _insert_candidate(conn, candidate_id: str) -> None:
+    upsert_candidates_frame(conn, pd.DataFrame([{"candidate_id": candidate_id}]))
 
 
 class _FakeChecks:
@@ -90,6 +94,7 @@ def test_run_phoebe_fit_persists_success(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("malca.review.phoebe_fit._import_phoebe", lambda: fake_phoebe)
 
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn, "cand-1")
         row = run_phoebe_fit(
             conn,
             "cand-1",
@@ -134,6 +139,7 @@ def test_run_phoebe_fit_warns_when_solver_skips_but_compute_succeeds(tmp_path: P
     monkeypatch.setattr("malca.review.phoebe_fit._import_phoebe", lambda: fake_phoebe)
 
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn, "cand-warning")
         row = run_phoebe_fit(
             conn,
             "cand-warning",
@@ -159,6 +165,7 @@ def test_run_phoebe_fit_persists_failure_when_import_missing(tmp_path: Path, mon
     )
 
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn, "cand-2")
         row = run_phoebe_fit(
             conn,
             "cand-2",
@@ -177,6 +184,7 @@ def test_run_phoebe_fit_rejects_unsupported_model_kind(tmp_path: Path, monkeypat
     lc_path.write_text("unused\n", encoding="ascii")
 
     with db_connect(tmp_path / "review.db") as conn:
+        _insert_candidate(conn, "cand-contact")
         row = run_phoebe_fit(
             conn,
             "cand-contact",

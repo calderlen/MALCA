@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -14,8 +15,10 @@ from malca.products.feature_layers import to_layer_first_mapping
 from malca.review.taxonomy import (
     REVIEW_TAXONOMY_FIELDS,
     TAXONOMY_VERSION,
+    classification_confidence_score,
     derive_event_class,
     json_list,
+    legacy_review_to_taxonomy,
     normalize_selection,
 )
 from malca.review.store import (
@@ -36,14 +39,16 @@ from malca.review.store import (
 )
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, SCHEMA_VERSION})
 CANDIDATES_JSONL = "candidates.jsonl"
 REVIEWS_JSONL = "reviews.jsonl"
 ASSETS_MANIFEST_JSON = "assets_manifest.json"
 
+_CANDIDATE_IDENTITY_FIELDS = ("asas_sn_id", "source_id", "gaia_id", "gaia_dr2_id")
+
 REVIEW_FIELDS: tuple[str, ...] = (
     "candidate_id",
-    "interest_score",
     "review_pass",
     "notes",
     *REVIEW_TAXONOMY_FIELDS,
@@ -82,6 +87,37 @@ def _json_dumps(record: dict[str, object]) -> str:
     return json.dumps(_json_value(record), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _strict_json_loads(text: str, *, context: str) -> object:
+    def reject_nonfinite(value: str) -> object:
+        raise ValueError(f"Non-finite JSON number {value!r} in {context}")
+
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        parsed: dict[str, object] = {}
+        for key, value in pairs:
+            if key in parsed:
+                raise ValueError(f"Duplicate JSON key {key!r} in {context}")
+            parsed[key] = value
+        return parsed
+
+    return json.loads(
+        text,
+        parse_constant=reject_nonfinite,
+        object_pairs_hook=reject_duplicate_keys,
+    )
+
+
+def _validate_schema_version(record: dict[str, object], *, context: str) -> int:
+    version = record.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError(f"{context} must contain an integer schema_version")
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        supported = ", ".join(str(value) for value in sorted(SUPPORTED_SCHEMA_VERSIONS))
+        raise ValueError(
+            f"Unsupported schema_version {version} in {context}; supported versions: {supported}"
+        )
+    return version
+
+
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         raise FileNotFoundError(f"Required JSONL file not found: {path}")
@@ -90,12 +126,14 @@ def _read_jsonl(path: Path) -> list[dict[str, object]]:
         text = line.strip()
         if not text:
             continue
+        context = f"{path} line {line_no}"
         try:
-            record = json.loads(text)
+            record = _strict_json_loads(text, context=context)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON in {path} line {line_no}: {exc}") from exc
         if not isinstance(record, dict):
             raise ValueError(f"Expected JSON object in {path} line {line_no}")
+        _validate_schema_version(record, context=context)
         records.append(record)
     return records
 
@@ -206,7 +244,7 @@ def _review_records(conn: sqlite3.Connection, *, only_reviewed: bool = False) ->
         record: dict[str, object] = {"schema_version": SCHEMA_VERSION}
         for field in REVIEW_FIELDS:
             value = row.get(field)
-            if field in {"interest_score", "review_pass", "taxonomy_version"} and not _is_missing(value):
+            if field in {"classification_confidence", "review_pass", "taxonomy_version"} and not _is_missing(value):
                 record[field] = int(value)
             elif field == "morphology_secondary_json":
                 selection = normalize_selection(
@@ -590,22 +628,112 @@ def _coerce_review_int(value: object, *, default: int | None = None) -> int | No
         return default
 
 
+def _candidate_record_payload(record: dict[str, object]) -> dict[str, object]:
+    payload = record.get("payload")
+    if payload is None:
+        payload_dict: dict[str, object] = {}
+    elif isinstance(payload, dict):
+        payload_dict = dict(payload)
+    else:
+        candidate_id = str(record.get("candidate_id") or "").strip() or "<unknown>"
+        raise ValueError(f"Candidate {candidate_id} payload must be a JSON object or null")
+    first_class_payload = {
+        key: value
+        for key, value in record.items()
+        if key not in {"schema_version", "payload", "payload_json"}
+        and not _is_missing(value)
+    }
+    return _flatten_layer_payload({**payload_dict, **first_class_payload})
+
+
+def _record_id(record: dict[str, object], *, kind: str) -> str:
+    candidate_id = str(record.get("candidate_id") or "").strip()
+    if not candidate_id:
+        raise ValueError(f"{kind} record missing candidate_id")
+    return candidate_id
+
+
+def _validate_bundle_records(
+    candidate_records: Sequence[dict[str, object]],
+    review_records: Sequence[dict[str, object]],
+) -> tuple[dict[str, dict[str, object]], set[str]]:
+    candidates_by_id: dict[str, dict[str, object]] = {}
+    for record in candidate_records:
+        candidate_id = _record_id(record, kind="Candidate")
+        if candidate_id in candidates_by_id:
+            raise ValueError(f"Duplicate candidate_id in candidates.jsonl: {candidate_id}")
+        _candidate_record_payload(record)
+        candidates_by_id[candidate_id] = record
+
+    review_ids: set[str] = set()
+    for record in review_records:
+        candidate_id = _record_id(record, kind="Review")
+        if candidate_id in review_ids:
+            raise ValueError(f"Duplicate candidate_id in reviews.jsonl: {candidate_id}")
+        updated_at = record.get("updated_at")
+        if updated_at in (None, "", b""):
+            raise ValueError(f"Review record for {candidate_id} is missing updated_at")
+        try:
+            datetime.fromisoformat(str(updated_at))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Review record for {candidate_id} has invalid updated_at: {updated_at!r}"
+            ) from exc
+        review_ids.add(candidate_id)
+
+    missing_context = sorted(review_ids - set(candidates_by_id))
+    if missing_context:
+        preview = ", ".join(missing_context[:5])
+        suffix = " ..." if len(missing_context) > 5 else ""
+        raise ValueError(
+            "Every review must have candidate context in candidates.jsonl; missing: "
+            f"{preview}{suffix}"
+        )
+    return candidates_by_id, review_ids
+
+
+def _normalized_identity_value(value: object) -> str | None:
+    if _is_missing(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "<na>"}:
+        return None
+    return text
+
+
+def _validate_existing_candidate_identities(
+    conn: sqlite3.Connection,
+    candidates_by_id: dict[str, dict[str, object]],
+    review_ids: set[str],
+) -> None:
+    if not review_ids:
+        return
+    existing_ids = {
+        str(row[0]).strip()
+        for row in conn.execute("SELECT candidate_id FROM candidates").fetchall()
+    }
+    for candidate_id in sorted(review_ids & existing_ids):
+        incoming = _candidate_record_payload(candidates_by_id[candidate_id])
+        existing = get_candidate_payload(conn, candidate_id)
+        mismatches: list[str] = []
+        for field in _CANDIDATE_IDENTITY_FIELDS:
+            incoming_value = _normalized_identity_value(incoming.get(field))
+            existing_value = _normalized_identity_value(existing.get(field))
+            if incoming_value is not None and existing_value is not None and incoming_value != existing_value:
+                mismatches.append(f"{field}: bundle={incoming_value!r}, target={existing_value!r}")
+        if mismatches:
+            raise ValueError(
+                f"Candidate identity collision for {candidate_id}; refusing to attach its review ("
+                + "; ".join(mismatches)
+                + ")"
+            )
+
+
 def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[object, ...]]:
     rows: list[tuple[object, ...]] = []
     for record in records:
-        candidate_id = str(record.get("candidate_id") or "").strip()
-        if not candidate_id:
-            raise ValueError("Candidate record missing candidate_id")
-
-        payload = record.get("payload")
-        payload_dict = dict(payload) if isinstance(payload, dict) else {}
-        first_class_payload = {
-            key: value
-            for key, value in record.items()
-            if key not in {"schema_version", "payload", "payload_json"}
-            and not _is_missing(value)
-        }
-        sql_source = _flatten_layer_payload({**payload_dict, **first_class_payload})
+        candidate_id = _record_id(record, kind="Candidate")
+        sql_source = _candidate_record_payload(record)
 
         source_path = record.get("source_path")
         imported_at = record.get("imported_at") or _utc_now()
@@ -621,7 +749,12 @@ def _candidate_sql_rows(records: Sequence[dict[str, object]]) -> list[tuple[obje
     return rows
 
 
-def _upsert_candidate_records(conn: sqlite3.Connection, records: Sequence[dict[str, object]]) -> dict[str, int]:
+def _upsert_candidate_records(
+    conn: sqlite3.Connection,
+    records: Sequence[dict[str, object]],
+    *,
+    update_existing: bool = False,
+) -> dict[str, int]:
     if not records:
         return {"candidates_written": 0, "candidates_inserted": 0}
 
@@ -629,18 +762,28 @@ def _upsert_candidate_records(conn: sqlite3.Connection, records: Sequence[dict[s
     all_col_names = ["candidate_id", "source_path", *_COL_NAMES, "payload_json", "imported_at"]
     placeholders = ", ".join(["?"] * len(all_col_names))
     update_cols = [col for col in all_col_names if col != "candidate_id"]
-    conflict_set = ", ".join(f"{col}=excluded.{col}" for col in update_cols)
+    conflict_clause = (
+        "ON CONFLICT(candidate_id) DO UPDATE SET "
+        + ", ".join(f"{col}=excluded.{col}" for col in update_cols)
+        if update_existing
+        else "ON CONFLICT(candidate_id) DO NOTHING"
+    )
     before = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
     conn.executemany(
         f"""
         INSERT INTO candidates ({', '.join(all_col_names)})
         VALUES ({placeholders})
-        ON CONFLICT(candidate_id) DO UPDATE SET {conflict_set}
+        {conflict_clause}
         """,
         rows,
     )
     after = conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
-    return {"candidates_written": len(rows), "candidates_inserted": int(after - before)}
+    inserted = int(after - before)
+    return {
+        "candidates_written": len(rows),
+        "candidates_inserted": inserted,
+        "candidates_preserved": int(len(rows) - inserted) if not update_existing else 0,
+    }
 
 
 def _import_review_records(
@@ -662,49 +805,68 @@ def _import_review_records(
     updated = 0
     skipped = 0
     for record in records:
-        candidate_id = str(record.get("candidate_id") or "").strip()
-        if not candidate_id:
-            raise ValueError("Review record missing candidate_id")
+        candidate_id = _record_id(record, kind="Review")
         if candidate_id not in existing_candidates:
             raise ValueError(f"Review references candidate not present in candidates.jsonl: {candidate_id}")
 
-        updated_at = str(record.get("updated_at") or _utc_now())
+        updated_at = str(record["updated_at"])
         target_updated = existing_reviews.get(candidate_id)
         if merge_newer and target_updated is not None:
             if _parse_updated_at(updated_at) <= _parse_updated_at(target_updated):
                 skipped += 1
                 continue
 
-        interest_score = _coerce_review_int(record.get("interest_score"))
-        if interest_score is not None:
-            interest_score = max(1, min(4, interest_score))
+        confidence_score = classification_confidence_score(
+            record.get("classification_confidence")
+        )
+        if confidence_score is None and int(record["schema_version"]) < 3:
+            # Compatibility for bundles created before the single-column
+            # confidence schema.
+            confidence_score = classification_confidence_score(record.get("interest_score"))
         review_pass = _coerce_review_int(record.get("review_pass"), default=1) or 1
         review_pass = max(1, review_pass)
         notes = "" if record.get("notes") is None else str(record.get("notes"))
-        selection = normalize_selection(
-            {
-                "morphology_primary": record.get("morphology_primary"),
-                "morphology_secondary": record.get("morphology_secondary"),
-                "morphology_secondary_json": record.get("morphology_secondary_json"),
-                "morphology_secondary_list": record.get("morphology_secondary_list"),
-                "morphology_polarity": record.get("morphology_polarity"),
-                "morphology_recurrence": record.get("morphology_recurrence"),
-                "baseline_behavior": record.get("baseline_behavior"),
-                "physical_primary": record.get("physical_primary"),
-                "physical_secondary": record.get("physical_secondary"),
-                "classification_confidence": record.get("classification_confidence"),
-                "priority_tags": record.get("priority_tags") or record.get("priority_tags_json"),
-                "evidence_flags": record.get("evidence_flags") or record.get("evidence_flags_json"),
-                "model_tags": record.get("model_tags") or record.get("model_tags_json"),
-                "disposition": record.get("disposition"),
-                "duplicate_of": record.get("duplicate_of"),
-                "known_object_id": record.get("known_object_id"),
-                "known_object_source": record.get("known_object_source"),
-            }
-        )
-        workflow_status = str(record.get("workflow_status") or "unreviewed")
+        schema_version = int(record["schema_version"])
+        if schema_version == 1:
+            legacy_mapped = legacy_review_to_taxonomy(record)
+            legacy_mapped["classification_confidence"] = confidence_score
+            selection = normalize_selection(legacy_mapped)
+            workflow_status = str(legacy_mapped.get("workflow_status") or "unreviewed")
+            event_class = str(record.get("event_class") or "unclassified")
+            taxonomy_version = TAXONOMY_VERSION
+            legacy_review_json = str(legacy_mapped.get("legacy_review_json") or "{}")
+        else:
+            selection = normalize_selection(
+                {
+                    "morphology_primary": record.get("morphology_primary"),
+                    "morphology_secondary": record.get("morphology_secondary"),
+                    "morphology_secondary_json": record.get("morphology_secondary_json"),
+                    "morphology_secondary_list": record.get("morphology_secondary_list"),
+                    "morphology_polarity": record.get("morphology_polarity"),
+                    "morphology_recurrence": record.get("morphology_recurrence"),
+                    "baseline_behavior": record.get("baseline_behavior"),
+                    "physical_primary": record.get("physical_primary"),
+                    "physical_secondary": record.get("physical_secondary"),
+                    "classification_confidence": confidence_score,
+                    "priority_tags": record.get("priority_tags") or record.get("priority_tags_json"),
+                    "evidence_flags": record.get("evidence_flags") or record.get("evidence_flags_json"),
+                    "model_tags": record.get("model_tags") or record.get("model_tags_json"),
+                    "disposition": record.get("disposition"),
+                    "duplicate_of": record.get("duplicate_of"),
+                    "known_object_id": record.get("known_object_id"),
+                    "known_object_source": record.get("known_object_source"),
+                }
+            )
+            workflow_status = str(record.get("workflow_status") or record.get("status") or "unreviewed")
+            event_class = derive_event_class(selection)
+            taxonomy_version = (
+                _coerce_review_int(record.get("taxonomy_version"), default=TAXONOMY_VERSION)
+                or TAXONOMY_VERSION
+            )
+            legacy_review_json = (
+                "{}" if record.get("legacy_review_json") is None else str(record.get("legacy_review_json"))
+            )
         status = workflow_status
-        event_class = derive_event_class(selection)
         reviewer = "" if record.get("reviewer") is None else str(record.get("reviewer"))
         taxonomy_values = {
             "workflow_status": workflow_status,
@@ -724,13 +886,12 @@ def _import_review_records(
             "duplicate_of": selection.get("duplicate_of"),
             "known_object_id": selection.get("known_object_id"),
             "known_object_source": selection.get("known_object_source"),
-            "taxonomy_version": _coerce_review_int(record.get("taxonomy_version"), default=TAXONOMY_VERSION) or TAXONOMY_VERSION,
-            "legacy_review_json": "{}" if record.get("legacy_review_json") is None else str(record.get("legacy_review_json")),
+            "taxonomy_version": taxonomy_version,
+            "legacy_review_json": legacy_review_json,
         }
         taxonomy_cols = list(REVIEW_TAXONOMY_FIELDS)
         insert_cols = [
             "candidate_id",
-            "interest_score",
             "event_class",
             "review_pass",
             "notes",
@@ -752,7 +913,6 @@ def _import_review_records(
             """,
             (
                 candidate_id,
-                interest_score,
                 event_class,
                 review_pass,
                 notes,
@@ -771,20 +931,68 @@ def _import_review_records(
     return {"reviews_inserted": inserted, "reviews_updated": updated, "reviews_skipped": skipped}
 
 
-def _remove_db_files(db_path: Path) -> None:
-    for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
-        if path.exists():
-            path.unlink()
+def backup_review_database(db_path: str | Path, backup_path: str | Path | None = None) -> Path:
+    """Create a transactionally consistent SQLite backup."""
+    source = Path(db_path).expanduser()
+    if not source.exists():
+        raise FileNotFoundError(f"Review DB not found: {source}")
+    if backup_path is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = source.with_name(f"{source.stem}.backup-{stamp}{source.suffix}")
+    else:
+        backup = Path(backup_path).expanduser()
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(source) as src, sqlite3.connect(backup) as dst:
+        src.backup(dst)
+    return backup
+
+
+def snapshot_review_database(
+    source_db: str | Path,
+    target_db: str | Path,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """Clone a complete review DB, distinct from partial bundle import."""
+    source = Path(source_db).expanduser().resolve()
+    target = Path(target_db).expanduser().resolve()
+    if source == target:
+        raise ValueError("Source and target review DB paths must differ")
+    if not source.exists():
+        raise FileNotFoundError(f"Source review DB not found: {source}")
+    if target.exists() and not overwrite:
+        raise FileExistsError(f"Target review DB already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.snapshot.tmp")
+    if temp.exists():
+        temp.unlink()
+    try:
+        with sqlite3.connect(source) as src, sqlite3.connect(temp) as dst:
+            src.backup(dst)
+        if target.exists():
+            backup_review_database(target)
+            target.unlink()
+        temp.replace(target)
+    finally:
+        if temp.exists():
+            temp.unlink()
+    return target
 
 
 def _validate_assets_manifest(path: Path) -> dict[str, int]:
     if not path.exists():
         raise FileNotFoundError(f"Required asset manifest not found: {path}")
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest = _strict_json_loads(
+            path.read_text(encoding="utf-8"),
+            context=str(path),
+        )
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON asset manifest: {path}") from exc
     assets = manifest.get("assets") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Asset manifest must be a JSON object: {path}")
+    _validate_schema_version(manifest, context=str(path))
     if not isinstance(assets, list):
         raise ValueError(f"Asset manifest must contain an 'assets' list: {path}")
 
@@ -792,10 +1000,18 @@ def _validate_assets_manifest(path: Path) -> dict[str, int]:
     missing_assets = 0
     for candidate in assets:
         if not isinstance(candidate, dict):
-            continue
+            raise ValueError(f"Asset manifest candidate entries must be objects: {path}")
         candidate_count += 1
-        for asset in candidate.get("assets", []):
-            if isinstance(asset, dict) and not bool(asset.get("exists")):
+        candidate_assets = candidate.get("assets", [])
+        if not isinstance(candidate_assets, list):
+            raise ValueError(f"Asset manifest candidate 'assets' must be a list: {path}")
+        for asset in candidate_assets:
+            if not isinstance(asset, dict):
+                raise ValueError(f"Asset manifest asset entries must be objects: {path}")
+            exists = asset.get("exists")
+            if not isinstance(exists, bool):
+                raise ValueError(f"Asset manifest asset 'exists' must be true or false: {path}")
+            if not exists:
                 missing_assets += 1
     return {"asset_candidates": candidate_count, "manifest_missing_assets": missing_assets}
 
@@ -816,19 +1032,35 @@ def import_review_bundle(
     candidate_records = _read_jsonl(candidates_path)
     review_records = _read_jsonl(reviews_path)
     manifest_stats = _validate_assets_manifest(manifest_path)
+    candidates_by_id, review_ids = _validate_bundle_records(candidate_records, review_records)
 
-    if replace:
-        _remove_db_files(db_path)
+    if replace and db_path.exists():
+        raise ValueError(
+            "Review bundles are partial reviewer-owned exports and cannot replace an existing DB. "
+            "Use the explicit review-sync snapshot command for a complete database clone."
+        )
+
+    backup_path: Path | None = None
+    if db_path.exists():
+        backup_path = backup_review_database(db_path)
 
     with db_connect(db_path) as conn:
-        candidate_stats = _upsert_candidate_records(conn, candidate_records)
-        review_stats = _import_review_records(conn, review_records, merge_newer=not replace)
+        _validate_existing_candidate_identities(conn, candidates_by_id, review_ids)
+        # Candidate rows are context snapshots, not reviewer-owned science.
+        # Existing pipeline values therefore remain authoritative.
+        candidate_stats = _upsert_candidate_records(
+            conn,
+            candidate_records,
+            update_existing=False,
+        )
+        review_stats = _import_review_records(conn, review_records, merge_newer=True)
         conn.commit()
 
     return {
         "db_path": str(db_path),
         "in_dir": str(in_dir),
         "replace": bool(replace),
+        "backup_path": str(backup_path) if backup_path is not None else None,
         **candidate_stats,
         **review_stats,
         **manifest_stats,
@@ -851,7 +1083,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     import_parser = subparsers.add_parser("import", help="Import reviews/*.jsonl into a review DB")
     import_parser.add_argument("--review-db", type=Path, default=DEFAULT_DB_PATH, help="Review SQLite DB path")
     import_parser.add_argument("--input-dir", type=Path, default=Path("reviews"), help="Input review bundle directory")
-    import_parser.add_argument("--replace", action="store_true", help="Replace the target DB before import")
+    import_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Deprecated: accepted only when creating a new DB; never replaces an existing DB",
+    )
+
+    snapshot_parser = subparsers.add_parser("snapshot", help="Clone a complete SQLite review DB")
+    snapshot_parser.add_argument("--source-review-db", type=Path, required=True)
+    snapshot_parser.add_argument("--target-review-db", type=Path, required=True)
+    snapshot_parser.add_argument("--overwrite", action="store_true")
 
     args = parser.parse_args(argv)
     if args.command == "export":
@@ -861,8 +1102,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             hash_assets=bool(args.hash_assets),
             only_reviewed=bool(args.only_reviewed),
         )
-    else:
+    elif args.command == "import":
         result = import_review_bundle(args.input_dir, db_path=args.review_db, replace=bool(args.replace))
+    else:
+        target = snapshot_review_database(
+            args.source_review_db,
+            args.target_review_db,
+            overwrite=bool(args.overwrite),
+        )
+        result = {"source_db": str(args.source_review_db), "target_db": str(target), "snapshot": True}
     print(json.dumps(_json_value(result), sort_keys=True))
     return 0
 

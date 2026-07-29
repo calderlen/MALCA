@@ -129,7 +129,7 @@ def test_rebuild_review_db_drops_obsolete_candidate_columns(tmp_path: Path) -> N
         save_review(
             conn,
             candidate_id="REFRESH-2",
-            interest_score=3,
+            classification_confidence=3,
             review_pass=1,
             notes="keep",
             status="reviewed",
@@ -151,7 +151,7 @@ def test_rebuild_review_db_drops_obsolete_candidate_columns(tmp_path: Path) -> N
             for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
         }
         review_row = conn.execute(
-            "SELECT interest_score, status, reviewer FROM reviews WHERE candidate_id = ?",
+            "SELECT classification_confidence, status, reviewer FROM reviews WHERE candidate_id = ?",
             ("REFRESH-2",),
         ).fetchone()
 

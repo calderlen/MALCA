@@ -13,7 +13,6 @@ CLASS_KEY_MAP = {
     'm': 'microlensing',
     'f': 'flare',
     'l': 'ltv',
-    'u': 'unknown_interesting',
     'i': 'instrumental',
     'o': 'other',
 }
@@ -44,11 +43,10 @@ HELP_TEXT = """
 Classes (single key, toggle):
   [D] dipper         [M] microlensing
   [F] flare          [L] ltv
-  [U] unknown interesting
   [I] instrumental   [O] other
 
-Confidence (instant save):
-  [1]-[4] Set confidence level
+Label confidence (instant save):
+  [1]-[4] Set label-confidence level
 
 Navigation:
   [Backspace] Previous  [Tab] Next (no save)
@@ -86,7 +84,7 @@ def handle_key_action(key, current_idx, queue_size, conn, candidate_id):
     # Scoring (instant save)
     elif action.startswith('set_score_'):
         score = int(action[-1])
-        return current_idx, f"✓ Confidence: {score}", True
+        return current_idx, f"✓ Label confidence: {score}", True
 
     # Actions
     elif action == 'save_review':

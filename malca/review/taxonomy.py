@@ -21,14 +21,21 @@ DISPOSITIONS = (
     "known_transient",
     "uncertain",
 )
-CLASSIFICATION_CONFIDENCE = (
-    "morphology_only",
-    "possible",
-    "likely",
-    "secure",
-    "rejected",
-    "ambiguous",
-)
+CLASSIFICATION_CONFIDENCE = (1, 2, 3, 4)
+
+
+def classification_confidence_from_score(value: Any) -> int | None:
+    """Return a valid integer label-confidence score."""
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return None
+    return score if score in CLASSIFICATION_CONFIDENCE else None
+
+
+def classification_confidence_score(value: Any) -> int | None:
+    """Return a valid integer label-confidence score."""
+    return classification_confidence_from_score(value)
 
 REVIEW_TAXONOMY_SQL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("workflow_status", "TEXT"),
@@ -41,7 +48,7 @@ REVIEW_TAXONOMY_SQL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("baseline_behavior", "TEXT"),
     ("physical_primary", "TEXT"),
     ("physical_secondary", "TEXT"),
-    ("classification_confidence", "TEXT"),
+    ("classification_confidence", "INTEGER"),
     ("priority_tags_json", "TEXT"),
     ("evidence_flags_json", "TEXT"),
     ("model_tags_json", "TEXT"),
@@ -69,8 +76,7 @@ MORPHOLOGY_PRIMARY: tuple[dict[str, str], ...] = (
     _entry("quasi_periodic", "u", "quasi-periodic"),
     _entry("stochastic", "i", "stochastic"),
     _entry("long_term_trend", "o", "long-term trend"),
-    _entry("complex_or_composite", "p", "complex / composite"),
-    _entry("unclear", "[", "unclear"),
+    _entry("long_period_variability", "p", "long-period variability"),
 )
 
 MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
@@ -81,20 +87,16 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
         "saturation_or_bleed_trail",
         "diffraction_spike",
         "camera_specific_offset",
-        "zero_point_failure",
-        "isolated_bad_camera",
         "moving_object",
         "nearby_variable_contamination",
         "unresolved_blend",
         "crowded_field_blend",
-        "alias_or_window_function",
         "insufficient_data",
     ),
     "nonvariable_or_low_snr": (
         "nonvariable",
         "low_snr",
         "insufficient_data",
-        "poor_sampling",
         "marginal_variability",
     ),
     "dimming_event": (
@@ -118,8 +120,6 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
         "dimming_without_recovery",
         "multi_depth_dips",
         "color_dependent_dip",
-        "possible_eclipse",
-        "possible_occultation",
     ),
     "brightening_event": (
         "single_brightening",
@@ -137,7 +137,6 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
         "slow_rise_slow_decline",
         "long_duration_outburst",
         "secular_brightening",
-        "monotonic_brightening",
         "step_like_brightening",
         "brightening_with_recovery",
         "brightening_without_recovery",
@@ -168,13 +167,11 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
         "detached_binary_like",
         "semi_detached_binary_like",
         "heartbeat_like",
-        "reflection_effect_like",
     ),
     "quasi_periodic": (
         "quasi_periodic_dimming",
         "quasi_periodic_brightening",
         "quasi_periodic_symmetric_variability",
-        "quasi_periodic_long_cycle",
         "quasi_periodic_spot_modulation",
         "quasi_periodic_accretion_variability",
     ),
@@ -198,25 +195,18 @@ MORPHOLOGY_SECONDARY: dict[str, tuple[str, ...]] = {
         "long_duration_low_state",
         "long_duration_high_state",
         "state_change",
-        "long_cycle",
-        "quasi_periodic_long_cycle",
-        "irregular_long_term_variability",
         "gradual_recovery",
         "no_recovery",
         "baseline_shift",
     ),
-    "complex_or_composite": (
-        "periodic_plus_dips",
-        "periodic_plus_bursts",
-        "trend_plus_events",
-        "stochastic_plus_events",
-        "multiple_event_types",
-        "multi_state_variable",
-        "blended_or_contaminated",
-        "ambiguous_morphology",
-        "insufficient_context",
+    "long_period_variability": (
+        "coherent_long_period",
+        "quasi_periodic_long_period",
+        "irregular_long_period",
+        "long_secondary_period_like",
+        "large_amplitude_pulsation",
+        "multi_periodic_long_period",
     ),
-    "unclear": ("unclear", "ambiguous_morphology", "insufficient_context"),
 }
 
 PHYSICAL_PRIMARY: tuple[dict[str, str], ...] = (
@@ -431,12 +421,9 @@ PHYSICAL_SECONDARY: dict[str, tuple[str, ...]] = {
         "saturation_or_bleed_trail",
         "diffraction_spike",
         "camera_specific_offset",
-        "zero_point_failure",
-        "isolated_bad_camera",
         "nearby_variable_contamination",
         "unresolved_blend",
         "crowded_field_blend",
-        "alias_or_window_function",
         "seasonal_systematic",
         "processing_failure",
         "human_review_reject",
@@ -521,10 +508,6 @@ LEGACY_EVENT_CLASS_TAXONOMY_MAP: dict[str, dict[str, Any]] = {
     "instrumental": {
         "morphology_primary": "artifact_or_bad_photometry",
         "physical_primary": "false_positive_or_contaminant",
-    },
-    "unknown_interesting": {
-        "morphology_primary": "unclear",
-        "physical_primary": "unknown",
     },
 }
 
@@ -691,13 +674,15 @@ def normalize_selection(selection: dict[str, Any] | None) -> dict[str, Any]:
         "baseline_behavior",
         "physical_primary",
         "physical_secondary",
-        "classification_confidence",
         "disposition",
         "duplicate_of",
         "known_object_id",
         "known_object_source",
     ):
         out[key] = coerce_optional_text(out.get(key))
+    out["classification_confidence"] = classification_confidence_score(
+        out.get("classification_confidence")
+    )
     for key in ("priority_tags", "evidence_flags", "model_tags"):
         out[key] = coerce_json_list(out.get(key))
     out["taxonomy_version"] = TAXONOMY_VERSION
@@ -740,7 +725,7 @@ def derive_event_class(selection: dict[str, Any] | None) -> str:
         return "instrumental"
     if primary == "dimming_event":
         return "dipper"
-    if primary == "long_term_trend":
+    if primary in {"long_term_trend", "long_period_variability"}:
         return "ltv"
     if primary:
         return primary
@@ -758,6 +743,8 @@ def legacy_review_to_taxonomy(row: dict[str, Any]) -> dict[str, Any]:
     workflow_status = "needs_followup" if old_status == "needs_followup" else (
         "reviewed" if old_status and old_status != "unreviewed" else "unreviewed"
     )
+    if event_class in {"unknown_interesting", "unclear"}:
+        workflow_status = "unreviewed"
     disposition = "keep" if workflow_status in {"reviewed", "needs_followup"} else None
     selection = empty_taxonomy_selection()
     selection["disposition"] = disposition
@@ -833,11 +820,13 @@ def migrate_legacy_review_db(
             )
             label_counts[legacy_label] = label_counts.get(legacy_label, 0) + 1
             mapped = legacy_review_to_taxonomy(data)
-            interest_score = data.get("interest_score")
-            try:
-                interest_score = int(interest_score) if interest_score not in (None, "") else None
-            except Exception:
-                interest_score = None
+            confidence_score = classification_confidence_score(
+                data.get("classification_confidence")
+            )
+            if confidence_score is None:
+                # Legacy database import only: old schemas used this name for
+                # the same 1--4 review score.
+                confidence_score = classification_confidence_score(data.get("interest_score"))
             review_pass = data.get("review_pass")
             try:
                 review_pass = max(1, int(review_pass)) if review_pass not in (None, "") else 1
@@ -852,7 +841,6 @@ def migrate_legacy_review_db(
             workflow_status = str(mapped.get("workflow_status") or "unreviewed")
             insert_cols = [
                 "candidate_id",
-                "interest_score",
                 "event_class",
                 "review_pass",
                 "notes",
@@ -872,7 +860,7 @@ def migrate_legacy_review_db(
                 "baseline_behavior": mapped.get("baseline_behavior"),
                 "physical_primary": mapped.get("physical_primary"),
                 "physical_secondary": mapped.get("physical_secondary"),
-                "classification_confidence": mapped.get("classification_confidence"),
+                "classification_confidence": confidence_score,
                 "priority_tags_json": json_list(mapped.get("priority_tags")),
                 "evidence_flags_json": json_list(mapped.get("evidence_flags")),
                 "model_tags_json": json_list(mapped.get("model_tags")),
@@ -887,7 +875,6 @@ def migrate_legacy_review_db(
                 f"INSERT INTO reviews ({', '.join(insert_cols)}) VALUES ({placeholders})",
                 (
                     candidate_id,
-                    interest_score,
                     event_class,
                     review_pass,
                     "" if data.get("notes") is None else str(data.get("notes")),

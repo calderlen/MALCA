@@ -277,6 +277,15 @@ def _iter_refresh_worker_results(
 
 def _full_stats_clear_keys(payload: dict[str, object], clear_base: set[str]) -> set[str]:
     clear_keys = set(clear_base)
+    # ``get_candidate_payload`` returns a flattened view, while older callers
+    # may still pass raw layer dictionaries.  Inspect both representations so
+    # a deliberate full refresh removes obsolete, payload-only stats without
+    # making ordinary sparse merges clear an entire stats family.
+    clear_keys.update(
+        key
+        for key in payload
+        if key.startswith("stats_") or key in CORE_STATS_KEYS
+    )
     for layer in FEATURE_LAYER_COLUMNS:
         clear_keys.update(
             key

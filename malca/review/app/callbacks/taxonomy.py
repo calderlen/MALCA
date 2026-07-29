@@ -177,7 +177,7 @@ app.clientside_callback(
     """
     function(activeClass) {
         var active = activeClass || 'unclassified';
-        return ['dipper', 'microlensing', 'flare', 'ltv', 'unknown_interesting', 'instrumental', 'other']
+        return ['dipper', 'microlensing', 'flare', 'ltv', 'instrumental', 'other']
             .map(function(tag) { return tag === active ? 'badge-btn active' : 'badge-btn'; });
     }
     """,

@@ -42,6 +42,7 @@ from malca.config import (
 )
 from malca.external_lc_manifest import (
     index_external_lc_paths_from_manifest as shared_index_external_lc_paths_from_manifest,
+    lookup_external_lc_paths_from_manifest as shared_lookup_external_lc_paths_from_manifest,
 )
 from malca.config import VSX_CROSSMATCH_PATH, GAIA_CACHE_FILE, DEFAULT_OUTPUT_DIR
 from malca.config import (
@@ -76,6 +77,7 @@ from malca.review.diagnostic_plots import (
     build_ztf_range_figure,
 )
 from malca.review.dustycult import (
+    DUSTYCULT_WINDOW_METADATA_FIELDS,
     check_dustycult_available,
     control_defaults_for_candidate,
     load_dustycult_curve,
@@ -112,6 +114,7 @@ from malca.review.interactive_plot import (
 )
 from malca.review.lightcurve_publication import build_review_lightcurve_publication_pdf
 from malca.review.lightcurve_sources import clear_external_lc_discovery_caches
+from malca.catalogs.neowise_epochs import combine_neowise_epochs
 from malca.review.keyboard import (
     HELP_TEXT,
     CLASS_KEY_MAP,
@@ -158,6 +161,8 @@ from malca.review.session import create_queue_data_dict
 from malca.review.sync import auto_export_review_bundle
 from malca.review.taxonomy import (
     MORPHOLOGY_PRIMARY,
+    classification_confidence_from_score,
+    classification_confidence_score,
     json_list,
     keyboard_payload,
     label_for,
@@ -167,6 +172,7 @@ from malca.review.store import (
     DEFAULT_DB_PATH,
     DEFAULT_STANDALONE_DB_PATH,
     db_connect,
+    ensure_review_db_schema,
     count_progress,
     get_review,
     save_review,
@@ -181,8 +187,11 @@ from malca.review.store import (
     detect_run_directory_files,
     merge_review_databases,
     get_distinct_values,
+    get_distinct_values_bulk,
     get_diagnostic_background,
     get_numeric_bounds,
+    merge_dipper_probability_scores,
+    review_content_signature,
 )
 from malca.review.store import import_lightcurve_files
 from malca.review.sed import build_sed_figure, load_sed_rows, sed_source_statuses
@@ -205,7 +214,7 @@ from malca.review.eda_panel import (
     selected_candidate_row_style,
     selected_row_style,
 )
-from malca.enrichment.sed_model import load_sed_model_curves, load_sed_model_fits
+from malca.enrichment.sed_model import load_sed_model_curves, load_sed_model_fits, load_sed_model_points
 
 
 
