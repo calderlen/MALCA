@@ -35,6 +35,11 @@ from malca.config import (
     TRIGGER_MODE,
 )
 from malca.core.phase import BAND_LABELS
+from malca.stv.dimming_window import (
+    DEFAULT_DIMMING_WINDOW_CONFIG,
+    DIMMING_WINDOW_METHOD_VERSION,
+    measure_dimming_complex_window,
+)
 
 
 DUSTYCULT_FIT_TABLE = "dustycult_fits"
@@ -137,6 +142,15 @@ DEFAULT_CONTROLS = {
     "star_u1": 0.0,
     "star_u2": 0.0,
 }
+
+DUSTYCULT_WINDOW_METADATA_FIELDS = (
+    "method_version",
+    "event_window_status",
+    "dimming_complex_status",
+    "dimming_complex_is_lower_limit",
+    "left_boundary_type",
+    "right_boundary_type",
+)
 
 
 @dataclass(frozen=True)
@@ -518,6 +532,47 @@ def _deepest_point_defaults(df: pd.DataFrame) -> dict[str, object]:
     }
 
 
+def _dimming_complex_defaults(
+    candidate_id: str,
+    lc_path: str | Path,
+) -> dict[str, object]:
+    """Return DustyCult controls from the shared recovery-anchored window."""
+    measurement = measure_dimming_complex_window(
+        str(candidate_id),
+        Path(lc_path).expanduser(),
+        config=DEFAULT_DIMMING_WINDOW_CONFIG,
+    )
+    window = measurement.window
+    duration = window.duration_days
+    duration_upper = None if window.is_lower_limit else duration
+    censoring = window.censoring_status
+    qualifier = "lower-limit" if window.is_lower_limit else "recovery-bounded"
+    return {
+        "source": DIMMING_WINDOW_METHOD_VERSION,
+        "method_version": DIMMING_WINDOW_METHOD_VERSION,
+        "start_jd": float(window.start_jd),
+        "end_jd": float(window.end_jd),
+        "t0_jd": float(window.peak_jd),
+        "half_width_days": 0.5 * float(duration),
+        "width_param": None,
+        "duration_days": float(duration),
+        "duration_lower_days": float(duration),
+        "duration_upper_days": duration_upper,
+        "amp_mag": float(window.peak_depth_mag),
+        "event_window_status": str(window.status),
+        "dimming_complex_status": censoring,
+        "dimming_complex_is_lower_limit": bool(window.is_lower_limit),
+        "left_boundary_type": str(window.left_boundary_type),
+        "right_boundary_type": str(window.right_boundary_type),
+        "gap_count": int(window.gap_count),
+        "max_gap_days": float(window.max_gap_days),
+        "message": (
+            "Loaded the shared recovery-anchored T_complex window "
+            f"({qualifier}; {censoring})."
+        ),
+    }
+
+
 def recompute_dip_defaults(df: pd.DataFrame, run_params: Mapping[str, object] | None = None) -> dict[str, object]:
     if df is None or df.empty:
         return {}
@@ -626,14 +681,29 @@ def control_defaults_for_candidate(
     recompute: bool = False,
 ) -> dict[str, object]:
     df = pd.DataFrame()
+    resolved: Path | None = None
     try:
-        df, _resolved = load_canonical_cleaned_lightcurve(payload, lc_path=lc_path, plot_dir=plot_dir, run_params=run_params)
+        df, resolved = load_canonical_cleaned_lightcurve(
+            payload,
+            lc_path=lc_path,
+            plot_dir=plot_dir,
+            run_params=run_params,
+        )
     except Exception:
         df = pd.DataFrame()
     lc_median = _lc_median_time(df)
     defaults: dict[str, object] = {}
-    should_recompute = bool(recompute)
-    if not should_recompute and conn is not None:
+    shared_error = ""
+    if resolved is not None:
+        try:
+            defaults = _dimming_complex_defaults(str(candidate_id), resolved)
+        except Exception as exc:
+            shared_error = f"{type(exc).__name__}: {exc}"
+
+    # Retain the prior event-column/STV behavior only as an explicit fallback
+    # for unavailable or unmeasurable local light curves.
+    should_recompute = bool(recompute) and not defaults
+    if not defaults and not should_recompute and conn is not None:
         try:
             row = conn.execute(
                 f"SELECT status FROM {DUSTYCULT_FIT_TABLE} WHERE candidate_id = ? ORDER BY updated_at DESC LIMIT 1",
@@ -683,6 +753,13 @@ def control_defaults_for_candidate(
                 defaults["message"] = f"Recompute failed: {exc}. " + str(defaults.get("message") or "")
     if not defaults and not df.empty:
         defaults = _deepest_point_defaults(df)
+    if defaults and shared_error:
+        defaults["shared_window_fallback"] = True
+        defaults["shared_window_error"] = shared_error
+        defaults["message"] = (
+            f"Shared {DIMMING_WINDOW_METHOD_VERSION} measurement failed: "
+            f"{shared_error}. {defaults.get('message') or ''}"
+        ).strip()
     defaults = _apply_default_controls(defaults)
     defaults.update(_stellar_defaults(conn, candidate_id, payload))
     return defaults
@@ -719,10 +796,14 @@ def _stellar_defaults(
 
 
 def normalize_controls(values: Mapping[str, object] | None) -> dict[str, object]:
+    values = dict(values or {})
     controls = dict(DEFAULT_CONTROLS)
-    for key, value in dict(values or {}).items():
+    for key, value in values.items():
         if key in controls or key in {"start_jd", "end_jd", "t0_jd"}:
             controls[key] = _safe_float(value, controls.get(key))
+    for key in DUSTYCULT_WINDOW_METADATA_FIELDS:
+        if key in values:
+            controls[key] = values[key]
     if controls.get("start_jd") is not None and controls.get("end_jd") is not None:
         start = float(controls["start_jd"])
         end = float(controls["end_jd"])
@@ -776,10 +857,21 @@ def prepare_dustycult_input(
 
     start = _safe_float(controls.get("start_jd"))
     end = _safe_float(controls.get("end_jd"))
+    derived_defaults: dict[str, object] = {}
     if start is None or end is None:
-        defaults = _stored_dip_defaults(payload, _lc_median_time(df)) or _deepest_point_defaults(df)
-        start = _safe_float(defaults.get("start_jd"))
-        end = _safe_float(defaults.get("end_jd"))
+        try:
+            derived_defaults = _dimming_complex_defaults(
+                str(payload.get("candidate_id") or "unknown"),
+                resolved_lc_path,
+            )
+        except Exception:
+            derived_defaults = _stored_dip_defaults(
+                payload,
+                _lc_median_time(df),
+            ) or _deepest_point_defaults(df)
+        start = _safe_float(derived_defaults.get("start_jd"))
+        end = _safe_float(derived_defaults.get("end_jd"))
+        window_source = str(derived_defaults.get("source") or window_source)
     if start is None or end is None:
         raise ValueError("DustyCult fit window is missing.")
     if end < start:
@@ -812,6 +904,8 @@ def prepare_dustycult_input(
         raise ValueError("No finite relative-flux points could be prepared for DustyCult.")
     t0 = _safe_float(controls.get("t0_jd"))
     if t0 is None:
+        t0 = _safe_float(derived_defaults.get("t0_jd"))
+    if t0 is None:
         t0 = 0.5 * (float(start) + float(end))
     window = {
         "start_jd": float(start),
@@ -821,6 +915,11 @@ def prepare_dustycult_input(
         "lc_path": str(resolved_lc_path),
         "source": window_source,
     }
+    for key in DUSTYCULT_WINDOW_METADATA_FIELDS:
+        if key in raw_controls:
+            window[key] = raw_controls[key]
+        elif key in derived_defaults:
+            window[key] = derived_defaults[key]
     out = out.reset_index(drop=True)
     quality = _preflight_quality(
         out,

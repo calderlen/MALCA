@@ -495,6 +495,9 @@ def update_dustycult_controls(candidate_id, _recompute_clicks, panel_requested=T
         "message": message,
         "recomputed": bool(recompute),
     }
+    for key in DUSTYCULT_WINDOW_METADATA_FIELDS:
+        if key in defaults:
+            state[key] = defaults[key]
     return tuple(values + [f"{source}: {message}", state])
 
 
@@ -546,8 +549,14 @@ def _dustycult_fit_callback_impl(triggered_id, quick_clicks, full_clicks, candid
                     [defaults.get(key) for key, _field_id, _label, _step in _DUSTYCULT_CONTROL_FIELDS]
                 )
                 controls["_dustycult_window_source"] = str(defaults.get("source") or "defaults")
+                for key in DUSTYCULT_WINDOW_METADATA_FIELDS:
+                    if key in defaults:
+                        controls[key] = defaults[key]
             else:
                 controls["_dustycult_window_source"] = str(control_state.get("source") or "manual_controls")
+                for key in DUSTYCULT_WINDOW_METADATA_FIELDS:
+                    if key in control_state:
+                        controls[key] = control_state[key]
             row = run_dustycult_fit(
                 conn,
                 str(candidate_id),
