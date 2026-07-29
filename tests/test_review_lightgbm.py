@@ -7,10 +7,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from malca.meta_analysis.ml.feature_policy import (
+    MODEL_FEATURE_EXCLUSION_COLUMNS,
+)
 from malca.meta_analysis.ml.review_lightgbm import (
+    ASTROPHYSICAL_CONTEXT_FEATURES,
     CURRENT_SCHEMA_REQUIRED_REVIEW_COLUMNS,
     DEFAULT_DROP_COLUMNS,
     TrainingConfig,
+    add_astrophysical_context_features,
     append_lightcurve_features,
     load_target_model,
     load_current_schema_training_table,
@@ -73,6 +78,41 @@ def _review_label_frame(labels: list[str], n_per_class: int = 6) -> pd.DataFrame
 def test_current_schema_columns_follow_review_taxonomy() -> None:
     assert CURRENT_SCHEMA_REQUIRED_REVIEW_COLUMNS == ("candidate_id", *REVIEW_TAXONOMY_FIELDS)
     assert set(REVIEW_TAXONOMY_FIELDS).issubset(DEFAULT_DROP_COLUMNS)
+    assert MODEL_FEATURE_EXCLUSION_COLUMNS.issubset(DEFAULT_DROP_COLUMNS)
+
+
+def test_add_astrophysical_context_features_uses_requested_columns() -> None:
+    frame = pd.DataFrame(
+        {
+            "bprp0": [1.2, 0.8],
+            "derived_mrp": [4.1, 5.2],
+            "ruwe": [1.0, 1.4],
+            "parallax": [5.0, 2.0],
+            "parallax_error": [1.0, 0.0],
+            "derived_j_k": [0.7, 0.3],
+            "w1_w2": [0.2, 0.1],
+            "w1_w3": [0.8, 0.2],
+            "w2_w3": [0.6, 0.1],
+            "w3_err": [0.12, 0.0],
+            "w4_err": [0.25, float("nan")],
+            "sed_alpha": [-1.1, -2.0],
+            "tess_flux_range": [0.15, 0.08],
+        }
+    )
+
+    out = add_astrophysical_context_features(frame)
+
+    assert set(ASTROPHYSICAL_CONTEXT_FEATURES).issubset(out.columns)
+    assert out.loc[0, "parallax_snr"] == pytest.approx(5.0)
+    assert pd.isna(out.loc[1, "parallax_snr"])
+    assert out.loc[0, "wise_w3_error"] == pytest.approx(0.12)
+    assert pd.isna(out.loc[1, "wise_w3_error"])
+    assert out.loc[0, "wise_w3_missing"] == 0
+    assert out.loc[1, "wise_w3_missing"] == 1
+    assert out.loc[0, "wise_w4_missing"] == 0
+    assert out.loc[1, "wise_w4_missing"] == 1
+    assert "wise_w3_missing" not in ASTROPHYSICAL_CONTEXT_FEATURES
+    assert "wise_w4_missing" not in ASTROPHYSICAL_CONTEXT_FEATURES
 
 
 def test_review_lightgbm_writes_reusable_binary_artifacts(tmp_path: Path) -> None:
@@ -111,6 +151,10 @@ def test_review_lightgbm_writes_reusable_binary_artifacts(tmp_path: Path) -> Non
     assert metadata["config"]["calibration_method"] == "none"
     assert "roc_auc" in metadata["test_metrics"]
     assert "pr_auc" in metadata["test_metrics"]
+    assert "balanced_accuracy" in metadata["test_metrics"]
+    assert "recall_class_dipper" in metadata["test_metrics"]
+    assert "pr_auc_class_artifact" in metadata["test_metrics"]
+    assert "pr_auc_class_dipper" in metadata["test_metrics"]
 
 
 def test_review_lightgbm_multiclass_metrics_and_artifacts() -> None:
@@ -132,6 +176,31 @@ def test_review_lightgbm_multiclass_metrics_and_artifacts() -> None:
     assert {"class_label", "probability_column", "probability_bin", "observed_rate"}.issubset(
         result.calibration_diagnostics.columns
     )
+
+
+def test_review_lightgbm_early_stopping_records_selected_iterations() -> None:
+    df = _review_label_frame(["artifact", "dipper", "microlensing"], n_per_class=12)
+    config = TrainingConfig(
+        random_state=11,
+        cv_folds=3,
+        n_estimators=200,
+        learning_rate=0.05,
+        num_leaves=7,
+        min_child_samples=2,
+        min_class_count=3,
+        n_jobs=1,
+        early_stopping_rounds=5,
+    )
+
+    result = train_target_model(df, "review_label", config=config)
+
+    assert result.model is not None
+    assert 0 < result.model.best_iteration_ <= config.n_estimators
+    assert result.validation_metrics["best_iteration"] == result.model.best_iteration_
+    assert result.holdout_metrics["best_iteration"] == result.model.best_iteration_
+    assert result.cv_metrics["best_iteration"].between(1, config.n_estimators).all()
+    assert result.cv_metrics["inner_best_iterations"].map(len).eq(3).all()
+    assert result.metadata()["config"]["early_stopping_rounds"] == 5
 
 
 def test_review_lightgbm_load_and_score_roundtrip(tmp_path: Path) -> None:
@@ -168,6 +237,17 @@ def test_review_lightgbm_raises_clearly_for_too_rare_split_class() -> None:
 
     with pytest.raises(ValueError, match="at least 3"):
         train_target_model(df, "review_label", config=config)
+
+
+def test_review_lightgbm_rejects_exact_duplicate_features() -> None:
+    df = _review_label_frame(["artifact", "dipper"], n_per_class=6)
+    df["feature_signal_copy"] = df["feature_signal"]
+
+    with pytest.raises(
+        ValueError,
+        match=r"Exact duplicate feature columns are not allowed: .*feature_signal.*feature_signal_copy",
+    ):
+        train_target_model(df, "review_label", config=_tiny_training_config())
 
 
 def test_current_schema_loader_rejects_old_review_only_schema(tmp_path: Path) -> None:

@@ -28,6 +28,9 @@ import numpy as np
 import pandas as pd
 
 from malca.io.table_io import read_feature_table, write_feature_table
+from malca.meta_analysis.ml.feature_policy import (
+    MODEL_FEATURE_EXCLUSION_COLUMNS,
+)
 
 
 ID_COLUMNS = (
@@ -505,6 +508,7 @@ def calibration_by_decile(
 
 
 TABULAR_EXACT_DROP_COLUMNS = {
+    *MODEL_FEATURE_EXCLUSION_COLUMNS,
     "bad_photometry",
     "survived_reprocessing",
     "reprocessing_label_source",

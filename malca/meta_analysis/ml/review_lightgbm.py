@@ -22,14 +22,19 @@ import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    balanced_accuracy_score,
     classification_report,
     confusion_matrix,
     f1_score,
+    precision_recall_fscore_support,
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold
 
 from malca.io.lightcurve_io import load_lightcurve_df
+from malca.meta_analysis.ml.feature_policy import (
+    MODEL_FEATURE_EXCLUSION_COLUMNS,
+)
 from malca.review.taxonomy import REVIEW_TAXONOMY_FIELDS, legacy_review_to_taxonomy
 from malca.io.table_io import read_feature_table
 
@@ -67,7 +72,6 @@ DEFAULT_RECOMPUTE_SURVIVAL_RECOMPUTED_PATH = Path(
 DEFAULT_RECOMPUTE_SURVIVAL_MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14")
 
 REVIEW_METADATA_COLUMNS = {
-    "interest_score",
     "review_pass",
     "notes",
     "status",
@@ -134,6 +138,10 @@ NON_FEATURE_UTILITY_COLUMNS = {
     "schema_mode",
     "timescale",
     "recompute_status",
+    # A deterministic observed-recurrence summary is emitted beside ML score
+    # products for Review; it must never become a feature for a dipper target.
+    "dipper_recurrence_class",
+    "dipper_recurrence_evidence",
 }
 
 DEFAULT_DROP_COLUMNS = (
@@ -143,6 +151,38 @@ DEFAULT_DROP_COLUMNS = (
     | IDENTIFIER_AND_PATH_COLUMNS
     | JSON_PAYLOAD_COLUMNS
     | NON_FEATURE_UTILITY_COLUMNS
+    | MODEL_FEATURE_EXCLUSION_COLUMNS
+)
+
+ASTROPHYSICAL_CONTEXT_SOURCE_COLUMNS = (
+    "bprp0",
+    "derived_mrp",
+    "ruwe",
+    "parallax",
+    "parallax_error",
+    "derived_j_k",
+    "w1_w2",
+    "w1_w3",
+    "w2_w3",
+    "w3_err",
+    "w4_err",
+    "sed_alpha",
+    "tess_flux_range",
+)
+
+ASTROPHYSICAL_CONTEXT_FEATURES = (
+    "bprp0",
+    "derived_mrp",
+    "ruwe",
+    "parallax_snr",
+    "derived_j_k",
+    "w1_w2",
+    "w1_w3",
+    "w2_w3",
+    "wise_w3_error",
+    "wise_w4_error",
+    "sed_alpha",
+    "tess_flux_range",
 )
 
 INTEGER_FLOAT_RE = re.compile(r"^([+-]?\d+)\.0+$")
@@ -167,6 +207,9 @@ class TrainingConfig:
     min_class_count: int = 3
     class_weight: str | None = "balanced"
     n_jobs: int = 1
+    early_stopping_rounds: int | None = None
+    early_stopping_min_delta: float = 0.0
+    early_stopping_selection_folds: int = 3
     calibration_method: str = "none"
     reliability_bins: int = 10
 
@@ -479,6 +522,46 @@ def load_current_schema_training_table(
     return table
 
 
+def add_astrophysical_context_features(table: pd.DataFrame) -> pd.DataFrame:
+    """Attach the shared high-coverage Gaia, 2MASS, WISE, SED, and TESS block.
+
+    The stored context values are coerced to finite numeric values. Gaia
+    ``parallax_snr`` is calculated only where Gaia reports a positive finite
+    parallax uncertainty.  The outer-WISE colors are accompanied by W3/W4
+    magnitude-error quality terms and audit-only invalid-or-missing indicators.
+    A zero or negative magnitude error is not a physical uncertainty and is
+    treated as missing. The explicit indicators are excluded by the shared
+    model policy because LightGBM handles missing values natively.
+    """
+
+    missing = [
+        column for column in ASTROPHYSICAL_CONTEXT_SOURCE_COLUMNS if column not in table.columns
+    ]
+    if missing:
+        raise KeyError(f"Astrophysical-context source columns are missing: {missing}")
+
+    out = table.copy()
+    for column in ASTROPHYSICAL_CONTEXT_SOURCE_COLUMNS:
+        out[column] = pd.to_numeric(out[column], errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
+
+    parallax = pd.to_numeric(out["parallax"], errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    )
+    parallax_error = pd.to_numeric(out["parallax_error"], errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    )
+    out["parallax_snr"] = (parallax / parallax_error.where(parallax_error.gt(0.0))).replace(
+        [np.inf, -np.inf], np.nan
+    )
+    for band in ("w3", "w4"):
+        error = out[f"{band}_err"].where(out[f"{band}_err"].gt(0.0))
+        out[f"wise_{band}_error"] = error
+        out[f"wise_{band}_missing"] = error.isna().astype("int8")
+    return out
+
+
 def _legacy_mapping_frame(reviews: pd.DataFrame) -> pd.DataFrame:
     mapped_rows: list[dict[str, Any]] = []
     for row in reviews.to_dict(orient="records"):
@@ -769,7 +852,11 @@ def _feature_columns_for_target(
     drop_columns: Iterable[str],
     max_categorical_cardinality: int,
 ) -> tuple[list[str], list[str]]:
-    drop = set(drop_columns) | {target_col}
+    drop = (
+        set(drop_columns)
+        | MODEL_FEATURE_EXCLUSION_COLUMNS
+        | {target_col}
+    )
     feature_cols: list[str] = []
     categorical_cols: list[str] = []
     for col in df.columns:
@@ -810,6 +897,38 @@ def _fit_feature_encoder(
             encoded_cols[col] = numeric.replace([np.inf, -np.inf], np.nan).astype("float64")
     encoded = pd.DataFrame(encoded_cols, index=df.index)
     return encoded, categorical_maps
+
+
+def exact_duplicate_feature_pairs(df: pd.DataFrame) -> list[tuple[str, str]]:
+    """Return feature pairs whose encoded values and missingness are identical."""
+
+    signature_groups: dict[bytes, list[str]] = {}
+    normalized: dict[str, pd.Series] = {}
+    for column in df.columns:
+        values = pd.to_numeric(df[column], errors="coerce").replace([np.inf, -np.inf], np.nan).astype("float64")
+        normalized[column] = values
+        signature = pd.util.hash_pandas_object(values, index=False).to_numpy(dtype="uint64").tobytes()
+        signature_groups.setdefault(signature, []).append(str(column))
+
+    pairs: list[tuple[str, str]] = []
+    for columns in signature_groups.values():
+        if len(columns) < 2:
+            continue
+        for left_index, left in enumerate(columns[:-1]):
+            left_values = normalized[left].to_numpy(dtype=float)
+            for right in columns[left_index + 1 :]:
+                right_values = normalized[right].to_numpy(dtype=float)
+                if np.array_equal(left_values, right_values, equal_nan=True):
+                    pairs.append((left, right))
+    return pairs
+
+
+def _raise_for_exact_duplicate_features(df: pd.DataFrame) -> None:
+    pairs = exact_duplicate_feature_pairs(df)
+    if not pairs:
+        return
+    detail = ", ".join(f"{left} = {right}" for left, right in pairs)
+    raise ValueError(f"Exact duplicate feature columns are not allowed: {detail}")
 
 
 def transform_features(
@@ -873,6 +992,95 @@ def _build_classifier(config: TrainingConfig, n_classes: int) -> lgb.LGBMClassif
     )
 
 
+def _fit_classifier(
+    model: lgb.LGBMClassifier,
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    *,
+    config: TrainingConfig,
+    n_classes: int,
+    X_validation: pd.DataFrame | None = None,
+    y_validation: np.ndarray | None = None,
+) -> lgb.LGBMClassifier:
+    """Fit a classifier, optionally choosing its iteration with validation loss."""
+
+    fit_kwargs: dict[str, Any] = {}
+    if config.early_stopping_rounds is not None:
+        if X_validation is None or y_validation is None:
+            raise ValueError("Early stopping requires validation features and labels")
+        fit_kwargs.update(
+            eval_set=[(X_validation, y_validation)],
+            eval_metric="binary_logloss" if n_classes == 2 else "multi_logloss",
+            callbacks=[
+                lgb.early_stopping(
+                    stopping_rounds=int(config.early_stopping_rounds),
+                    first_metric_only=True,
+                    verbose=False,
+                    min_delta=float(config.early_stopping_min_delta),
+                )
+            ],
+        )
+    model.fit(X_train, y_train, **fit_kwargs)
+    return model
+
+
+def _trained_iterations(model: lgb.LGBMClassifier) -> int:
+    best_iteration = int(getattr(model, "best_iteration_", 0) or 0)
+    if best_iteration > 0:
+        return best_iteration
+    trained_iterations = int(getattr(model, "n_estimators_", 0) or 0)
+    if trained_iterations > 0:
+        return trained_iterations
+    return int(model.get_params().get("n_estimators", 0) or 0)
+
+
+def fit_classifier_with_inner_early_stopping(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    *,
+    config: TrainingConfig,
+    n_classes: int,
+    random_state: int | None = None,
+) -> tuple[lgb.LGBMClassifier, list[int]]:
+    """Fit a CV model without using the outer evaluation fold for stopping.
+
+    When early stopping is enabled, each inner fold chooses an iteration from
+    its own validation loss. The median chosen iteration is then used to refit
+    one model on the complete outer-training sample.
+    """
+
+    if config.early_stopping_rounds is None:
+        model = _build_classifier(config, n_classes)
+        model.fit(X_train, y_train)
+        return model, []
+
+    counts = pd.Series(y_train).value_counts()
+    n_splits = min(int(config.early_stopping_selection_folds), int(counts.min()))
+    if n_splits < 2:
+        raise ValueError("Early-stopping selection requires at least two rows per class")
+    seed = config.random_state if random_state is None else int(random_state)
+    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    inner_best_iterations: list[int] = []
+    for inner_train_idx, inner_val_idx in splitter.split(X_train, y_train):
+        selector = _build_classifier(config, n_classes)
+        _fit_classifier(
+            selector,
+            X_train.iloc[inner_train_idx],
+            y_train[inner_train_idx],
+            config=config,
+            n_classes=n_classes,
+            X_validation=X_train.iloc[inner_val_idx],
+            y_validation=y_train[inner_val_idx],
+        )
+        inner_best_iterations.append(_trained_iterations(selector))
+
+    selected_iterations = max(1, int(round(float(np.median(inner_best_iterations)))))
+    model = _build_classifier(config, n_classes)
+    model.set_params(n_estimators=selected_iterations)
+    model.fit(X_train, y_train)
+    return model, inner_best_iterations
+
+
 def _predict_proba_matrix(
     model: lgb.LGBMClassifier,
     X: pd.DataFrame,
@@ -912,8 +1120,8 @@ def _probability_metrics(
         return metrics
 
     if n_classes == 2:
-        score = y_proba[:, 1]
         if len(np.unique(y_true)) == 2:
+            score = y_proba[:, 1]
             try:
                 metrics["roc_auc"] = float(roc_auc_score(y_true, score))
             except Exception:
@@ -922,6 +1130,21 @@ def _probability_metrics(
                 metrics["pr_auc"] = float(average_precision_score(y_true, score))
             except Exception:
                 metrics["pr_auc"] = math.nan
+            for idx, column in enumerate(probability_columns):
+                binary_true = (y_true == idx).astype(int)
+                suffix = column.removeprefix("prob_")
+                try:
+                    metrics[f"roc_auc_class_{suffix}"] = float(
+                        roc_auc_score(binary_true, y_proba[:, idx])
+                    )
+                except Exception:
+                    metrics[f"roc_auc_class_{suffix}"] = math.nan
+                try:
+                    metrics[f"pr_auc_class_{suffix}"] = float(
+                        average_precision_score(binary_true, y_proba[:, idx])
+                    )
+                except Exception:
+                    metrics[f"pr_auc_class_{suffix}"] = math.nan
         return metrics
 
     labels = np.arange(n_classes)
@@ -973,9 +1196,28 @@ def _metric_row(
         "fold": fold,
         "n_eval": int(len(y_true)),
         "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
         "weighted_f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
     }
+    if label_classes:
+        labels = np.arange(len(label_classes))
+        precision, recall, per_class_f1, support = precision_recall_fscore_support(
+            y_true,
+            y_pred,
+            labels=labels,
+            zero_division=0,
+        )
+        for idx, label in enumerate(label_classes):
+            suffix = (
+                probability_columns[idx].removeprefix("prob_")
+                if idx < len(probability_columns)
+                else re.sub(r"[^a-zA-Z0-9]+", "_", str(label)).strip("_").lower()
+            )
+            metrics[f"precision_class_{suffix}"] = float(precision[idx])
+            metrics[f"recall_class_{suffix}"] = float(recall[idx])
+            metrics[f"f1_class_{suffix}"] = float(per_class_f1[idx])
+            metrics[f"support_class_{suffix}"] = int(support[idx])
     if y_proba is not None and label_classes and probability_columns:
         metrics.update(
             _probability_metrics(
@@ -1004,20 +1246,26 @@ def _cv_metrics(
     splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=config.random_state)
     rows: list[dict[str, Any]] = []
     for fold, (train_idx, val_idx) in enumerate(splitter.split(X, y_encoded), start=1):
-        model = _build_classifier(config, n_classes)
-        model.fit(X.iloc[train_idx], y_encoded[train_idx])
+        model, inner_best_iterations = fit_classifier_with_inner_early_stopping(
+            X.iloc[train_idx],
+            y_encoded[train_idx],
+            config=config,
+            n_classes=n_classes,
+            random_state=config.random_state + fold,
+        )
         pred = model.predict(X.iloc[val_idx])
         proba = _predict_proba_matrix(model, X.iloc[val_idx], n_classes=n_classes)
-        rows.append(
-            _metric_row(
-                y_encoded[val_idx],
-                pred,
-                fold=fold,
-                y_proba=proba,
-                label_classes=label_classes,
-                probability_columns=probability_columns,
-            )
+        row = _metric_row(
+            y_encoded[val_idx],
+            pred,
+            fold=fold,
+            y_proba=proba,
+            label_classes=label_classes,
+            probability_columns=probability_columns,
         )
+        row["best_iteration"] = _trained_iterations(model)
+        row["inner_best_iterations"] = inner_best_iterations
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -1028,6 +1276,12 @@ def _validate_training_config(config: TrainingConfig) -> None:
         raise ValueError("TrainingConfig.test_size must be between 0 and 1")
     if float(config.val_size) + float(config.test_size) >= 1.0:
         raise ValueError("TrainingConfig.val_size + test_size must be less than 1")
+    if config.early_stopping_rounds is not None and int(config.early_stopping_rounds) < 1:
+        raise ValueError("TrainingConfig.early_stopping_rounds must be positive or None")
+    if float(config.early_stopping_min_delta) < 0.0:
+        raise ValueError("TrainingConfig.early_stopping_min_delta must be non-negative")
+    if int(config.early_stopping_selection_folds) < 2:
+        raise ValueError("TrainingConfig.early_stopping_selection_folds must be at least 2")
     if str(config.calibration_method or "none").lower() != "none":
         raise ValueError("Only calibration_method='none' is currently supported")
 
@@ -1197,6 +1451,7 @@ def train_target_model(
 
     if config is None:
         config = TrainingConfig()
+    _validate_training_config(config)
     if target_col not in df.columns:
         raise ValueError(f"Target column not found: {target_col}")
 
@@ -1216,6 +1471,7 @@ def train_target_model(
     if not feature_columns:
         raise ValueError(f"No usable feature columns for target {target_col!r}")
     X, categorical_maps = _fit_feature_encoder(work, feature_columns, categorical_columns)
+    _raise_for_exact_duplicate_features(X)
     y_encoded, label_classes = _encode_labels(y)
     n_classes = len(label_classes)
     if n_classes < 2:
@@ -1250,7 +1506,15 @@ def train_target_model(
     y_test = y_encoded[test_mask]
 
     model = _build_classifier(config, n_classes)
-    model.fit(X_train, y_train)
+    _fit_classifier(
+        model,
+        X_train,
+        y_train,
+        config=config,
+        n_classes=n_classes,
+        X_validation=X_val,
+        y_validation=y_val,
+    )
     val_pred = model.predict(X_val)
     val_proba = _predict_proba_matrix(model, X_val, n_classes=n_classes)
     validation = _metric_row(
@@ -1269,6 +1533,7 @@ def train_target_model(
         output_dict=True,
         zero_division=0,
     )
+    validation["best_iteration"] = _trained_iterations(model)
 
     test_pred = model.predict(X_test)
     test_proba = _predict_proba_matrix(model, X_test, n_classes=n_classes)
@@ -1288,6 +1553,7 @@ def train_target_model(
         output_dict=True,
         zero_division=0,
     )
+    holdout["best_iteration"] = _trained_iterations(model)
     test_predictions = _prediction_frame(
         work.loc[test_mask],
         y_true=y_test,
