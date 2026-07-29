@@ -28,10 +28,13 @@ COMMAND_GROUPS = {
     "stv-plot": "Discovery",
     "lc-plot": "Discovery",
     "gaia-fetch": "Discovery",
+    "gaia-binary": "Enrichment",
     "gaia-id-repair": "Discovery",
+    "gaia-banyan-backfill": "Discovery",
     "characterize": "Discovery",
     "classify": "Discovery",
     "review": "Review",
+    "review-tui": "Review",
     "review-refresh": "Review",
     "review-merge": "Review",
     "review-sync": "Review",
@@ -59,6 +62,9 @@ COMMAND_GROUPS = {
     "feature-layers": "Enrichment",
     "migrate": "Enrichment",
     "sed-photometry": "Enrichment",
+    "sed-fit": "Enrichment",
+    "sed-bandpasses": "Enrichment",
+    "sed-excess": "Enrichment",
     "nuclear-context": "Enrichment",
     "vetting": "Other",
     "dev": "Other",
@@ -133,9 +139,9 @@ def main():
         "nuclear-injection",
         "detection-rate", "validate", "stv-plot", "audit",
         "bad-photometry",
-        "stv-events", "lc-plot", "gaia-fetch", "gaia-id-repair", "characterize", "classify", "stv-filter", "stv-tag",
-        "attrition", "review", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "nuclear-context",
+        "stv-events", "lc-plot", "gaia-fetch", "gaia-binary", "gaia-id-repair", "gaia-banyan-backfill", "characterize", "classify", "stv-filter", "stv-tag",
+        "attrition", "review", "review-tui", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "sed-fit", "sed-bandpasses", "sed-excess", "nuclear-context",
         "vetting",
         "ltv-pipeline", "ltv-injection", "ltv-new",
         "dev", "malcat-train",
@@ -182,8 +188,12 @@ def main():
             _run_module_main("malca.stv.events", remaining)
         elif command == "gaia-fetch":
             _run_module_main("malca.catalogs.gaia_fetch", remaining)
+        elif command == "gaia-binary":
+            _run_module_main("malca.enrichment.gaia_binary", remaining)
         elif command == "gaia-id-repair":
             _run_module_main("malca.catalogs.gaia_id_repair", remaining)
+        elif command == "gaia-banyan-backfill":
+            _run_module_main("malca.catalogs.gaia_banyan_backfill", remaining)
         elif command == "characterize":
             _run_module_main("malca.enrichment.characterize", remaining)
         elif command == "classify":
@@ -194,6 +204,8 @@ def main():
             _run_module_main("malca.stv.tag", remaining)
         elif command == "review":
             _run_module_main("malca.review.app", remaining)
+        elif command == "review-tui":
+            _run_module_main("malca.review.tui", remaining)
         elif command == "review-refresh":
             _run_module_main("malca.review.refresh", remaining)
         elif command == "review-merge":
@@ -234,6 +246,12 @@ def main():
             _run_module_main("malca.migration.cli", remaining)
         elif command == "sed-photometry":
             _run_module_main("malca.enrichment.sed_photometry", remaining)
+        elif command == "sed-fit":
+            _run_module_main("malca.enrichment.sed_fit", remaining)
+        elif command == "sed-bandpasses":
+            _run_module_main("malca.enrichment.sed_bandpasses", remaining)
+        elif command == "sed-excess":
+            _run_module_main("malca.enrichment.sed_excess", remaining)
         elif command == "nuclear-context":
             _run_module_main("malca.nuclear.cmd", remaining)
         elif command == "vetting":
@@ -281,10 +299,12 @@ def main():
     subparsers.add_parser("lc-plot", description="Create a publication-quality light-curve figure")
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("gaia-id-repair", description="Canonicalize stale Gaia DR2 IDs in review artifacts")
+    subparsers.add_parser("gaia-banyan-backfill", description="Backfill Gaia astrometry and BANYAN Sigma for review cohorts")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", description="Classify candidates by variability type")
     # Review
     subparsers.add_parser("review", description="Launch Dash review GUI (keyboard-driven, fast)")
+    subparsers.add_parser("review-tui", description="Launch terminal review UI with one managed Quick Look window")
     subparsers.add_parser("review-refresh", description="Refresh review DB stats from a run or bundle")
     subparsers.add_parser("review-merge", description="Merge reviewed subset DB content into a master review DB")
     subparsers.add_parser("review-sync", description="Import/export Git-trackable review bundle files")
@@ -315,9 +335,13 @@ def main():
     subparsers.add_parser("vsx-crossmatch", description="Crossmatch ASAS-SN catalog with VSX catalog")
     subparsers.add_parser("external-lcs", description="Fetch external light curves for candidate tables")
     subparsers.add_parser("multi-survey-features", description="Compute event-relative multi-survey features")
+    subparsers.add_parser("gaia-binary", description="Build Gaia DR3 binary and eclipsing-binary evidence")
     subparsers.add_parser("feature-layers", description="Materialize lc/external/derived feature layers for candidate tables")
     subparsers.add_parser("migrate", description="Mirror-copy outputs into the three-layer product structure")
     subparsers.add_parser("sed-photometry", description="Fetch and normalize SED photometry for candidate tables")
+    subparsers.add_parser("sed-fit", description="Refit stored SED photometry without querying catalogs")
+    subparsers.add_parser("sed-bandpasses", description="Cache and validate SVO filter response curves")
+    subparsers.add_parser("sed-excess", description="Compute model-aware WISE SED excess posteriors")
     subparsers.add_parser("nuclear-context", description="Run nuclear context enrichment and AGN/TDE/CLAGN scores")
     # Other
     subparsers.add_parser("vetting", description="Run post-review vetting (SIMBAD, Gaia, ASAS-SN, ZTF, TNS, eROSITA, ...)")
