@@ -30,9 +30,61 @@ COMPACT_TQDM_BAR_FORMAT = (
     "{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} "
     "[{elapsed}<{remaining}, {rate_fmt}]"
 )
-GAIA_EB_OUTPUT_COLUMNS = ["source_id", "period", "var_type", "global_ranking"]
-GAIA_EB_CACHE_COLUMNS = [*GAIA_EB_OUTPUT_COLUMNS, "matched"]
-GAIA_EB_CACHE_FLUSH_CHUNKS = 50
+GAIA_EB_SCHEMA_VERSION = "2"
+GAIA_EB_TAP_COLUMNS = (
+    "solution_id",
+    "source_id",
+    "global_ranking",
+    "reference_time",
+    "frequency",
+    "frequency_error",
+    "geom_model_reference_level",
+    "geom_model_reference_level_error",
+    "geom_model_gaussian1_phase",
+    "geom_model_gaussian1_phase_error",
+    "geom_model_gaussian1_sigma",
+    "geom_model_gaussian1_sigma_error",
+    "geom_model_gaussian1_depth",
+    "geom_model_gaussian1_depth_error",
+    "geom_model_gaussian2_phase",
+    "geom_model_gaussian2_phase_error",
+    "geom_model_gaussian2_sigma",
+    "geom_model_gaussian2_sigma_error",
+    "geom_model_gaussian2_depth",
+    "geom_model_gaussian2_depth_error",
+    "geom_model_cosine_half_period_amplitude",
+    "geom_model_cosine_half_period_amplitude_error",
+    "geom_model_cosine_half_period_phase",
+    "geom_model_cosine_half_period_phase_error",
+    "model_type",
+    "reduced_chi2",
+    "derived_primary_ecl_phase",
+    "derived_primary_ecl_phase_error",
+    "derived_primary_ecl_duration",
+    "derived_primary_ecl_duration_error",
+    "derived_primary_ecl_depth",
+    "derived_primary_ecl_depth_error",
+    "derived_secondary_ecl_phase",
+    "derived_secondary_ecl_phase_error",
+    "derived_secondary_ecl_duration",
+    "derived_secondary_ecl_duration_error",
+    "derived_secondary_ecl_depth",
+    "derived_secondary_ecl_depth_error",
+)
+GAIA_EB_OUTPUT_COLUMNS = [
+    "source_id",
+    "period",
+    "period_error",
+    "var_type",
+    *[column for column in GAIA_EB_TAP_COLUMNS if column != "source_id"],
+]
+GAIA_EB_CACHE_COLUMNS = [
+    *GAIA_EB_OUTPUT_COLUMNS,
+    "matched",
+    "gaia_eb_schema_version",
+]
+GAIA_EB_STRING_COLUMNS = {"var_type", "model_type", "gaia_eb_schema_version"}
+GAIA_EB_CACHE_FLUSH_CHUNKS = 10
 
 PERIOD_SOURCE_PRIORITY = (
     "gaia_eb",
@@ -384,13 +436,15 @@ def fetch_gaia_dr3_eb_periods(
     cache_dir: Path | None = None,
     chunk_size: int = 1000,
     show_tqdm: bool = True,
+    refresh_cache: bool = False,
+    allow_network: bool = True,
 ) -> pd.DataFrame:
-    """Fetch Gaia DR3 eclipsing-binary periods for source IDs, with negative lookup cache."""
+    """Read Gaia DR3 EB models from cache and optionally query cache misses."""
     if source_ids is None or len(source_ids) == 0:
         return pd.DataFrame(columns=GAIA_EB_OUTPUT_COLUMNS)
 
     requested_ids = sorted({int(sid) for sid in source_ids})
-    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR / "gaia"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / "gaia_dr3_eb_periods.parquet"
 
@@ -404,15 +458,26 @@ def fetch_gaia_dr3_eb_periods(
             cached_df = pd.DataFrame(columns=GAIA_EB_CACHE_COLUMNS)
     for col in GAIA_EB_CACHE_COLUMNS:
         if col not in cached_df.columns:
-            cached_df[col] = True if col == "matched" else np.nan if col in {"source_id", "period", "global_ranking"} else ""
+            if col == "matched":
+                cached_df[col] = True
+            elif col in GAIA_EB_STRING_COLUMNS:
+                cached_df[col] = ""
+            else:
+                cached_df[col] = np.nan
     cached_df = cached_df.loc[:, GAIA_EB_CACHE_COLUMNS].copy()
     cached_df["source_id"] = pd.to_numeric(cached_df["source_id"], errors="coerce").astype("Int64")
 
-    cached_ids = {
+    cached_ids = set() if refresh_cache else {
         int(v)
-        for v in pd.to_numeric(cached_df["source_id"], errors="coerce").dropna().tolist()
+        for v in pd.to_numeric(
+            cached_df.loc[
+                cached_df["gaia_eb_schema_version"].fillna("").astype(str).eq(GAIA_EB_SCHEMA_VERSION),
+                "source_id",
+            ],
+            errors="coerce",
+        ).dropna().tolist()
     }
-    missing_ids = [sid for sid in requested_ids if sid not in cached_ids]
+    missing_ids = [sid for sid in requested_ids if sid not in cached_ids] if allow_network else []
     if show_tqdm and missing_ids:
         tqdm.write(f"[fetch_gaia_eb] Querying Gaia TAP for {len(missing_ids)} uncached source IDs")
 
@@ -447,7 +512,7 @@ def fetch_gaia_dr3_eb_periods(
             chunk = missing_ids[i : i + max(1, int(chunk_size))]
             ids_str = ",".join(str(sid) for sid in chunk)
             query = f"""
-                SELECT source_id, frequency, model_type, global_ranking
+                SELECT {", ".join(GAIA_EB_TAP_COLUMNS)}
                 FROM gaiadr3.vari_eclipsing_binary
                 WHERE source_id IN ({ids_str})
             """
@@ -469,41 +534,64 @@ def fetch_gaia_dr3_eb_periods(
                         )
                     time.sleep(delay)
 
+            def clean_value(value: object) -> object:
+                if value is None or np.ma.is_masked(value):
+                    return np.nan
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                return value.item() if isinstance(value, np.generic) else value
+
+            def row_value(row: object, column: str) -> object:
+                try:
+                    return clean_value(row[column])  # type: ignore[index]
+                except (KeyError, TypeError, ValueError):
+                    return np.nan
+
             found_ids: set[int] = set()
             for row in result:
                 sid_int = int(row["source_id"])
                 found_ids.add(sid_int)
-                freq = row["frequency"]
+                freq = row_value(row, "frequency")
+                freq_error = row_value(row, "frequency_error")
                 period = np.nan
-                if freq is not None:
-                    try:
-                        fv = float(freq)
-                        if np.isfinite(fv) and fv > 0:
-                            period = 1.0 / fv
-                    except Exception:
-                        period = np.nan
+                period_error = np.nan
+                try:
+                    fv = float(freq)
+                    if np.isfinite(fv) and fv > 0:
+                        period = 1.0 / fv
+                        fe = float(freq_error)
+                        if np.isfinite(fe) and fe >= 0:
+                            period_error = fe / (fv * fv)
+                except (TypeError, ValueError):
+                    pass
 
-                new_rows.append(
-                    {
-                        "source_id": sid_int,
-                        "period": period,
-                        "var_type": str(row["model_type"]) if row["model_type"] is not None else "",
-                        "global_ranking": float(row["global_ranking"]) if row["global_ranking"] is not None else np.nan,
-                        "matched": True,
-                    }
-                )
+                raw = {column: row_value(row, column) for column in GAIA_EB_TAP_COLUMNS}
+                model_type = raw.get("model_type")
+                new_rows.append({
+                    "source_id": sid_int,
+                    "period": period,
+                    "period_error": period_error,
+                    "var_type": "" if pd.isna(model_type) else str(model_type),
+                    **{key: value for key, value in raw.items() if key != "source_id"},
+                    "matched": True,
+                    "gaia_eb_schema_version": GAIA_EB_SCHEMA_VERSION,
+                })
 
             for sid in chunk:
                 if int(sid) not in found_ids:
-                    new_rows.append(
-                        {
-                            "source_id": int(sid),
-                            "period": np.nan,
-                            "var_type": "",
-                            "global_ranking": np.nan,
-                            "matched": False,
-                        }
-                    )
+                    new_rows.append({
+                        "source_id": int(sid),
+                        "period": np.nan,
+                        "period_error": np.nan,
+                        "var_type": "",
+                        **{
+                            column: ("" if column == "model_type" else np.nan)
+                            for column in GAIA_EB_TAP_COLUMNS
+                            if column != "source_id"
+                        },
+                        "matched": False,
+                        "gaia_eb_schema_version": GAIA_EB_SCHEMA_VERSION,
+                    })
 
             if (iterator.n + 1) % GAIA_EB_CACHE_FLUSH_CHUNKS == 0:
                 flush_cache()

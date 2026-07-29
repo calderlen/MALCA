@@ -48,10 +48,18 @@ def test_fetch_gaia_dr3_eb_periods_caches_negative_lookups(
         chunk_size=2,
         show_tqdm=False,
     )
+    cached_only = post_filter.fetch_gaia_dr3_eb_periods(
+        [1, 2, 3],
+        cache_dir=tmp_path,
+        chunk_size=2,
+        show_tqdm=False,
+        allow_network=False,
+    )
 
     assert len(calls) == 1
     assert first["source_id"].astype(int).tolist() == [1]
     assert second["source_id"].astype(int).tolist() == [1]
+    assert cached_only["source_id"].astype(int).tolist() == [1]
 
     cache = pd.read_parquet(tmp_path / "gaia_dr3_eb_periods.parquet")
     by_id = cache.set_index(cache["source_id"].astype(int))
