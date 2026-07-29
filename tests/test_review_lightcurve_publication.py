@@ -17,7 +17,14 @@ if "celerite2" not in sys.modules:
     )
 
 from malca.plotting.lightcurve_publication import _load_matplotlib
-from malca.review.lightcurve_assembly import PlotPanel, PlotTrace, PlotVLine, ReviewLightCurvePlotSpec
+from malca.review.lightcurve_assembly import (
+    PlotAnnotation,
+    PlotEventOverlay,
+    PlotPanel,
+    PlotTrace,
+    PlotVLine,
+    ReviewLightCurvePlotSpec,
+)
 from malca.review.interactive_plot import build_interactive_lightcurve_figure
 from malca.review.lightcurve_pdf import (
     _apply_magnitude_y_tick_policy,
@@ -275,6 +282,67 @@ def test_review_pdf_skips_phase_cycle_vlines(monkeypatch: pytest.MonkeyPatch) ->
 
     assert pdf.startswith(b"%PDF")
     assert drawn_vlines == []
+
+
+def test_review_pdf_renders_event_marker_and_threshold_at_data_derived_y(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import matplotlib.axes
+
+    rendered: list[tuple[float, float, str]] = []
+    original_text = matplotlib.axes.Axes.text
+
+    def record_text(self, x, y, text, *args, **kwargs):
+        rendered.append((float(x), float(y), str(text)))
+        return original_text(self, x, y, text, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", record_text)
+    spec = ReviewLightCurvePlotSpec(
+        title="",
+        jd_offset=2458000.0,
+        panels=(PlotPanel(panel_id="raw", kind="raw", y_label=r"$m$ [mag]"),),
+        traces=(
+            PlotTrace(
+                panel_id="raw",
+                x=np.array([0.0, 1.0, 2.0]),
+                y=np.array([14.0, 14.8, 14.1]),
+                label="g",
+                showlegend=True,
+            ),
+        ),
+        baselines=(),
+        events=(PlotEventOverlay(panel_id="raw", x0=1.0, half_width=0.4, kind="dip"),),
+        hlines=(),
+        vlines=(),
+        annotations=(
+            PlotAnnotation(panel_id="raw", text="◆", x=1.0, y=0.0, xref="axis", yref="axis"),
+            PlotAnnotation(
+                panel_id="raw",
+                text="Dip thr logBF=5.00, sig=3.00",
+                x=1.0,
+                y=0.0,
+                xref="axis",
+                yref="axis",
+            ),
+        ),
+        legend_panel_id="raw",
+        warnings=(),
+        status="ok",
+        status_message="",
+        stat_rows=(),
+        camera_diagnostics={},
+        camera_options=(),
+        camera_values=(),
+    )
+
+    pdf = render_review_lightcurve_pdf(spec)
+
+    assert pdf.startswith(b"%PDF")
+    marker = next(item for item in rendered if item[2] == "◆")
+    threshold = next(item for item in rendered if item[2].startswith("Dip thr"))
+    assert marker[0] == pytest.approx(1.0)
+    assert marker[1] > 14.8
+    assert threshold[1] > marker[1]
 
 
 def test_review_lightcurve_publication_pdf_uses_native_matplotlib_data_path(tmp_path: Path) -> None:

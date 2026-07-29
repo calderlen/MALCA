@@ -14,7 +14,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from malca.plotting.color_color_labels import LABEL_KS_W3, LABEL_KS_W4
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+
+from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
 
 
 DEFAULT_RUN_ROOT = Path("output/runs/dat3-full-extended_2026-07-01-v4")
@@ -39,16 +43,20 @@ REGION_LABELS = {
     "Transition": (5.28, 1.62),
 }
 
+REGION_ORDER = ("Diskless", "Debris", "Evolved", "Full", "Transition")
+REGION_ERROR_COLORS = {
+    "Diskless": "#4c72b0",
+    "Debris": "#55a868",
+    "Evolved": "#dd8452",
+    "Full": "#c44e52",
+    "Transition": "#8172b3",
+}
+
 
 plt.rcParams.update(
     {
-        "font.family": "serif",
-        "font.serif": ["Computer Modern Roman", "CMU Serif", "cmr10"],
-        "mathtext.fontset": "cm",
+        **PUBLICATION_STYLE,
         "axes.formatter.use_mathtext": True,
-        "axes.unicode_minus": False,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
     }
 )
 
@@ -61,7 +69,6 @@ def _read_dippers(db_path: Path) -> pd.DataFrame:
             c.ra,
             c.dec,
             r.event_class,
-            r.interest_score,
             r.workflow_status,
             r.status,
             r.physical_primary,
@@ -111,7 +118,36 @@ def _add_colors(df: pd.DataFrame) -> pd.DataFrame:
     out["ks_w3_err"] = np.sqrt(out["tmass_k_err"] ** 2 + out["w3_err"] ** 2)
     out["ks_w4_err"] = np.sqrt(out["tmass_k_err"] ** 2 + out["w4_err"] ** 2)
     out.loc[~out["has_disk_color_errors"], ["ks_w3_err", "ks_w4_err"]] = np.nan
+    out["disk_region"] = [
+        classify_disk_region(x, y) if np.isfinite(x) and np.isfinite(y) else np.nan
+        for x, y in zip(out["ks_w4"], out["ks_w3"])
+    ]
     return out
+
+
+def _line_side(x0: float, y0: float, x1: float, y1: float, x: float, y: float) -> float:
+    return (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0)
+
+
+def classify_disk_region(ks_w4: float, ks_w3: float) -> str:
+    """Assign a disk-stage region from the figure-style boundary segments."""
+    x = float(ks_w4)
+    y = float(ks_w3)
+    s_diskless_debris = _line_side(0.0, 0.5, 0.42, -0.32, x, y)
+    s_debris_evolved = _line_side(1.5, 1.25, 2.4, -0.25, x, y)
+    s_evolved_transition = _line_side(3.5, 1.5, 6.55, 2.7, x, y)
+    s_upper = (
+        _line_side(2.5, 2.5, 3.5, 1.5, x, y)
+        if x <= 3.5
+        else _line_side(3.5, 1.5, 5.0, 0.0, x, y)
+    )
+    if s_upper > 0:
+        return "Full" if s_evolved_transition > 0 else "Transition"
+    if s_diskless_debris < 0:
+        return "Diskless"
+    if s_debris_evolved < 0:
+        return "Debris"
+    return "Evolved"
 
 
 def _write_boundary_table(output_dir: Path) -> pd.DataFrame:
@@ -162,19 +198,23 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
 
     if plotted["has_disk_color_errors"].any():
         err = plotted[plotted["has_disk_color_errors"]]
-        ax.errorbar(
-            err["ks_w4"],
-            err["ks_w3"],
-            xerr=err["ks_w4_err"],
-            yerr=err["ks_w3_err"],
-            fmt="none",
-            ecolor="black",
-            elinewidth=0.75,
-            capsize=2.8,
-            capthick=0.75,
-            alpha=0.75,
-            zorder=1,
-        )
+        for region_name in REGION_ORDER:
+            region = err.loc[err["disk_region"] == region_name]
+            if region.empty:
+                continue
+            ax.errorbar(
+                region["ks_w4"],
+                region["ks_w3"],
+                xerr=region["ks_w4_err"],
+                yerr=region["ks_w3_err"],
+                fmt="none",
+                ecolor=REGION_ERROR_COLORS[region_name],
+                elinewidth=0.85,
+                capsize=2.8,
+                capthick=0.75,
+                alpha=0.9,
+                zorder=1,
+            )
 
     ax.scatter(
         plotted["ks_w4"],
@@ -206,8 +246,8 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
 
     ax.set_xlim(-0.5, 6.8)
     ax.set_ylim(-0.75, 4.6)
-    ax.set_xlabel(r"$K_s - W_4\ (22\,\mu\mathrm{m})\ [\mathrm{mag}]$", fontsize=18)
-    ax.set_ylabel(r"$K_s - W_3\ (12\,\mu\mathrm{m})\ [\mathrm{mag}]$", fontsize=18)
+    ax.set_xlabel(LABEL_KS_W4, fontsize=18)
+    ax.set_ylabel(LABEL_KS_W3, fontsize=18)
 
     ax.xaxis.set_major_locator(MultipleLocator(1.0))
     ax.yaxis.set_major_locator(MultipleLocator(1.0))
@@ -238,6 +278,10 @@ def main() -> None:
     _plot(df, args.output_dir)
 
     plotted = int(df["has_disk_color_axes"].sum())
+    region_counts = {
+        region: int((df["disk_region"] == region).sum())
+        for region in REGION_ORDER
+    }
     with (args.output_dir / "july1_dipper_2mass_wise_disk_color_color_summary.json").open("w", encoding="utf-8") as fh:
         json.dump(
             {
@@ -246,6 +290,7 @@ def main() -> None:
                 "n_plotted": plotted,
                 "n_missing_axes": int(len(df) - plotted),
                 "n_with_errors": int(df["has_disk_color_errors"].sum()),
+                "disk_region_counts": region_counts,
                 "output_dir": str(args.output_dir),
             },
             fh,

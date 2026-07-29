@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import pytest
 
 from malca.plotting.lightcurve_publication import (
     filter_lightcurve,
@@ -11,7 +12,9 @@ from malca.plotting.lightcurve_publication import (
     plot_lightcurve_panel,
     plot_lightcurve,
     plot_phase_panel,
+    plot_phase_placeholder,
     plot_residual_panel,
+    prepare_median_centered_phase_source,
     resolve_time_axis,
 )
 
@@ -196,4 +199,103 @@ def test_phase_panel_uses_shared_phase_fold_helper():
     assert result.diagnostics is not None
     assert result.diagnostics["period_days"] == 1.0
     assert result.frame["time_plot"].between(0.0, 2.0).all()
+    plt.close(fig)
+
+
+def test_review_style_uses_camera_colors_band_markers_and_annotated_events():
+    frame = pd.DataFrame(
+        {
+            "JD": [2457000.0, 2457000.5, 2457001.0, 2457001.5],
+            "mag": [13.0, 13.2, 13.1, 13.3],
+            "error": [0.02, 0.02, 0.02, 0.02],
+            "v_g_band": [0, 1, 0, 1],
+            "camera_name": ["ba", "ba", "ba", "ba"],
+        }
+    )
+    fig, ax = plt.subplots()
+    result = plot_lightcurve_panel(
+        ax,
+        frame,
+        group_by="band-camera",
+        color_by="camera",
+        marker_by="band",
+        color_map={"ba": "#123456"},
+        marker_map={"g": "o", "V": "^"},
+        time_col="JD",
+        value_col="mag",
+        error_col="error",
+        band_col="v_g_band",
+        camera_col="camera_name",
+        show_errorbars=False,
+        marker_edgecolor=None,
+        rasterized=True,
+        legend_max_groups=1,
+        annotated_events=[
+            {
+                "kind": "dip",
+                "t0": 2457001.0,
+                "half_width": 0.1,
+                "base_color": "#ff0000",
+            }
+        ],
+    )
+
+    assert len(result.frame) == 4
+    assert len(ax.collections) == 2
+    assert all(collection.get_rasterized() for collection in ax.collections)
+    assert np.allclose(
+        ax.collections[0].get_facecolors(), ax.collections[1].get_facecolors()
+    )
+    assert not np.array_equal(
+        ax.collections[0].get_paths()[0].vertices,
+        ax.collections[1].get_paths()[0].vertices,
+    )
+    assert ax.get_legend() is None
+    assert len(ax.patches) == 1
+    assert any(text.get_text() == "dip" for text in ax.texts)
+    plt.close(fig)
+
+
+def test_publication_phase_fallback_centers_each_camera_band_and_shows_notice():
+    frame = pd.DataFrame(
+        {
+            "JD": [10.0, 11.0],
+            "mag": [14.0, 14.2],
+            "error": [0.02, 0.02],
+            "v_g_band": [0, 0],
+            "camera#": ["ba", "ba"],
+        }
+    )
+    source = prepare_median_centered_phase_source(frame)
+    fig, ax = plt.subplots()
+    result = plot_phase_panel(
+        ax,
+        source,
+        period_days=4.0,
+        epoch_jd=10.0,
+        value_mode="resid",
+        group_by="band-camera",
+        legend="none",
+        notice="median-centered fallback",
+    )
+
+    assert source["resid"].tolist() == pytest.approx([-0.1, 0.1])
+    assert result.frame["time_plot"].tolist() == [0.0, 0.25, 1.0, 1.25]
+    assert any("fallback" in text.get_text() for text in ax.texts)
+    assert any(
+        len(line.get_ydata()) == 2
+        and np.allclose(line.get_ydata(), [0.0, 0.0])
+        for line in ax.lines
+    )
+    plt.close(fig)
+
+
+def test_phase_placeholder_is_rendered_by_publication_module():
+    fig, ax = plt.subplots()
+    result = plot_phase_placeholder(ax, "No valid best period")
+
+    assert result.frame.empty
+    assert ax.get_title(loc="left") == "Best phase fold"
+    assert ax.get_xlabel() == "Phase (two cycles)"
+    assert any(text.get_text() == "No valid best period" for text in ax.texts)
     plt.close(fig)

@@ -129,7 +129,7 @@ def _read_reviews(db_path: Path, *, only_reviewed: bool = True) -> pd.DataFrame:
             SELECT
                 candidate_id,
                 event_class,
-                interest_score,
+                classification_confidence,
                 morphology_primary,
                 morphology_secondary,
                 physical_primary,
@@ -226,15 +226,13 @@ def _assign_bucket(row: pd.Series) -> str | None:
 
     if event_class == "dipper":
         return "Dipper"
-    if event_class == "unknown_interesting":
-        return "Interesting"
     if event_class == "ltv":
         return "LTV"
     if event_class == "microlensing":
         return "Microlensing"
     if event_class == "periodic" or morph_secondary in {"detached_binary_like", "eclipsing_like"}:
         return "Eclipsing binary"
-    if physical_primary == "unknown" or event_class in {"unknown", "unclear"}:
+    if physical_primary == "unknown" or event_class == "unknown":
         return "Unknown"
     return None
 

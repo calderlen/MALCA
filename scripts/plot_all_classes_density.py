@@ -109,41 +109,113 @@ def _galactic_to_matched_mollweide(l_deg, b_deg):
 
 def main():
     import argparse
+
+    default_run = REPO_ROOT / "output/runs/dat3-full-extended_2026-07-01-v4"
+    default_microlensing = REPO_ROOT / "output/microlensing/microlensing_results_20260619_001924.parquet"
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--extinction-map", choices=["sfd", "3d"], default="sfd")
+    parser.add_argument("--run-root", type=Path, default=default_run)
+    parser.add_argument(
+        "--review-db",
+        type=Path,
+        default=None,
+        help="Review SQLite DB; defaults to RUN_ROOT/review/review.db.",
+    )
+    parser.add_argument(
+        "--microlensing-parquet",
+        type=Path,
+        default=default_microlensing,
+        help="Optional microlensing fit summary used to tag FRED candidates.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for figure outputs; defaults to RUN_ROOT/results.",
+    )
     args = parser.parse_args()
 
+    run_root = args.run_root.expanduser().resolve()
+    review_db = (
+        args.review_db.expanduser().resolve()
+        if args.review_db is not None
+        else (run_root / "review" / "review.db")
+    )
+    output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else (run_root / "results")
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     suffix = "_3d" if args.extinction_map == "3d" else ""
-    out_pdf = f"output/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.pdf"
-    out_png = f"output/runs/runs_march18_bundle_all/results/all_classes_mollweide{suffix}.png"
+    out_pdf = output_dir / f"all_classes_mollweide{suffix}.pdf"
+    out_png = output_dir / f"all_classes_mollweide{suffix}.png"
     print("Gathering data...")
+    print(f"Review DB: {review_db}")
     # 1. Get coords from DB
-    conn = sqlite3.connect('output/runs/runs_march18_bundle_all/review/review.taxonomy_filled.db')
-    c = conn.cursor()
-    c.execute('SELECT candidate_id, payload_json FROM candidates')
-    rows = []
-    for cid, p_json in c.fetchall():
-        p = json.loads(p_json)
-        ext = p.get('external_stats', {})
-        ra = ext.get('ra_deg', p.get('ra_deg'))
-        dec = ext.get('dec_deg', p.get('dec_deg'))
-        rows.append({'candidate_id': cid, 'ra': ra, 'dec': dec})
-    df_coords = pd.DataFrame(rows)
-    df_coords['candidate_id'] = df_coords['candidate_id'].astype(str)
+    conn = sqlite3.connect(review_db)
+    candidate_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(candidates)")
+    }
+    coord_columns = [col for col in ("candidate_id", "ra", "dec", "payload_json") if col in candidate_columns]
+    df_coords = pd.read_sql_query(
+        f"SELECT {', '.join(coord_columns)} FROM candidates",
+        conn,
+    )
+    df_coords["candidate_id"] = df_coords["candidate_id"].astype(str)
 
-    # 2. Get event_class from CSV
-    csv_path = 'output/runs/runs_march18_bundle_all/results/march18_review_cmd_dustmaps_full.csv'
-    df_csv = pd.read_csv(csv_path)
-    df_csv['candidate_id'] = df_csv['candidate_id'].astype(str)
+    def _resolve_coord(row: pd.Series, column: str, payload_key: str) -> object:
+        value = row.get(column, np.nan)
+        if pd.notna(value):
+            return value
+        payload = row.get("payload_json")
+        if isinstance(payload, str) and payload.strip():
+            try:
+                payload_data = json.loads(payload)
+            except json.JSONDecodeError:
+                payload_data = {}
+            external = payload_data.get("external_stats", {}) if isinstance(payload_data, dict) else {}
+            for source in (external, payload_data if isinstance(payload_data, dict) else {}):
+                if isinstance(source, dict) and pd.notna(source.get(payload_key)):
+                    return source.get(payload_key)
+        return np.nan
 
-    # 3. Get best_model from parquet
-    pq_path = 'output/microlensing/microlensing_results_20260619_001924.parquet'
-    df_pq = pd.read_parquet(pq_path, columns=['candidate_id', 'best_model'])
-    df_pq['candidate_id'] = df_pq['candidate_id'].astype(str)
+    if "ra" not in df_coords.columns:
+        df_coords["ra"] = np.nan
+    if "dec" not in df_coords.columns:
+        df_coords["dec"] = np.nan
+    df_coords["ra"] = df_coords.apply(lambda row: _resolve_coord(row, "ra", "ra_deg"), axis=1)
+    df_coords["dec"] = df_coords.apply(lambda row: _resolve_coord(row, "dec", "dec_deg"), axis=1)
+    df_coords = df_coords[["candidate_id", "ra", "dec"]]
+
+    # 2. Get event_class from reviews
+    df_labels = pd.read_sql_query(
+        """
+        SELECT candidate_id, event_class
+        FROM reviews
+        WHERE event_class IN ('dipper', 'ltv', 'microlensing')
+        """,
+        conn,
+    )
+    conn.close()
+    df_labels["candidate_id"] = df_labels["candidate_id"].astype(str)
+    print(f"Loaded {len(df_labels)} reviewed dipper/LTV/microlensing candidates")
+
+    # 3. Optional microlensing best_model overlay for FRED tagging
+    df_pq = pd.DataFrame(columns=["candidate_id", "best_model"])
+    microlensing_parquet = args.microlensing_parquet.expanduser().resolve()
+    if microlensing_parquet.exists():
+        df_pq = pd.read_parquet(microlensing_parquet, columns=["candidate_id", "best_model"])
+        df_pq["candidate_id"] = df_pq["candidate_id"].astype(str)
+        print(f"Loaded microlensing best_model from {microlensing_parquet}")
+    else:
+        print(f"Microlensing parquet not found; skipping FRED overlay: {microlensing_parquet}")
 
     # Merge
-    df_merged = df_csv[['candidate_id', 'event_class']].merge(df_pq, on='candidate_id', how='left')
-    df_merged = df_merged.merge(df_coords, on='candidate_id', how='left')
+    df_merged = df_labels.merge(df_pq, on="candidate_id", how="left")
+    df_merged = df_merged.merge(df_coords, on="candidate_id", how="left")
 
     df_merged['final_plot_class'] = 'other'
     df_merged.loc[df_merged['event_class'] == 'ltv', 'final_plot_class'] = 'LTV'

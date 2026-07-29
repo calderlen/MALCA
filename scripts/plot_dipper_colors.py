@@ -1,3 +1,4 @@
+import argparse
 import json
 import sqlite3
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 from matplotlib.ticker import AutoMinorLocator
 
 from malca.enrichment.characterize import crossmatch_2mass, crossmatch_allwise
@@ -19,15 +21,32 @@ from malca.enrichment.sed_alpha import (
     _prepared_alpha_points,
     compute_sed_alpha_features,
 )
+from malca.plotting.color_color_labels import (
+    LABEL_H_KS,
+    LABEL_W1_W2,
+    LABEL_W1_W4,
+    LABEL_W2_W3,
+    color_color_mag_label,
+)
 from malca.plotting.lightcurve_publication import apply_publication_rcparams
 
 
 RUN_ROOT = Path("output/runs/runs_march18_bundle_all")
 RESULTS_DIR = RUN_ROOT / "results"
 REVIEW_DIR = RUN_ROOT / "review"
-LABELS_CSV = RESULTS_DIR / "march18_review_cmd_dustmaps_full.csv"
+LABELS_CSV: Path | None = RESULTS_DIR / "march18_review_cmd_dustmaps_full.csv"
 REVIEW_DB = REVIEW_DIR / "review.taxonomy_filled.db"
 SED_PHOTOMETRY = REVIEW_DIR / "review.taxonomy_filled_sed_photometry.parquet"
+SED_EXCESS_SUMMARY: Path | None = None
+
+EXCESS_CLASS_STYLES = {
+    "robust": ("Robust", "#b2182b"),
+    "probable": ("Probable", "#ef8a62"),
+    "single_band_candidate": ("Single-band candidate", "#7b3294"),
+    "none": ("No excess", "#2166ac"),
+    "unassessable": ("Unassessable", "#969696"),
+    "not_evaluated": ("Not evaluated", "#252525"),
+}
 
 WISE_COLS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]
 TMASS_COLS = ["tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
@@ -117,51 +136,109 @@ def _hypot2(a: pd.Series, b: pd.Series) -> pd.Series:
     return pd.Series(out, index=a.index).where(np.isfinite(a_num) & np.isfinite(b_num))
 
 
-def _load_dipper_payloads() -> pd.DataFrame:
-    labels = pd.read_csv(LABELS_CSV, dtype={"candidate_id": str})
-    dipper_ids = labels.loc[
-        labels["event_class"].astype(str).eq("dipper"), "candidate_id"
-    ].astype(str).tolist()
-    print(f"Loaded {len(dipper_ids)} labeled dippers from {LABELS_CSV}")
+def _load_dipper_ids(conn: sqlite3.Connection) -> list[str]:
+    if LABELS_CSV is not None:
+        labels = pd.read_csv(LABELS_CSV, dtype={"candidate_id": str})
+        dipper_ids = labels.loc[
+            labels["event_class"].astype(str).eq("dipper"), "candidate_id"
+        ].astype(str).tolist()
+        print(f"Loaded {len(dipper_ids)} labeled dippers from {LABELS_CSV}")
+        return dipper_ids
 
+    rows = conn.execute(
+        "SELECT candidate_id FROM reviews WHERE event_class = 'dipper' ORDER BY candidate_id"
+    ).fetchall()
+    dipper_ids = [str(row[0]) for row in rows]
+    print(f"Loaded {len(dipper_ids)} labeled dippers from {REVIEW_DB}:reviews")
+    return dipper_ids
+
+
+def _load_dipper_payloads() -> pd.DataFrame:
+    requested_columns = [
+        "candidate_id",
+        "payload_json",
+        "ra",
+        "dec",
+        "A_v_3d",
+        "source_id",
+        "gaia_id",
+        "yso_class",
+        "vphas_r_ha",
+        "vphas_r_i",
+        "teff50",
+        "teff16",
+        "teff84",
+        "teff_gspphot",
+        "teff_gspphot_lower",
+        "teff_gspphot_upper",
+        *WISE_COLS,
+        *TMASS_COLS,
+        "H_K",
+        "w1_w2",
+    ]
     with sqlite3.connect(REVIEW_DB) as conn:
-        payload_by_id = {
-            str(cid): json.loads(payload_json or "{}")
-            for cid, payload_json in conn.execute("SELECT candidate_id, payload_json FROM candidates")
+        dipper_ids = _load_dipper_ids(conn)
+        candidate_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(candidates)")
         }
+        selected_columns = [col for col in requested_columns if col in candidate_columns]
+        candidates = pd.read_sql_query(
+            f"SELECT {', '.join(selected_columns)} FROM candidates",
+            conn,
+        )
+    candidates["candidate_id"] = candidates["candidate_id"].astype(str)
+    candidate_by_id = candidates.set_index("candidate_id", drop=False)
 
     rows: list[dict[str, object]] = []
     missing_ids: list[str] = []
     for cid in dipper_ids:
-        payload = payload_by_id.get(str(cid))
-        if payload is None:
+        if str(cid) not in candidate_by_id.index:
             missing_ids.append(str(cid))
             continue
+        candidate = candidate_by_id.loc[str(cid)]
+        payload = json.loads(candidate.get("payload_json") or "{}")
         external = payload.get("external_stats", {}) if isinstance(payload, dict) else {}
+
+        def structured_or_payload(column: str, *fallback_keys: str) -> object:
+            value = candidate.get(column, np.nan)
+            if _finite_numeric(value):
+                return value
+            if isinstance(value, str) and value.strip() and value.strip().lower() not in {"nan", "none", "<na>"}:
+                return value
+            keys = fallback_keys or (column,)
+            return _first_present(payload, external, keys)
+
         row = {
             "candidate_id": str(cid),
-            "ra": _first_present(payload, external, ("ra", "ra_deg")),
-            "dec": _first_present(payload, external, ("dec", "dec_deg")),
-            "A_v_3d": _first_present(payload, external, ("A_v_3d",)),
-            "source_id": _first_present(payload, external, ("source_id", "gaia_id")),
-            "yso_class": external.get("yso_class", payload.get("yso_class")),
-            "vphas_r_ha": _first_present(payload, external, ("vphas_r_ha",)),
-            "vphas_r_i": _first_present(payload, external, ("vphas_r_i",)),
-            "teff50": _first_present(payload, external, ("teff50",)),
-            "teff16": _first_present(payload, external, ("teff16",)),
-            "teff84": _first_present(payload, external, ("teff84",)),
-            "teff_gspphot": _first_present(payload, external, ("teff_gspphot",)),
-            "teff_gspphot_lower": _first_present(payload, external, ("teff_gspphot_lower",)),
-            "teff_gspphot_upper": _first_present(payload, external, ("teff_gspphot_upper",)),
+            "ra": structured_or_payload("ra", "ra", "ra_deg"),
+            "dec": structured_or_payload("dec", "dec", "dec_deg"),
+            "A_v_3d": structured_or_payload("A_v_3d"),
+            "source_id": structured_or_payload("source_id", "source_id", "gaia_id"),
+            "yso_class": structured_or_payload("yso_class"),
+            "vphas_r_ha": structured_or_payload("vphas_r_ha"),
+            "vphas_r_i": structured_or_payload("vphas_r_i"),
+            "teff50": structured_or_payload("teff50"),
+            "teff16": structured_or_payload("teff16"),
+            "teff84": structured_or_payload("teff84"),
+            "teff_gspphot": structured_or_payload("teff_gspphot"),
+            "teff_gspphot_lower": structured_or_payload("teff_gspphot_lower"),
+            "teff_gspphot_upper": structured_or_payload("teff_gspphot_upper"),
         }
         for col in [*WISE_COLS, *TMASS_COLS, "H_K", "w1_w2"]:
-            row[col] = _first_present(payload, external, (col,))
+            row[col] = structured_or_payload(col)
         rows.append(row)
 
     if missing_ids:
         print(f"Warning: {len(missing_ids)} labeled dippers missing from review DB: {', '.join(missing_ids)}")
     df = pd.DataFrame(rows)
-    return _to_numeric(df, NUMERIC_COLS)
+    df = _to_numeric(df, NUMERIC_COLS)
+    print(
+        "Loaded structured candidate data: "
+        f"coordinates={_finite_xy_count(df, 'ra', 'dec')}/{len(df)}, "
+        f"W1-W2={_finite_xy_count(df, 'w1', 'w2')}/{len(df)}, "
+        f"W1-W4={_finite_xy_count(df, 'w1', 'w4')}/{len(df)}"
+    )
+    return df
 
 
 def _needs_refresh(df: pd.DataFrame, cols: list[str]) -> bool:
@@ -173,10 +250,14 @@ def _needs_refresh(df: pd.DataFrame, cols: list[str]) -> bool:
     return any(_finite_count(df.loc[finite_coord], col) < int(finite_coord.sum()) for col in cols)
 
 
-def _refresh_catalog_photometry(df: pd.DataFrame) -> pd.DataFrame:
+def _refresh_catalog_photometry(df: pd.DataFrame, *, refresh_missing: bool) -> pd.DataFrame:
     out = df.copy()
     n_coord = int((np.isfinite(out["ra"]) & np.isfinite(out["dec"])).sum())
     print(f"Catalog refresh coordinate rows: {n_coord}/{len(out)}")
+
+    if not refresh_missing:
+        print("Using stored catalog photometry; missing-catalog refresh disabled.")
+        return _to_numeric(out, NUMERIC_COLS)
 
     if _needs_refresh(out, WISE_COLS):
         before = {col: _finite_count(out, col) for col in WISE_COLS}
@@ -201,8 +282,11 @@ def _refresh_catalog_photometry(df: pd.DataFrame) -> pd.DataFrame:
     return _to_numeric(out, NUMERIC_COLS)
 
 
-def _refresh_gaia_teff_bounds(df: pd.DataFrame) -> pd.DataFrame:
+def _refresh_gaia_teff_bounds(df: pd.DataFrame, *, refresh_missing: bool) -> pd.DataFrame:
     out = df.copy()
+    if not refresh_missing:
+        print("Using stored Gaia Teff bounds; missing-catalog refresh disabled.")
+        return _to_numeric(out, NUMERIC_COLS)
     if "source_id" not in out.columns:
         return out
 
@@ -336,6 +420,27 @@ def _load_sed_alpha(df: pd.DataFrame) -> pd.DataFrame:
         print(f"SED alpha status counts: {alpha['sed_alpha_status'].fillna('NA').value_counts().to_dict()}")
         print(f"SED alpha class counts: {alpha['sed_alpha_class'].fillna('NA').value_counts().to_dict()}")
     return alpha
+
+
+def _load_sed_excess_classes() -> pd.DataFrame:
+    columns = ["candidate_id", "excess_class"]
+    if SED_EXCESS_SUMMARY is None or not SED_EXCESS_SUMMARY.exists():
+        print("No SED-excess summary supplied; all dippers will be marked not evaluated.")
+        return pd.DataFrame(columns=columns)
+
+    excess = pd.read_csv(SED_EXCESS_SUMMARY, dtype={"candidate_id": str})
+    missing = [col for col in columns if col not in excess.columns]
+    if missing:
+        raise ValueError(
+            f"SED-excess summary is missing required columns {missing}: {SED_EXCESS_SUMMARY}"
+        )
+    excess = excess[columns].drop_duplicates(subset="candidate_id", keep="last")
+    excess["candidate_id"] = excess["candidate_id"].astype(str)
+    print(
+        f"Loaded {len(excess)} SED-excess classifications from {SED_EXCESS_SUMMARY}: "
+        f"{excess['excess_class'].fillna('not_evaluated').value_counts().to_dict()}"
+    )
+    return excess
 
 
 def _weighted_slope_error(x: np.ndarray, sigma_y: np.ndarray) -> float:
@@ -475,6 +580,11 @@ def _save_color_plot(
 ) -> int:
     fig, ax = plt.subplots(figsize=(6, 5))
     n = _plot_errorbar_points(ax, df, x=x, y=y, xerr=xerr, yerr=yerr, label=f"Dippers ({_finite_xy_count(df, x, y)})")
+    if n == 0:
+        plt.close(fig)
+        raise RuntimeError(
+            f"Refusing to save empty color plot {output}: no finite {x}/{y} pairs"
+        )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     if xlim is not None:
@@ -520,8 +630,8 @@ def _plot_vphas(df: pd.DataFrame, out_dir: Path) -> None:
         zorder=5,
         label=f"Dippers ({len(df_vphas)})",
     )
-    ax.set_xlabel(r"$r - i$ [mag]")
-    ax.set_ylabel(r"$r - H\alpha$ [mag]")
+    ax.set_xlabel(color_color_mag_label(r"r", r"i", "r", "i"))
+    ax.set_ylabel(color_color_mag_label(r"r", r"H\alpha", "r", "Ha"))
     _finish_color_axis(ax)
     fig.tight_layout()
     out_vphas = out_dir / "dipper_vphas_color_color.pdf"
@@ -536,10 +646,108 @@ def _plot_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
         print("No finite SED alpha values available to plot.")
         return
     finite = finite.sort_values("sed_alpha").reset_index(drop=True)
-    y_min = min(-3.1, float(finite["sed_alpha"].min()) - 0.3)
-    y_max = max(0.6, float(finite["sed_alpha"].max()) + 0.3)
+    finite["ecdf"] = np.arange(1, len(finite) + 1, dtype=float) / len(finite)
+    x_min = min(-3.2, float(finite["sed_alpha"].min()) - 0.15)
+    x_max = max(0.6, float(finite["sed_alpha"].max()) + 0.15)
 
-    fig, ax = plt.subplots(figsize=(8, 4.6))
+    class_specs = [
+        (x_min, -1.6, "Class III/photosphere", "0.92"),
+        (-1.6, -0.3, "Class II", "#ffedd5"),
+        (-0.3, 0.3, "Flat", "#fff7d6"),
+        (0.3, x_max, "Class I", "#fee2e2"),
+    ]
+    class_counts = {
+        "Class III/photosphere": int((finite["sed_alpha"] < -1.6).sum()),
+        "Class II": int(finite["sed_alpha"].between(-1.6, -0.3, inclusive="left").sum()),
+        "Flat": int(finite["sed_alpha"].between(-0.3, 0.3, inclusive="left").sum()),
+        "Class I": int((finite["sed_alpha"] >= 0.3).sum()),
+    }
+    unknown_count = int((~np.isfinite(summary["sed_alpha"])).sum())
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    for lo, hi, _, color in class_specs:
+        ax.axvspan(max(lo, x_min), min(hi, x_max), color=color, zorder=0)
+    for value in (-1.6, -0.3, 0.3):
+        ax.axvline(value, color="0.25", linestyle="--", linewidth=0.8, zorder=1)
+
+    ax.step(
+        finite["sed_alpha"],
+        finite["ecdf"],
+        where="post",
+        color="0.2",
+        linewidth=1.4,
+        zorder=3,
+    )
+    point_colors = np.select(
+        [
+            finite["sed_alpha"] < -1.6,
+            finite["sed_alpha"] < -0.3,
+            finite["sed_alpha"] < 0.3,
+        ],
+        ["#4d4d4d", "#d97706", "#ca8a04"],
+        default="#b2182b",
+    )
+    ax.scatter(
+        finite["sed_alpha"],
+        finite["ecdf"],
+        s=26,
+        c=point_colors,
+        edgecolors="white",
+        linewidths=0.35,
+        zorder=4,
+    )
+
+    count_text = (
+        f"Class III/photosphere: {class_counts['Class III/photosphere']}    "
+        f"Class II: {class_counts['Class II']}    "
+        f"Flat: {class_counts['Flat']}    Class I: {class_counts['Class I']}\n"
+        f"Finite: {len(finite)}/{len(summary)}    Unknown: {unknown_count}"
+    )
+    ax.text(
+        0.02,
+        0.98,
+        count_text,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "edgecolor": "0.8", "alpha": 0.9},
+        zorder=7,
+    )
+
+    tail = finite.nlargest(min(5, len(finite)), "sed_alpha").sort_values("sed_alpha", ascending=False)
+    label_y = np.linspace(0.88, 0.52, len(tail))
+    for (_, row), text_y in zip(tail.iterrows(), label_y):
+        ax.annotate(
+            str(row["candidate_id"]),
+            xy=(float(row["sed_alpha"]), float(row["ecdf"])),
+            xytext=(0.02, float(text_y)),
+            textcoords="data",
+            ha="left",
+            va="center",
+            fontsize=7.5,
+            arrowprops={"arrowstyle": "-", "color": "0.35", "linewidth": 0.6},
+            zorder=6,
+        )
+
+    ax.set_xlabel(r"SED $\alpha$ [2-24 $\mu$m]")
+    ax.set_ylabel("Empirical cumulative fraction")
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(axis="y", color="white", linewidth=0.8, alpha=0.8, zorder=1)
+    ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    fig.tight_layout()
+    out_path = out_dir / "dipper_sed_alpha_summary.pdf"
+    fig.savefig(out_path)
+    plt.close(fig)
+    print(
+        f"Saved {out_path} ({len(finite)} finite SED alpha values; "
+        f"class counts={class_counts}, unknown={unknown_count})"
+    )
+
+
+def _shade_sed_alpha_bands(ax: plt.Axes, y_min: float, y_max: float, *, labels: bool) -> None:
     bands = [
         (y_min, -1.6, "Class III/photosphere", "0.92"),
         (-1.6, -0.3, "Class II", "#ffedd5"),
@@ -548,40 +756,55 @@ def _plot_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
     ]
     for lo, hi, label, color in bands:
         ax.axhspan(max(lo, y_min), min(hi, y_max), color=color, zorder=0)
-        y_text = (max(lo, y_min) + min(hi, y_max)) / 2
-        if y_min <= y_text <= y_max:
-            ax.text(0.99, y_text, label, transform=ax.get_yaxis_transform(), ha="right", va="center", fontsize=8)
+        if labels:
+            y_text = (max(lo, y_min) + min(hi, y_max)) / 2
+            if y_min <= y_text <= y_max:
+                x_pos = 0.985 if label in {"Class II", "Class III/photosphere"} else 0.015
+                ax.text(
+                    x_pos,
+                    y_text,
+                    label,
+                    transform=ax.get_yaxis_transform(),
+                    ha="right" if x_pos > 0.5 else "left",
+                    va="center",
+                    fontsize=8,
+                    zorder=2,
+                )
+    for value in (-1.6, -0.3, 0.3):
+        ax.axhline(value, color="0.25", linestyle="--", linewidth=0.8, zorder=1)
 
-    xvals = np.arange(len(finite))
-    ax.errorbar(
-        xvals,
-        finite["sed_alpha"],
-        fmt="o",
-        color="k",
-        ecolor="0.25",
-        elinewidth=0.8,
-        capsize=3,
-        capthick=0.8,
-        markerfacecolor="k",
-        markeredgecolor="k",
-        markersize=5,
-        linestyle="none",
-        zorder=5,
-    )
-    ax.axhline(-1.6, color="k", linestyle="--", linewidth=0.5)
-    ax.axhline(-0.3, color="k", linestyle="--", linewidth=0.5)
-    ax.axhline(0.3, color="k", linestyle="--", linewidth=0.5)
-    ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]")
-    ax.set_xlabel("Dipper candidate")
-    ax.set_ylim(y_min, y_max)
-    ax.set_xticks(xvals)
-    ax.set_xticklabels(finite["candidate_id"].astype(str), rotation=90, fontsize=7)
-    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
-    fig.tight_layout()
-    out_path = out_dir / "dipper_sed_alpha_summary.pdf"
-    fig.savefig(out_path)
-    plt.close(fig)
-    print(f"Saved {out_path} ({len(finite)} finite SED alpha values)")
+
+def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: float) -> None:
+    for _, row in data.iterrows():
+        class_key = str(row.get("excess_class", "not_evaluated"))
+        if class_key not in EXCESS_CLASS_STYLES:
+            class_key = "not_evaluated"
+        _, color = EXCESS_CLASS_STYLES[class_key]
+        alpha_err = pd.to_numeric(pd.Series([row.get("sed_alpha_err")]), errors="coerce").iloc[0]
+        has_alpha_err = bool(np.isfinite(alpha_err) and alpha_err > 0)
+        lower = pd.to_numeric(pd.Series([row.get("teff_err_lower")]), errors="coerce").iloc[0]
+        upper = pd.to_numeric(pd.Series([row.get("teff_err_upper")]), errors="coerce").iloc[0]
+        has_teff_err = bool(np.isfinite(lower) and np.isfinite(upper) and lower >= 0 and upper >= 0)
+        xerr = np.array([[lower], [upper]]) if has_teff_err else None
+        ax.errorbar(
+            [float(row["teff"])],
+            [float(row["sed_alpha"])],
+            xerr=xerr,
+            yerr=[[alpha_err], [alpha_err]] if has_alpha_err else None,
+            fmt="o",
+            color=color,
+            ecolor=color,
+            elinewidth=0.7,
+            capsize=2.5,
+            capthick=0.7,
+            markerfacecolor=color if has_alpha_err else "white",
+            markeredgecolor=color,
+            markeredgewidth=1.1,
+            markersize=markersize,
+            linestyle="none",
+            alpha=0.9 if class_key != "unassessable" else 0.72,
+            zorder=5,
+        )
 
 
 def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
@@ -590,85 +813,62 @@ def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
         print("No finite paired SED alpha and Teff values available to plot.")
         return
 
-    x_min = max(0.0, float(finite["teff"].min()) - 350.0)
-    x_max = float(finite["teff"].max()) + 350.0
     y_min = min(-3.1, float(finite["sed_alpha"].min()) - 0.3)
     y_max = max(0.6, float(finite["sed_alpha"].max()) + 0.3)
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    bands = [
-        (y_min, -1.6, "Class III/photosphere", "0.92"),
-        (-1.6, -0.3, "Class II", "#ffedd5"),
-        (-0.3, 0.3, "Flat", "#fff7d6"),
-        (0.3, y_max, "Class I", "#fee2e2"),
-    ]
-    for lo, hi, label, color in bands:
-        ax.axhspan(max(lo, y_min), min(hi, y_max), color=color, zorder=0)
-        y_text = (max(lo, y_min) + min(hi, y_max)) / 2
-        if y_min <= y_text <= y_max:
-            ax.text(
-                0.98,
-                y_text,
-                label,
-                transform=ax.get_yaxis_transform(),
-                ha="right",
-                va="center",
-                fontsize=8,
-            )
+    fig, ax = plt.subplots(figsize=(7.6, 5.8))
+    _shade_sed_alpha_bands(ax, y_min, y_max, labels=False)
+    _draw_teff_alpha_points(ax, finite, markersize=6.0)
+    ax.set_xlabel(r"$T_{\rm eff}$ [K]")
+    ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]")
+    ax.set_ylim(y_min, y_max)
+    ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
+    class_counts = finite["excess_class"].fillna("not_evaluated").value_counts()
+    class_handles = []
+    for key, (label, color) in EXCESS_CLASS_STYLES.items():
+        count = int(class_counts.get(key, 0))
+        if count == 0:
+            continue
+        class_handles.append(
+            Line2D(
+                [],
+                [],
+                marker="o",
+                linestyle="none",
+                markerfacecolor=color,
+                markeredgecolor=color,
+                markersize=6,
+                label=f"{label} ({count})",
+            )
+        )
+    uncertainty_handles = [
+        Line2D([], [], marker="o", linestyle="none", markerfacecolor="0.25", markeredgecolor="0.25", markersize=6, label=r"$\alpha$ uncertainty available"),
+        Line2D([], [], marker="o", linestyle="none", markerfacecolor="white", markeredgecolor="0.25", markersize=6, label=r"$\alpha$ uncertainty unavailable"),
+    ]
+    fig.legend(
+        handles=[*class_handles, *uncertainty_handles],
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.005),
+        ncol=4,
+        frameon=True,
+        fontsize=8,
+    )
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.97, bottom=0.22)
+    out_path = out_dir / "dipper_sed_alpha_teff.pdf"
+    fig.savefig(out_path)
+    plt.close(fig)
     xerr_ok = (
         np.isfinite(finite["teff_err_lower"]) & np.isfinite(finite["teff_err_upper"])
         if {"teff_err_lower", "teff_err_upper"}.issubset(finite.columns)
         else pd.Series(False, index=finite.index)
     )
-    yerr_ok = np.isfinite(finite["sed_alpha_err"]) if "sed_alpha_err" in finite else pd.Series(False, index=finite.index)
-    label_used = False
-
-    def draw(mask: pd.Series, *, draw_xerr: bool, draw_yerr: bool) -> None:
-        nonlocal label_used
-        sub = finite.loc[mask]
-        if sub.empty:
-            return
-        xerr = None
-        if draw_xerr:
-            xerr = np.vstack([sub["teff_err_lower"].to_numpy(dtype=float), sub["teff_err_upper"].to_numpy(dtype=float)])
-        ax.errorbar(
-            sub["teff"],
-            sub["sed_alpha"],
-            xerr=xerr,
-            yerr=sub["sed_alpha_err"] if draw_yerr else None,
-            fmt="o",
-            color="k",
-            ecolor="0.25",
-            elinewidth=0.8,
-            capsize=3,
-            capthick=0.8,
-            markerfacecolor="k",
-            markeredgecolor="k",
-            markersize=6,
-            linestyle="none",
-            zorder=5,
-            label=f"Dippers ({len(finite)})" if not label_used else None,
-        )
-        label_used = True
-
-    draw(xerr_ok & yerr_ok, draw_xerr=True, draw_yerr=True)
-    draw(xerr_ok & ~yerr_ok, draw_xerr=True, draw_yerr=False)
-    draw(~xerr_ok & yerr_ok, draw_xerr=False, draw_yerr=True)
-    draw(~xerr_ok & ~yerr_ok, draw_xerr=False, draw_yerr=False)
-    for value in (-1.6, -0.3, 0.3):
-        ax.axhline(value, color="k", linestyle="--", linewidth=0.5, zorder=1)
-    ax.set_xlabel(r"$T_{\rm eff}$ [K]")
-    ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]")
-    ax.set_xlim(x_min, x_max)
-    ax.set_ylim(y_min, y_max)
-    ax.legend(loc="best")
-    ax.xaxis.set_minor_locator(AutoMinorLocator(2))
-    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
-    fig.tight_layout()
-    out_path = out_dir / "dipper_sed_alpha_teff.pdf"
-    fig.savefig(out_path)
-    plt.close(fig)
+    yerr_ok = (
+        np.isfinite(finite["sed_alpha_err"]) & (finite["sed_alpha_err"] > 0)
+        if "sed_alpha_err" in finite
+        else pd.Series(False, index=finite.index)
+    )
     missing_alpha = int((~np.isfinite(summary["sed_alpha"]) & np.isfinite(summary["teff"])).sum())
     missing_teff = int((np.isfinite(summary["sed_alpha"]) & ~np.isfinite(summary["teff"])).sum())
     missing_teff_err = int((~xerr_ok).sum())
@@ -702,16 +902,89 @@ def _add_missing_flags(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate dipper optical/IR color and SED-alpha summary plots."
+    )
+    parser.add_argument(
+        "--run-root",
+        type=Path,
+        help="Run directory. When set, labels default to the review DB and outputs to RUN_ROOT/results.",
+    )
+    parser.add_argument("--review-db", type=Path, help="Override the review SQLite database.")
+    parser.add_argument(
+        "--labels-csv",
+        type=Path,
+        help="Optional CSV containing candidate_id and event_class; otherwise use review DB labels.",
+    )
+    parser.add_argument("--sed-photometry", type=Path, help="Override the SED photometry parquet.")
+    parser.add_argument(
+        "--sed-excess-summary",
+        type=Path,
+        help="Optional candidate-level WISE excess summary used to color the Teff plot.",
+    )
+    parser.add_argument(
+        "--refresh-missing-catalog",
+        action="store_true",
+        help="Query remote AllWISE/2MASS services for missing stored measurements.",
+    )
+    return parser.parse_args()
+
+
+def _configure_paths(args: argparse.Namespace) -> None:
+    global RUN_ROOT, RESULTS_DIR, REVIEW_DIR, LABELS_CSV, REVIEW_DB, SED_PHOTOMETRY, SED_EXCESS_SUMMARY
+
+    if args.run_root is not None:
+        RUN_ROOT = args.run_root
+        RESULTS_DIR = RUN_ROOT / "results"
+        REVIEW_DIR = RUN_ROOT / "review"
+        LABELS_CSV = args.labels_csv
+        REVIEW_DB = args.review_db or (REVIEW_DIR / "review.db")
+        default_sed = RESULTS_DIR / "sed_photometry.parquet"
+        SED_PHOTOMETRY = args.sed_photometry or default_sed
+        default_excess = RESULTS_DIR / "marked_dipper_seds" / "marked_dipper_sed_excess_summary.csv"
+        SED_EXCESS_SUMMARY = args.sed_excess_summary or (default_excess if default_excess.exists() else None)
+    else:
+        if args.labels_csv is not None:
+            LABELS_CSV = args.labels_csv
+        if args.review_db is not None:
+            REVIEW_DB = args.review_db
+        if args.sed_photometry is not None:
+            SED_PHOTOMETRY = args.sed_photometry
+        if args.sed_excess_summary is not None:
+            SED_EXCESS_SUMMARY = args.sed_excess_summary
+
+    for input_path, label in ((REVIEW_DB, "review DB"), (SED_PHOTOMETRY, "SED photometry")):
+        if not input_path.exists():
+            raise FileNotFoundError(f"Missing {label}: {input_path}")
+    if LABELS_CSV is not None and not LABELS_CSV.exists():
+        raise FileNotFoundError(f"Missing labels CSV: {LABELS_CSV}")
+    if SED_EXCESS_SUMMARY is not None and not SED_EXCESS_SUMMARY.exists():
+        raise FileNotFoundError(f"Missing SED-excess summary: {SED_EXCESS_SUMMARY}")
+
+    print(f"Run root: {RUN_ROOT}")
+    print(f"Review DB: {REVIEW_DB}")
+    print(f"Labels: {LABELS_CSV if LABELS_CSV is not None else 'reviews.event_class'}")
+    print(f"SED photometry: {SED_PHOTOMETRY}")
+    print(f"SED-excess summary: {SED_EXCESS_SUMMARY or 'not supplied'}")
+    print(f"Results directory: {RESULTS_DIR}")
+
+
 def main() -> None:
+    args = _parse_args()
+    _configure_paths(args)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     df = _load_dipper_payloads()
-    df = _refresh_catalog_photometry(df)
+    df = _refresh_catalog_photometry(df, refresh_missing=args.refresh_missing_catalog)
     df = _compute_colors(df)
-    df = _refresh_gaia_teff_bounds(df)
+    df = _refresh_gaia_teff_bounds(df, refresh_missing=args.refresh_missing_catalog)
     df = _choose_teff(df)
 
     alpha = _load_sed_alpha(df)
     summary = df.merge(alpha, on="candidate_id", how="left")
+    excess_classes = _load_sed_excess_classes()
+    summary = summary.merge(excess_classes, on="candidate_id", how="left")
+    summary["excess_class"] = summary["excess_class"].fillna("not_evaluated")
     if "sed_alpha_n_points" in summary:
         summary["sed_alpha_band_count"] = summary["sed_alpha_n_points"]
     summary = _add_missing_flags(summary)
@@ -732,8 +1005,8 @@ def main() -> None:
         y="H_K",
         xerr="w1_w2_err",
         yerr="H_K_err",
-        xlabel=r"$W_1 - W_2$ [mag]",
-        ylabel=r"$H - K_s$ [mag]",
+        xlabel=LABEL_W1_W2,
+        ylabel=LABEL_H_KS,
         output=RESULTS_DIR / "dipper_wise_color_color.pdf",
         xlim=(-0.2, 1.0),
         ylim=(0.0, 1.0),
@@ -744,8 +1017,8 @@ def main() -> None:
         y="w2_w3",
         xerr="w1_w2_err",
         yerr="w2_w3_err",
-        xlabel=r"$W_1 - W_2$ [mag]",
-        ylabel=r"$W_2 - W_3$ [mag]",
+        xlabel=LABEL_W1_W2,
+        ylabel=LABEL_W2_W3,
         output=RESULTS_DIR / "dipper_wise_w1w2_w2w3.pdf",
     )
     _save_color_plot(
@@ -754,8 +1027,8 @@ def main() -> None:
         y="w1_w4",
         xerr="w1_w2_err",
         yerr="w1_w4_err",
-        xlabel=r"$W_1 - W_2$ [mag]",
-        ylabel=r"$W_1 - W_4$ [mag]",
+        xlabel=LABEL_W1_W2,
+        ylabel=LABEL_W1_W4,
         output=RESULTS_DIR / "dipper_wise_w1w2_w1w4.pdf",
     )
     _plot_sed_alpha(summary, RESULTS_DIR)

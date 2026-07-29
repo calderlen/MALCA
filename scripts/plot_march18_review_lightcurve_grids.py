@@ -20,7 +20,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator, StrMethodFormat
 
 from malca.config import DEFAULT_OUTPUT_DIR
 from malca.io.lightcurve_io import load_lightcurve_df
-from malca.plotting.lightcurve_publication import FIG_TWO_COL_WIDTH
+from malca.plotting.lightcurve_publication import FIG_TWO_COL_WIDTH, PUBLICATION_STYLE
 from malca.review.coordinate_labels import format_j_designation
 
 
@@ -59,12 +59,12 @@ HEADER_BOX = {
     "alpha": 1.0,
 }
 HEADER_FONT_SIZE = 5.4
-HEADER_NAME_LEFT_X = 0.035
-HEADER_NAME_WIDTH = 0.270
-HEADER_BOX_GAP = 0.055
+HEADER_NAME_LEFT_X = 0.025
+HEADER_NAME_WIDTH = 0.325
+HEADER_BOX_GAP = 0.020
 HEADER_COORD_LEFT_X = HEADER_NAME_LEFT_X + HEADER_NAME_WIDTH + HEADER_BOX_GAP
-HEADER_COORD_WIDTH = 0.570
-HEADER_BOX_HEIGHT = 0.056
+HEADER_COORD_WIDTH = 0.610
+HEADER_BOX_HEIGHT = 0.066
 SUBPLOT_LEFT = 0.067
 SUBPLOT_RIGHT = 0.992
 SUBPLOT_BOTTOM = 0.065
@@ -76,13 +76,8 @@ Y_LABEL_X = 0.026
 
 plt.rcParams.update(
     {
-        "font.family": "serif",
-        "font.serif": ["cmr10"],
-        "mathtext.fontset": "cm",
+        **PUBLICATION_STYLE,
         "axes.formatter.use_mathtext": True,
-        "axes.unicode_minus": False,
-        "pdf.fonttype": 42,
-        "ps.fonttype": 42,
     }
 )
 
@@ -92,7 +87,7 @@ def _read_review_rows(db_path: Path) -> pd.DataFrame:
         SELECT
             r.candidate_id,
             lower(r.event_class) AS event_class,
-            r.interest_score,
+            r.classification_confidence,
             r.workflow_status,
             r.status,
             c.lc_path,
@@ -119,7 +114,7 @@ def _read_review_rows(db_path: Path) -> pd.DataFrame:
                 WHEN 'microlensing' THEN 2
                 ELSE 3
             END,
-            coalesce(r.interest_score, 0) DESC,
+            coalesce(r.classification_confidence, 0) DESC,
             r.candidate_id
     """
     with sqlite3.connect(db_path) as conn:
@@ -177,7 +172,7 @@ def _coordinate_headers(row: pd.Series) -> tuple[str | None, str | None]:
         return str(row.get("candidate_id") or ""), None
     return (
         format_j_designation(ra, dec),
-        rf"RA={ra:.4f}$\!^\circ$, DEC={dec:+.4f}$\!^\circ$",
+        f"RA={ra:.4f}\N{DEGREE SIGN}, DEC={dec:+.4f}\N{DEGREE SIGN}",
     )
 
 
@@ -400,8 +395,13 @@ def _make_page_figure(
     run_root: Path,
     page_width: float,
     page_height: float,
+    min_active_rows: int | None = None,
 ) -> tuple[object, list[dict[str, object]]]:
-    active_rows = max(1, math.ceil(len(page_rows) / cols))
+    active_rows = max(
+        1,
+        math.ceil(len(page_rows) / cols),
+        int(min_active_rows or 0),
+    )
     active_page_height, subplot_bottom, subplot_top, xlabel_y, ylabel_y = _active_page_geometry(
         active_rows=active_rows,
         max_rows=rows,

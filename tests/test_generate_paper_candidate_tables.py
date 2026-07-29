@@ -16,6 +16,7 @@ from scripts.generate_paper_candidate_tables import (
     render_longtable,
     render_single_page_table,
     select_distance,
+    select_distance_with_uncertainty,
 )
 
 
@@ -32,8 +33,10 @@ def _review_db(path: Path) -> Path:
                 event_class TEXT,
                 workflow_status TEXT,
                 status TEXT,
-                interest_score INTEGER,
-                updated_at TEXT
+                classification_confidence INTEGER,
+                updated_at TEXT,
+                disposition TEXT,
+                duplicate_of TEXT
             );
             """
         )
@@ -60,12 +63,12 @@ def _review_db(path: Path) -> Path:
         ]
         conn.executemany("INSERT INTO candidates VALUES (?, ?)", candidates)
         conn.executemany(
-            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                ("dip_1", "dipper", "reviewed", "reviewed", 4, "2026-01-01"),
-                ("ltv_1", "ltv", "reviewed", "reviewed", 3, "2026-01-02"),
-                ("ml_unreviewed", "microlensing", "needs_followup", "reviewed", 2, "2026-01-03"),
-                ("eb_1", "periodic", "reviewed", "reviewed", 1, "2026-01-04"),
+                ("dip_1", "dipper", "reviewed", "reviewed", 4, "2026-01-01", "keep", None),
+                ("ltv_1", "ltv", "reviewed", "reviewed", 3, "2026-01-02", "keep", None),
+                ("ml_unreviewed", "microlensing", "needs_followup", "reviewed", 2, "2026-01-03", "ambiguous", None),
+                ("eb_1", "periodic", "reviewed", "reviewed", 1, "2026-01-04", "keep", None),
             ],
         )
     return path
@@ -99,6 +102,25 @@ def test_select_distance_prefers_existing_bailer_jones_value() -> None:
     assert source == "Bailer-Jones photogeometric"
 
 
+def test_select_distance_does_not_invert_parallax_without_a_posterior() -> None:
+    assert select_distance({"parallax": 0.4, "parallax_error": 0.3}) == (None, None)
+
+
+def test_select_distance_carries_matching_posterior_interval() -> None:
+    result = select_distance_with_uncertainty(
+        {
+            "bj_r_med_photogeo": 875.0,
+            "bj_r_lo_photogeo": 810.0,
+            "bj_r_hi_photogeo": 960.0,
+        }
+    )
+
+    assert result["distance_pc"] == pytest.approx(875.0)
+    assert result["distance_lower_pc"] == pytest.approx(810.0)
+    assert result["distance_upper_pc"] == pytest.approx(960.0)
+    assert result["distance_uncertainty_source"] == "Bailer-Jones photogeometric interval"
+
+
 def test_build_source_row_computes_publication_quantities() -> None:
     row = build_source_row(
         {
@@ -117,10 +139,25 @@ def test_build_source_row_computes_publication_quantities() -> None:
     )
 
     assert row["source"] == "J010000-200000"
-    assert row["mean_g_mag"] == pytest.approx(13.4)
+    assert row["aligned_asassn_mean_mag"] == pytest.approx(13.4)
     assert row["absolute_g_mag"] == pytest.approx(2.8422)
     assert row["bp_rp_mag"] == pytest.approx(0.9174)
     assert row["distance_source"] == "Gaia GSP-Phot"
+
+
+def test_build_source_row_does_not_treat_gaia_g_as_asassn_mean() -> None:
+    row = build_source_row(
+        {
+            "candidate_id": "dip_1",
+            "event_class": "dipper",
+            "ra": 15.0,
+            "dec": -20.0,
+            "phot_g_mean_mag": 13.0,
+        }
+    )
+
+    assert row["aligned_asassn_mean_mag"] is None
+    assert row["gaia_g_mag"] == pytest.approx(13.0)
 
 
 def test_render_longtable_has_class_sections_and_escaped_text() -> None:
@@ -143,6 +180,8 @@ def test_render_longtable_has_class_sections_and_escaped_text() -> None:
     assert r"\textit{Dipper candidates}" in latex
     assert r"\textit{Long-term-variable candidates}" in latex
     assert r"\textit{Microlensing candidates}" in latex
+    assert r"$\langle m_{\rm ASAS\text{-}SN}\rangle$" in latex
+    assert r"Mean $g$" not in latex
     assert r"MALCA \& visual" in latex
     assert r"\label{tab:test-candidates}" in latex
     assert latex_escape("a_b") == r"a\_b"
