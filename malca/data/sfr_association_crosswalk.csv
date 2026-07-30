@@ -1,0 +1,15 @@
+sfr_name,banyan_assoc,relation,include_in_sfr_probability,source,notes
+Taurus,TAU,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Canonical Taurus population only; similarly named moving groups are intentionally excluded
+Perseus,IC348,embedded_cluster,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,IC 348 is part of the Perseus molecular-cloud complex
+Perseus,NGC1333,embedded_cluster,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,NGC 1333 is part of the Perseus molecular-cloud complex
+lambda Orionis,LORI,cloud_association,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Explicit lambda Orionis population
+Ophiuchus,ROPH,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Explicit rho Ophiuchi population; Upper Sco is not treated as the same cloud
+Lupus,LUP,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Aggregate Lupus population
+Lupus,LUPI,active_cloud_subregion,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Lupus I
+Lupus,LUPII,active_cloud_subregion,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Lupus II
+Lupus,LUPIII,active_cloud_subregion,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Lupus III
+Lupus,LUPIV,active_cloud_subregion,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Lupus IV
+Chamaeleon,CHAI,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Cha I is mapped to the notebook's broader Chamaeleon footprint
+Corona Australis,CRA,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Canonical Corona Australis population
+Corona Australis,CRAEXT,extended_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Extended Corona Australis population
+Aquila-Serpens,SERPENS,active_cloud_population,true,Gagne et al. 2026 MOCAdb BANYAN Sigma model,Serpens population within the combined Aquila-Serpens footprint
