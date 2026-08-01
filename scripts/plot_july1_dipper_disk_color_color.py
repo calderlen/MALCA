@@ -15,7 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from malca.plotting.color_color_labels import LABEL_KS_W3, LABEL_KS_W4
+from malca.plotting.color_color_labels import LABEL_KS_W3_0, LABEL_KS_W4_0
+from malca.plotting.extinction import add_dereddened_ir_magnitudes, dereddened_color
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
@@ -27,7 +28,8 @@ DEFAULT_OUTPUT_DIR = DEFAULT_RUN_ROOT / "results" / "dipper_disk_color_color"
 
 
 # Figure-style region demarcations from the supplied 2MASS-WISE diagram.
-# Coordinates are in observed colors: x = Ks - W4, y = Ks - W3.
+# These are drawn as empirical reference guides in the corrected color plane:
+# x = (Ks - W4)_0, y = (Ks - W3)_0.
 BOUNDARY_SEGMENTS = {
     "diskless_debris": [(0.00, 0.50), (0.42, -0.32)],
     "debris_evolved": [(1.50, 1.25), (2.40, -0.25)],
@@ -68,6 +70,7 @@ def _read_dippers(db_path: Path) -> pd.DataFrame:
             c.asas_sn_id,
             c.ra,
             c.dec,
+            c.A_v_3d,
             r.event_class,
             r.workflow_status,
             r.status,
@@ -107,12 +110,14 @@ def _read_dippers(db_path: Path) -> pd.DataFrame:
 
 
 def _add_colors(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    out = add_dereddened_ir_magnitudes(df)
     for col in ("tmass_k", "tmass_k_err", "w3", "w3_err", "w4", "w4_err"):
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     out["ks_w3"] = out["tmass_k"] - out["w3"]
     out["ks_w4"] = out["tmass_k"] - out["w4"]
+    out["ks_w3_0"] = dereddened_color(out, "tmass_k", "w3")
+    out["ks_w4_0"] = dereddened_color(out, "tmass_k", "w4")
     out["has_disk_color_axes"] = out[["tmass_k", "w3", "w4"]].notna().all(axis=1)
     out["has_disk_color_errors"] = out[["tmass_k_err", "w3_err", "w4_err"]].notna().all(axis=1)
     out["ks_w3_err"] = np.sqrt(out["tmass_k_err"] ** 2 + out["w3_err"] ** 2)
@@ -120,7 +125,7 @@ def _add_colors(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[~out["has_disk_color_errors"], ["ks_w3_err", "ks_w4_err"]] = np.nan
     out["disk_region"] = [
         classify_disk_region(x, y) if np.isfinite(x) and np.isfinite(y) else np.nan
-        for x, y in zip(out["ks_w4"], out["ks_w3"])
+        for x, y in zip(out["ks_w4_0"], out["ks_w3_0"])
     ]
     return out
 
@@ -160,9 +165,9 @@ def _write_boundary_table(output_dir: Path) -> pd.DataFrame:
                     "vertex_index": vertex_index,
                     "ks_w4": ks_w4,
                     "ks_w3": ks_w3,
-                    "x_axis": "tmass_k - w4",
-                    "y_axis": "tmass_k - w3",
-                    "note": "Figure-style boundary vertices digitized from supplied 2MASS-WISE disk diagram.",
+                    "x_axis": "(tmass_k - w4)_0",
+                    "y_axis": "(tmass_k - w3)_0",
+                    "note": "Figure-style boundary vertices used as empirical reference guides in the extinction-corrected 2MASS-WISE plane.",
                 }
             )
     boundary_df = pd.DataFrame(rows)
@@ -171,15 +176,16 @@ def _write_boundary_table(output_dir: Path) -> pd.DataFrame:
         json.dump(
             {
                 "axes": {
-                    "x": "K_s - W4 = tmass_k - w4",
-                    "y": "K_s - W3 = tmass_k - w3",
+                    "x": "(K_s - W4)_0 = tmass_k_0 - w4_0",
+                    "y": "(K_s - W3)_0 = tmass_k_0 - w3_0",
                 },
                 "boundary_segments": BOUNDARY_SEGMENTS,
                 "region_labels": REGION_LABELS,
                 "provenance": (
                     "Figure-style boundaries digitized from the supplied 2MASS-WISE "
-                    "disk color-color diagram; Luhman & Mamajek (2012) describe the "
-                    "underlying disk-stage criteria in excess-color space."
+                    "disk color-color diagram and used as empirical guides after applying "
+                    "the project's foreground-extinction correction; Luhman & Mamajek "
+                    "(2012) describe the underlying disk-stage criteria in excess-color space."
                 ),
             },
             fh,
@@ -203,8 +209,8 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
             if region.empty:
                 continue
             ax.errorbar(
-                region["ks_w4"],
-                region["ks_w3"],
+                region["ks_w4_0"],
+                region["ks_w3_0"],
                 xerr=region["ks_w4_err"],
                 yerr=region["ks_w3_err"],
                 fmt="none",
@@ -217,8 +223,8 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
             )
 
     ax.scatter(
-        plotted["ks_w4"],
-        plotted["ks_w3"],
+        plotted["ks_w4_0"],
+        plotted["ks_w3_0"],
         s=22,
         marker="o",
         facecolor="black",
@@ -246,8 +252,8 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
 
     ax.set_xlim(-0.5, 6.8)
     ax.set_ylim(-0.75, 4.6)
-    ax.set_xlabel(LABEL_KS_W4, fontsize=18)
-    ax.set_ylabel(LABEL_KS_W3, fontsize=18)
+    ax.set_xlabel(LABEL_KS_W4_0, fontsize=18)
+    ax.set_ylabel(LABEL_KS_W3_0, fontsize=18)
 
     ax.xaxis.set_major_locator(MultipleLocator(1.0))
     ax.yaxis.set_major_locator(MultipleLocator(1.0))
@@ -291,6 +297,7 @@ def main() -> None:
                 "n_missing_axes": int(len(df) - plotted),
                 "n_with_errors": int(df["has_disk_color_errors"].sum()),
                 "disk_region_counts": region_counts,
+                "extinction_correction": "Foreground A_v_3d with the project's R_V=3.1 band coefficients.",
                 "output_dir": str(args.output_dir),
             },
             fh,

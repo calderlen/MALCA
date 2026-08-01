@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # Effective wavelengths [micron] from malca/review/sed.py bandpass pivots.
 EFFECTIVE_WAVELENGTH_UM: dict[str, float] = {
+    "J": 1.235,
     "H": 1.662,
     "Ks": 2.159,
     "W1": 3.353,
@@ -13,6 +14,10 @@ EFFECTIVE_WAVELENGTH_UM: dict[str, float] = {
     "r": 0.623,
     "i": 0.763,
     "Ha": 0.657,
+    "IRAC1": 3.6,
+    "IRAC2": 4.5,
+    "IRAC3": 5.8,
+    "IRAC4": 8.0,
 }
 
 
@@ -43,10 +48,30 @@ def color_color_mag_label(
     return rf"${band_a_tex}\ {lam_a} - {band_b_tex}\ {lam_b}\ \mathrm{{[mag]}}$"
 
 
+def dereddened_color_color_mag_label(
+    band_a_tex: str,
+    band_b_tex: str,
+    band_a: str,
+    band_b: str,
+) -> str:
+    """Matplotlib axis label for a foreground-extinction-corrected color."""
+    lam_a = lambda_um_bracket(EFFECTIVE_WAVELENGTH_UM[band_a])
+    lam_b = lambda_um_bracket(EFFECTIVE_WAVELENGTH_UM[band_b])
+    return rf"$({band_a_tex}\ {lam_a} - {band_b_tex}\ {lam_b})_0\ \mathrm{{[mag]}}$"
+
+
 def band_mag_label(band_tex: str, band: str) -> str:
     """Matplotlib axis label for a single-band magnitude axis."""
     return (
         rf"${band_tex}\ {lambda_um_bracket(EFFECTIVE_WAVELENGTH_UM[band])}"
+        rf"\ \mathrm{{[mag]}}$"
+    )
+
+
+def dereddened_band_mag_label(band_tex: str, band: str) -> str:
+    """Matplotlib axis label for a foreground-extinction-corrected magnitude."""
+    return (
+        rf"$({band_tex})_0\ {lambda_um_bracket(EFFECTIVE_WAVELENGTH_UM[band])}"
         rf"\ \mathrm{{[mag]}}$"
     )
 
@@ -74,7 +99,21 @@ LABEL_R_HALPHA = color_color_mag_label(r"r", r"\mathrm{H}\alpha", "r", "Ha")
 LABEL_R_HALPHA_PLAIN = color_color_mag_label(r"r", r"H\alpha", "r", "Ha")
 LABEL_KS_W3 = color_color_mag_label(r"K_s", r"W_3", "Ks", "W3")
 LABEL_KS_W4 = color_color_mag_label(r"K_s", r"W_4", "Ks", "W4")
+LABEL_IRAC1_IRAC2 = r"$[3.6]-[4.5]\ \mathrm{[mag]}$"
+LABEL_IRAC3_IRAC4 = r"$[5.8]-[8.0]\ \mathrm{[mag]}$"
 LABEL_W3 = band_mag_label("W_3", "W3")
+
+LABEL_W1_W2_0 = dereddened_color_color_mag_label(r"W_1", r"W_2", "W1", "W2")
+LABEL_W2_W3_0 = dereddened_color_color_mag_label(r"W_2", r"W_3", "W2", "W3")
+LABEL_W1_W4_0 = dereddened_color_color_mag_label(r"W_1", r"W_4", "W1", "W4")
+LABEL_W3_W4_0 = dereddened_color_color_mag_label(r"W_3", r"W_4", "W3", "W4")
+LABEL_J_H_0 = dereddened_color_color_mag_label(r"J", r"H", "J", "H")
+LABEL_J_KS_0 = dereddened_color_color_mag_label(r"J", r"K_s", "J", "Ks")
+LABEL_H_KS_0 = dereddened_color_color_mag_label(r"H", r"K_s", "H", "Ks")
+LABEL_KS_W2_0 = dereddened_color_color_mag_label(r"K_s", r"W_2", "Ks", "W2")
+LABEL_KS_W3_0 = dereddened_color_color_mag_label(r"K_s", r"W_3", "Ks", "W3")
+LABEL_KS_W4_0 = dereddened_color_color_mag_label(r"K_s", r"W_4", "Ks", "W4")
+LABEL_W1_0 = dereddened_band_mag_label(r"W_1", "W1")
 
 TITLE_W1_W2 = color_color_title_plain("W1", "W2", "W1", "W2")
 TITLE_H_K = color_color_title_plain("H", "K", "H", "Ks")

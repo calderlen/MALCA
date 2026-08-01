@@ -395,7 +395,8 @@ CMD_DENSITY_UPSAMPLE_FACTOR = 2
 CMD_DENSITY_CONTOUR_LEVELS = 20
 CMD_DENSITY_CUTOFF_PERCENTILE = 30.0
 CMD_DENSITY_CUTOFF_FRAC_MAX = 0.04
-CMD_MARKER_SIZE_SCALE = 0.72
+# Keep the overlaid selected-source points distinct without obscuring the CMD.
+CMD_MARKER_SIZE_SCALE = 0.50
 CMD_REVIEW_BUCKET_STYLE = {bucket: dict(style) for bucket, style in CMD_BUCKET_STYLE.items()}
 CMD_REVIEW_BUCKET_STYLE["LTV"].update({"marker": "o", "size": 16})
 CMD_REVIEW_BUCKET_STYLE["Microlensing"].update({"marker": "^", "size": 16})
@@ -1237,15 +1238,6 @@ def _plot_cmd(
         width=CMD_TICK_WIDTH,
     )
     ax.minorticks_on()
-    ax.legend(
-        loc="lower left",
-        bbox_to_anchor=(0.02, 0.02),
-        frameon=True,
-        framealpha=0.92,
-        edgecolor="black",
-        fontsize=CMD_LEGEND_FONTSIZE,
-        markerscale=CMD_LEGEND_MARKERSCALE,
-    )
     save_publication_figure(fig, out_path, dpi=220, close=False, facecolor="white")
     fig.savefig(out_path.with_suffix(".pdf"), bbox_inches=None, facecolor="white")
     plt.close(fig)

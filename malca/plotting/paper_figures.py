@@ -24,9 +24,13 @@ from malca.ltv.cmd import dustmaps_cmd_from_fields
 from malca.plotting.color_color_labels import (
     LABEL_KS_W3,
     LABEL_KS_W4,
+    LABEL_KS_W3_0,
+    LABEL_KS_W4_0,
     LABEL_R_HALPHA,
     color_color_mag_label,
+    dereddened_color_color_mag_label,
 )
+from malca.plotting.extinction import add_dereddened_ir_magnitudes, dereddened_color
 from malca.plotting.lightcurve_publication import (
     FIG_SINGLE_COL_WIDTH,
     PUBLICATION_STYLE,
@@ -36,9 +40,6 @@ from malca.plotting.lightcurve_publication import (
 from malca.plotting.notebook_display import show_figure
 from malca.review.filter_schema import VETTING_KNOWN_SELECT_FILTERS, is_dipper_contaminant_type_value
 from malca.review.store import get_distinct_values, query_queue
-
-# A_lambda / A_V for R_V=3.1 (matches malca.review.sed bandpass definitions).
-AV_COEFF = {"Ks": 0.112, "W1": 0.061, "W2": 0.047, "W3": 0.0, "W4": 0.0}
 
 Q_PERIODIC_BOUNDARY = 0.60
 Q_QUASI_PERIODIC_BOUNDARY = 0.80
@@ -395,18 +396,10 @@ def _column_as_series(frame: pd.DataFrame, col: str) -> pd.Series:
 
 
 def _deredden_ir_colors(frame: pd.DataFrame) -> pd.DataFrame:
-    out = frame.copy()
-    av = _column_as_series(out, "A_v_3d").fillna(0.0).clip(lower=0.0)
-    for band in ("Ks", "W1", "W2", "W3", "W4"):
-        col = "tmass_k" if band == "Ks" else band.lower()
-        if col in out.columns:
-            out[f"{col}_0"] = _column_as_series(out, col) - AV_COEFF[band] * av
-    if "tmass_k_0" in out.columns and "w2_0" in out.columns:
-        out["ks_w2_0"] = out["tmass_k_0"] - out["w2_0"]
-    if "tmass_k_0" in out.columns and "w3_0" in out.columns:
-        out["ks_w3_0"] = out["tmass_k_0"] - out["w3_0"]
-    if "tmass_k_0" in out.columns and "w4_0" in out.columns:
-        out["ks_w4_0"] = out["tmass_k_0"] - out["w4_0"]
+    out = add_dereddened_ir_magnitudes(frame)
+    out["ks_w2_0"] = dereddened_color(out, "tmass_k", "w2")
+    out["ks_w3_0"] = dereddened_color(out, "tmass_k", "w3")
+    out["ks_w4_0"] = dereddened_color(out, "tmass_k", "w4")
     return out
 
 
@@ -669,8 +662,8 @@ def plot_ks_w2_w4_dered(ctx: PaperFigureContext, dippers: pd.DataFrame | None = 
         "ks_w2_0",
         "ks_w4_0",
         "tier_a_ks_w2_w4_dered",
-        xlabel=color_color_mag_label(r"K_s", r"W_2", "Ks", "W2"),
-        ylabel=color_color_mag_label(r"K_s", r"W_4", "Ks", "W4"),
+        xlabel=dereddened_color_color_mag_label(r"K_s", r"W_2", "Ks", "W2"),
+        ylabel=LABEL_KS_W4_0,
     )
 
 

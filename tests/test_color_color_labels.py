@@ -3,9 +3,15 @@ from __future__ import annotations
 from malca.plotting.color_color_labels import (
     EFFECTIVE_WAVELENGTH_UM,
     LABEL_H_KS,
+    LABEL_H_KS_0,
+    LABEL_J_H_0,
+    LABEL_J_KS_0,
     LABEL_KS_W4,
+    LABEL_KS_W4_0,
     LABEL_W1_W2,
+    LABEL_W1_W2_0,
     color_color_mag_label,
+    dereddened_color_color_mag_label,
 )
 
 
@@ -32,5 +38,18 @@ def test_disk_color_labels_show_both_band_wavelengths() -> None:
 
 
 def test_effective_wavelengths_match_bandpass_pivots() -> None:
+    assert EFFECTIVE_WAVELENGTH_UM["J"] == 1.235
     assert EFFECTIVE_WAVELENGTH_UM["W3"] == 11.561
     assert EFFECTIVE_WAVELENGTH_UM["Ha"] == 0.657
+
+
+def test_dereddened_labels_mark_the_complete_color_index() -> None:
+    label = dereddened_color_color_mag_label(r"W_1", r"W_2", "W1", "W2")
+    assert label == LABEL_W1_W2_0
+    assert r")_0" in label
+    assert "3.4" in label
+    assert "4.6" in label
+    assert r")_0" in LABEL_H_KS_0
+    assert r")_0" in LABEL_KS_W4_0
+    assert r")_0" in LABEL_J_H_0
+    assert r")_0" in LABEL_J_KS_0

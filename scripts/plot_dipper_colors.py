@@ -22,12 +22,23 @@ from malca.enrichment.sed_alpha import (
     compute_sed_alpha_features,
 )
 from malca.plotting.color_color_labels import (
-    LABEL_H_KS,
-    LABEL_W1_W2,
-    LABEL_W1_W4,
-    LABEL_W2_W3,
+    LABEL_H_KS_0,
+    LABEL_IRAC1_IRAC2,
+    LABEL_IRAC3_IRAC4,
+    LABEL_J_H_0,
+    LABEL_J_KS_0,
+    LABEL_KS_W2_0,
+    LABEL_KS_W3_0,
+    LABEL_KS_W4_0,
+    LABEL_W1_0,
+    LABEL_W1_W2_0,
+    LABEL_W1_W4_0,
+    LABEL_W2_W3_0,
+    LABEL_W3_W4_0,
     color_color_mag_label,
 )
+from malca.plotting.extinction import add_dereddened_ir_magnitudes, dereddened_color
+from malca.plotting.irac import irac_vega_magnitude, irac_vega_magnitude_error
 from malca.plotting.lightcurve_publication import apply_publication_rcparams
 
 
@@ -38,6 +49,10 @@ LABELS_CSV: Path | None = RESULTS_DIR / "march18_review_cmd_dustmaps_full.csv"
 REVIEW_DB = REVIEW_DIR / "review.taxonomy_filled.db"
 SED_PHOTOMETRY = REVIEW_DIR / "review.taxonomy_filled_sed_photometry.parquet"
 SED_EXCESS_SUMMARY: Path | None = None
+SPITZER_PHOTOMETRY: Path | None = None
+
+# Compact markers retain the error bars while reducing overlap in the colour planes.
+COLOR_POINT_MARKERSIZE = 4.0
 
 EXCESS_CLASS_STYLES = {
     "robust": ("Robust", "#b2182b"),
@@ -49,7 +64,7 @@ EXCESS_CLASS_STYLES = {
 }
 
 WISE_COLS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]
-TMASS_COLS = ["tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
+TMASS_COLS = ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
 TEFF_COLS = [
     "teff50",
     "teff16",
@@ -70,6 +85,16 @@ NUMERIC_COLS = [
     *TEFF_COLS,
     "H_K",
     "H_K_err",
+    "j_h",
+    "j_h_err",
+    "j_k",
+    "j_k_err",
+    "ks_w2",
+    "ks_w2_err",
+    "ks_w3",
+    "ks_w3_err",
+    "ks_w4",
+    "ks_w4_err",
     "w1_w2",
     "w1_w2_err",
     "w1_w3",
@@ -355,11 +380,23 @@ def _refresh_gaia_teff_bounds(df: pd.DataFrame, *, refresh_missing: bool) -> pd.
 
 
 def _compute_colors(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
+    out = add_dereddened_ir_magnitudes(df)
 
     computed_hk = out["tmass_h"] - out["tmass_k"]
     out["H_K"] = computed_hk.where(np.isfinite(computed_hk), out["H_K"])
     out["H_K_err"] = _hypot2(out["tmass_h_err"], out["tmass_k_err"])
+    out["H_K_0"] = dereddened_color(out, "tmass_h", "tmass_k")
+
+    for left, right, color in (
+        ("tmass_j", "tmass_h", "j_h"),
+        ("tmass_j", "tmass_k", "j_k"),
+        ("tmass_k", "w2", "ks_w2"),
+        ("tmass_k", "w3", "ks_w3"),
+        ("tmass_k", "w4", "ks_w4"),
+    ):
+        out[color] = out[left] - out[right]
+        out[f"{color}_err"] = _hypot2(out[f"{left}_err"], out[f"{right}_err"])
+        out[f"{color}_0"] = dereddened_color(out, left, right)
 
     for left, right in (("w1", "w2"), ("w1", "w3"), ("w1", "w4"), ("w2", "w3"), ("w2", "w4"), ("w3", "w4")):
         color = f"{left}_{right}"
@@ -367,6 +404,7 @@ def _compute_colors(df: pd.DataFrame) -> pd.DataFrame:
         values = out[left] - out[right]
         out[color] = values.where(np.isfinite(values), out[color] if color in out.columns else np.nan)
         out[err] = _hypot2(out[f"{left}_err"], out[f"{right}_err"])
+        out[f"{color}_0"] = dereddened_color(out, left, right)
 
     return _to_numeric(out, NUMERIC_COLS)
 
@@ -545,7 +583,7 @@ def _plot_errorbar_points(
             capthick=0.8,
             markerfacecolor="k",
             markeredgecolor="k",
-            markersize=6,
+            markersize=COLOR_POINT_MARKERSIZE,
             linestyle="none",
             zorder=5,
             label=label if not label_used else None,
@@ -560,7 +598,6 @@ def _plot_errorbar_points(
 
 
 def _finish_color_axis(ax: plt.Axes) -> None:
-    ax.legend(loc="best")
     ax.xaxis.set_minor_locator(AutoMinorLocator(2))
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
@@ -577,6 +614,7 @@ def _save_color_plot(
     output: Path,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
+    annotation: str | None = None,
 ) -> int:
     fig, ax = plt.subplots(figsize=(6, 5))
     n = _plot_errorbar_points(ax, df, x=x, y=y, xerr=xerr, yerr=yerr, label=f"Dippers ({_finite_xy_count(df, x, y)})")
@@ -591,6 +629,17 @@ def _save_color_plot(
         ax.set_xlim(*xlim)
     if ylim is not None:
         ax.set_ylim(*ylim)
+    if annotation:
+        ax.text(
+            0.98,
+            0.02,
+            annotation,
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="0.25",
+        )
     _finish_color_axis(ax)
     fig.tight_layout()
     fig.savefig(output)
@@ -902,6 +951,62 @@ def _add_missing_flags(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _default_spitzer_photometry(results_dir: Path) -> Path | None:
+    """Return the newest run-local Spitzer archive cache, when present."""
+    candidates = sorted(results_dir.glob("sed_archive_*/cache/catalogs/sed/spitzer.parquet"))
+    return candidates[-1] if candidates else None
+
+
+def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
+    """Load complete four-band IRAC colours from the optional archive cache."""
+    columns = [
+        "candidate_id",
+        "band",
+        "observed_flux_nu_jy",
+        "observed_flux_nu_jy_err",
+        "sep_arcsec",
+    ]
+    if SPITZER_PHOTOMETRY is None:
+        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+
+    raw = pd.read_parquet(SPITZER_PHOTOMETRY)
+    missing = sorted(set(columns) - set(raw.columns))
+    if missing:
+        raise ValueError(f"Spitzer cache is missing required columns: {missing}")
+    raw["candidate_id"] = raw["candidate_id"].astype(str)
+    target_ids = set(candidate_ids.astype(str))
+    bands = ("IRAC1", "IRAC2", "IRAC3", "IRAC4")
+    rows = raw.loc[
+        raw["candidate_id"].isin(target_ids) & raw["band"].isin(bands),
+        columns,
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+
+    rows["sep_arcsec"] = pd.to_numeric(rows["sep_arcsec"], errors="coerce")
+    rows = rows.sort_values(["candidate_id", "band", "sep_arcsec"], na_position="last")
+    rows = rows.drop_duplicates(["candidate_id", "band"], keep="first")
+    complete_ids = (
+        rows.groupby("candidate_id")["band"].agg(set).loc[lambda values: values.map(lambda value: set(bands).issubset(value))].index
+    )
+    rows = rows[rows["candidate_id"].isin(complete_ids)]
+    if rows.empty:
+        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+
+    wide = rows.set_index(["candidate_id", "band"])[["observed_flux_nu_jy", "observed_flux_nu_jy_err"]].unstack("band")
+    out = pd.DataFrame(index=wide.index)
+    for band in bands:
+        flux = pd.to_numeric(wide[("observed_flux_nu_jy", band)], errors="coerce").to_numpy(dtype=float)
+        flux_err = pd.to_numeric(wide[("observed_flux_nu_jy_err", band)], errors="coerce").to_numpy(dtype=float)
+        out[f"{band.lower()}_mag"] = irac_vega_magnitude(flux, band)
+        out[f"{band.lower()}_mag_err"] = irac_vega_magnitude_error(flux, flux_err)
+    out["irac_36_45"] = out["irac1_mag"] - out["irac2_mag"]
+    out["irac_36_45_err"] = _hypot2(out["irac1_mag_err"], out["irac2_mag_err"])
+    out["irac_58_80"] = out["irac3_mag"] - out["irac4_mag"]
+    out["irac_58_80_err"] = _hypot2(out["irac3_mag_err"], out["irac4_mag_err"])
+    return out.reset_index()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate dipper optical/IR color and SED-alpha summary plots."
@@ -924,6 +1029,11 @@ def _parse_args() -> argparse.Namespace:
         help="Optional candidate-level WISE excess summary used to color the Teff plot.",
     )
     parser.add_argument(
+        "--spitzer-photometry",
+        type=Path,
+        help="Optional Spitzer archive-cache parquet used for the diagnostic IRAC colour plot.",
+    )
+    parser.add_argument(
         "--refresh-missing-catalog",
         action="store_true",
         help="Query remote AllWISE/2MASS services for missing stored measurements.",
@@ -932,7 +1042,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _configure_paths(args: argparse.Namespace) -> None:
-    global RUN_ROOT, RESULTS_DIR, REVIEW_DIR, LABELS_CSV, REVIEW_DB, SED_PHOTOMETRY, SED_EXCESS_SUMMARY
+    global RUN_ROOT, RESULTS_DIR, REVIEW_DIR, LABELS_CSV, REVIEW_DB, SED_PHOTOMETRY, SED_EXCESS_SUMMARY, SPITZER_PHOTOMETRY
 
     if args.run_root is not None:
         RUN_ROOT = args.run_root
@@ -944,6 +1054,7 @@ def _configure_paths(args: argparse.Namespace) -> None:
         SED_PHOTOMETRY = args.sed_photometry or default_sed
         default_excess = RESULTS_DIR / "marked_dipper_seds" / "marked_dipper_sed_excess_summary.csv"
         SED_EXCESS_SUMMARY = args.sed_excess_summary or (default_excess if default_excess.exists() else None)
+        SPITZER_PHOTOMETRY = args.spitzer_photometry or _default_spitzer_photometry(RESULTS_DIR)
     else:
         if args.labels_csv is not None:
             LABELS_CSV = args.labels_csv
@@ -953,6 +1064,8 @@ def _configure_paths(args: argparse.Namespace) -> None:
             SED_PHOTOMETRY = args.sed_photometry
         if args.sed_excess_summary is not None:
             SED_EXCESS_SUMMARY = args.sed_excess_summary
+        if args.spitzer_photometry is not None:
+            SPITZER_PHOTOMETRY = args.spitzer_photometry
 
     for input_path, label in ((REVIEW_DB, "review DB"), (SED_PHOTOMETRY, "SED photometry")):
         if not input_path.exists():
@@ -961,12 +1074,15 @@ def _configure_paths(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Missing labels CSV: {LABELS_CSV}")
     if SED_EXCESS_SUMMARY is not None and not SED_EXCESS_SUMMARY.exists():
         raise FileNotFoundError(f"Missing SED-excess summary: {SED_EXCESS_SUMMARY}")
+    if SPITZER_PHOTOMETRY is not None and not SPITZER_PHOTOMETRY.exists():
+        raise FileNotFoundError(f"Missing Spitzer photometry cache: {SPITZER_PHOTOMETRY}")
 
     print(f"Run root: {RUN_ROOT}")
     print(f"Review DB: {REVIEW_DB}")
     print(f"Labels: {LABELS_CSV if LABELS_CSV is not None else 'reviews.event_class'}")
     print(f"SED photometry: {SED_PHOTOMETRY}")
     print(f"SED-excess summary: {SED_EXCESS_SUMMARY or 'not supplied'}")
+    print(f"Spitzer photometry: {SPITZER_PHOTOMETRY or 'not supplied'}")
     print(f"Results directory: {RESULTS_DIR}")
 
 
@@ -989,9 +1105,14 @@ def main() -> None:
         summary["sed_alpha_band_count"] = summary["sed_alpha_n_points"]
     summary = _add_missing_flags(summary)
 
-    print(f"W1-W2/H-K finite points: {_finite_xy_count(summary, 'w1_w2', 'H_K')}")
-    print(f"W1-W2/W2-W3 finite points: {_finite_xy_count(summary, 'w1_w2', 'w2_w3')}")
-    print(f"W1-W2/W1-W4 finite points: {_finite_xy_count(summary, 'w1_w2', 'w1_w4')}")
+    print(f"(W1-W2)_0/(H-Ks)_0 finite points: {_finite_xy_count(summary, 'w1_w2_0', 'H_K_0')}")
+    print(f"(W1-W2)_0/(W2-W3)_0 finite points: {_finite_xy_count(summary, 'w1_w2_0', 'w2_w3_0')}")
+    print(f"(W1-W2)_0/(W1-W4)_0 finite points: {_finite_xy_count(summary, 'w1_w2_0', 'w1_w4_0')}")
+    print(f"(Ks-W4)_0/(J-Ks)_0 finite points: {_finite_xy_count(summary, 'ks_w4_0', 'j_k_0')}")
+    print(f"(Ks-W2)_0/(J-Ks)_0 finite points: {_finite_xy_count(summary, 'ks_w2_0', 'j_k_0')}")
+    print(f"(Ks-W2)_0/(Ks-W3)_0 finite points: {_finite_xy_count(summary, 'ks_w2_0', 'ks_w3_0')}")
+    print(f"(J-H)_0/(H-Ks)_0 finite points: {_finite_xy_count(summary, 'j_h_0', 'H_K_0')}")
+    print(f"(W3-W4)_0/(W1-W2)_0 finite points: {_finite_xy_count(summary, 'w3_w4_0', 'w1_w2_0')}")
     for col in ["tmass_h_err", "tmass_k_err", "w1_err", "w2_err", "w3_err", "w4_err"]:
         print(f"{col}: {_finite_count(summary, col)}/{len(summary)} finite")
     print(f"Teff finite points: {_finite_count(summary, 'teff')}/{len(summary)}")
@@ -1001,36 +1122,112 @@ def main() -> None:
     _plot_vphas(summary, RESULTS_DIR)
     _save_color_plot(
         summary,
-        x="w1_w2",
-        y="H_K",
+        x="w1_w2_0",
+        y="H_K_0",
         xerr="w1_w2_err",
         yerr="H_K_err",
-        xlabel=LABEL_W1_W2,
-        ylabel=LABEL_H_KS,
+        xlabel=LABEL_W1_W2_0,
+        ylabel=LABEL_H_KS_0,
         output=RESULTS_DIR / "dipper_wise_color_color.pdf",
         xlim=(-0.2, 1.0),
         ylim=(0.0, 1.0),
     )
     _save_color_plot(
         summary,
-        x="w1_w2",
-        y="w2_w3",
+        x="w1_w2_0",
+        y="w2_w3_0",
         xerr="w1_w2_err",
         yerr="w2_w3_err",
-        xlabel=LABEL_W1_W2,
-        ylabel=LABEL_W2_W3,
+        xlabel=LABEL_W1_W2_0,
+        ylabel=LABEL_W2_W3_0,
         output=RESULTS_DIR / "dipper_wise_w1w2_w2w3.pdf",
     )
     _save_color_plot(
         summary,
-        x="w1_w2",
-        y="w1_w4",
+        x="w1_w2_0",
+        y="w1_w4_0",
         xerr="w1_w2_err",
         yerr="w1_w4_err",
-        xlabel=LABEL_W1_W2,
-        ylabel=LABEL_W1_W4,
+        xlabel=LABEL_W1_W2_0,
+        ylabel=LABEL_W1_W4_0,
         output=RESULTS_DIR / "dipper_wise_w1w2_w1w4.pdf",
     )
+    _save_color_plot(
+        summary,
+        x="w1_w2_0",
+        y="w1_0",
+        xerr="w1_w2_err",
+        yerr="w1_err",
+        xlabel=LABEL_W1_W2_0,
+        ylabel=LABEL_W1_0,
+        output=RESULTS_DIR / "dipper_wise_w1_w1w2.pdf",
+    )
+    _save_color_plot(
+        summary,
+        x="ks_w4_0",
+        y="j_k_0",
+        xerr="ks_w4_err",
+        yerr="j_k_err",
+        xlabel=LABEL_KS_W4_0,
+        ylabel=LABEL_J_KS_0,
+        output=RESULTS_DIR / "dipper_2mass_wise_ksw4_jks.pdf",
+    )
+    _save_color_plot(
+        summary,
+        x="ks_w2_0",
+        y="j_k_0",
+        xerr="ks_w2_err",
+        yerr="j_k_err",
+        xlabel=LABEL_KS_W2_0,
+        ylabel=LABEL_J_KS_0,
+        output=RESULTS_DIR / "dipper_2mass_wise_ksw2_jks.pdf",
+    )
+    _save_color_plot(
+        summary,
+        x="ks_w2_0",
+        y="ks_w3_0",
+        xerr="ks_w2_err",
+        yerr="ks_w3_err",
+        xlabel=LABEL_KS_W2_0,
+        ylabel=LABEL_KS_W3_0,
+        output=RESULTS_DIR / "dipper_2mass_wise_ksw2_ksw3.pdf",
+    )
+    _save_color_plot(
+        summary,
+        x="j_h_0",
+        y="H_K_0",
+        xerr="j_h_err",
+        yerr="H_K_err",
+        xlabel=LABEL_J_H_0,
+        ylabel=LABEL_H_KS_0,
+        output=RESULTS_DIR / "dipper_2mass_jh_hks.pdf",
+    )
+    _save_color_plot(
+        summary,
+        x="w3_w4_0",
+        y="w1_w2_0",
+        xerr="w3_w4_err",
+        yerr="w1_w2_err",
+        xlabel=LABEL_W3_W4_0,
+        ylabel=LABEL_W1_W2_0,
+        output=RESULTS_DIR / "dipper_wise_w3w4_w1w2.pdf",
+    )
+    spitzer_irac = _load_spitzer_irac_colors(summary["candidate_id"])
+    print(
+        "Spitzer IRAC diagnostic complete four-band points: "
+        f"{_finite_xy_count(spitzer_irac, 'irac_36_45', 'irac_58_80')}/{len(summary)}"
+    )
+    if not spitzer_irac.empty:
+        _save_color_plot(
+            spitzer_irac,
+            x="irac_36_45",
+            y="irac_58_80",
+            xerr="irac_36_45_err",
+            yerr="irac_58_80_err",
+            xlabel=LABEL_IRAC1_IRAC2,
+            ylabel=LABEL_IRAC3_IRAC4,
+            output=RESULTS_DIR / "dipper_spitzer_irac_color_color_diagnostic.pdf",
+        )
     _plot_sed_alpha(summary, RESULTS_DIR)
     _plot_teff_sed_alpha(summary, RESULTS_DIR)
 
