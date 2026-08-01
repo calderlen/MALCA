@@ -40,6 +40,7 @@ from malca.catalogs.evidence import (
 )
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
+from malca.microlensing.schema import MICROLENSING_JOINT_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
 from malca.review.dipper_recurrence import (
     DIPPER_RECURRENCE_CLASS_COLUMN,
@@ -1443,6 +1444,8 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("dasch_lc_state",           "TEXT",    "select"),
     # -- multi-survey event-relative features --
     *MS_FEATURE_COLUMN_SPECS,
+    # -- compact multi-survey microlensing fit summary --
+    *MICROLENSING_JOINT_COLUMN_SPECS,
     # -- vetting details: other --
     ("cluster_dist_pc",          "REAL",    "float"),
     ("iphas_ha_excess",          "REAL",    "float"),
