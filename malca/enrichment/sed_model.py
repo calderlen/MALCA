@@ -1219,7 +1219,7 @@ def _prepare_candidate_points(
     frame["prediction_reason"] = ""
     frame["correlation_group"] = frame.apply(_correlation_group, axis=1)
     frame["measurement_id"] = frame.apply(_measurement_id_for_row, axis=1)
-    # Pre-fit catalog conversions are stored under sed-measurement-v3.  The
+    # Pre-fit catalog conversions have their own canonical version.  The
     # response-calibrated values below are a distinct immutable product and
     # must never reuse that version label.
     frame["normalization_version"] = NORMALIZATION_VERSION

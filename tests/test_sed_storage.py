@@ -9,12 +9,18 @@ import numpy as np
 import pytest
 
 from malca.review.sed_storage import (
+    CANONICAL_SED_NORMALIZATION_VERSION,
     ImmutableSedRecordError,
     ensure_sed_storage_schema,
     hash_sed_measurement_set,
+    enqueue_sed_image_jobs,
+    load_sed_archive_coverage,
+    load_sed_archive_products,
+    load_sed_image_jobs,
     load_prepared_sed_measurements,
     load_sed_fit_inputs,
     load_sed_fit_runs,
+    load_r24_ready_sed_measurements,
     load_sed_measurements,
     load_sed_normalizations,
     make_sed_fit_run_hash,
@@ -29,7 +35,11 @@ from malca.review.sed_storage import (
     store_canonical_sed_rows,
     store_sed_fit_run,
     store_sed_measurements,
+    store_sed_measurement_validations,
     store_sed_normalizations,
+    update_sed_image_job,
+    upsert_sed_archive_coverage,
+    upsert_sed_archive_products,
     validate_sed_storage_integrity,
 )
 from malca.review.store import db_connect
@@ -57,6 +67,10 @@ def test_db_init_adds_sed_v3_schema_without_replacing_legacy_tables(tmp_path: Pa
             "sed_measurement_normalizations",
             "sed_fit_runs",
             "sed_fit_inputs",
+            "sed_archive_coverage",
+            "sed_archive_products",
+            "sed_image_measurement_jobs",
+            "sed_measurement_validations",
         }.issubset(tables)
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert int(
@@ -99,6 +113,136 @@ def test_db_init_adds_sed_v3_schema_without_replacing_legacy_tables(tmp_path: Pa
             "calibration_hash",
             "normalization_hash",
         }.issubset(normalization_columns)
+
+
+def test_r24_gate_requires_an_explicit_latest_eligible_validation(tmp_path: Path) -> None:
+    with closing(db_connect(tmp_path / "review.db")) as conn:
+        _insert_candidate(conn)
+        canonical = {
+            "candidate_id": "sed-v3-candidate",
+            "source": "Spitzer SEIP",
+            "catalog": "SEIP image",
+            "catalog_release": "spitzer_seip",
+            "catalog_measurement_id": "seip-1:IRAC1",
+            "instrument": "IRAC",
+            "band": "IRAC1",
+            "flux_nu_jy": 0.01,
+            "flux_nu_jy_err": 0.001,
+            "native_unit": "Jy",
+            "observable_kind": "quoted_fnu",
+            "plot_lambda_angstrom": 35_500.0,
+            "quality_status": "pending_validation",
+            "fit_policy": "diagnostic_only",
+        }
+        store_canonical_sed_rows(conn, canonical)
+        measurement_id = load_sed_measurements(conn).iloc[0]["measurement_id"]
+
+        assert load_r24_ready_sed_measurements(conn).empty
+        store_sed_measurement_validations(
+            conn,
+            {
+                "measurement_id": measurement_id,
+                "validation_version": "human-r24-v1",
+                "validation_status": "accepted",
+                "r24_eligible": True,
+                "validator": "tester",
+                "validation_method": "image-review",
+            },
+        )
+        ready = load_r24_ready_sed_measurements(conn)
+        assert ready["measurement_id"].tolist() == [measurement_id]
+        assert ready["flux_nu_jy"].tolist() == pytest.approx([0.01])
+
+        store_sed_measurement_validations(
+            conn,
+            {
+                "measurement_id": measurement_id,
+                "validation_version": "human-r24-v2",
+                "validation_status": "rejected",
+                "r24_eligible": False,
+                "validator": "tester",
+                "validation_method": "image-review",
+                "created_at": "2999-01-01T00:00:00+00:00",
+            },
+        )
+        assert load_r24_ready_sed_measurements(conn).empty
+
+
+def test_archive_ledgers_preserve_download_and_job_resume_state(tmp_path: Path) -> None:
+    with closing(db_connect(tmp_path / "review.db")) as conn:
+        _insert_candidate(conn)
+        coverage = {
+            "candidate_id": "sed-v3-candidate",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "collection": "spitzer_seip",
+            "instrument": "IRAC",
+            "band": "IRAC1",
+            "observation_id": "seip-1",
+            "coverage_status": "covered_product",
+            "discovery_signature": "signature-v1",
+            "product_count": 1,
+        }
+        assert upsert_sed_archive_coverage(conn, coverage) == 1
+        stored_coverage = load_sed_archive_coverage(conn).iloc[0]
+        coverage_id = stored_coverage["coverage_id"]
+        product = {
+            "coverage_id": coverage_id,
+            "candidate_id": "sed-v3-candidate",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "collection": "spitzer_seip",
+            "observation_id": "seip-1",
+            "instrument": "IRAC",
+            "band": "IRAC1",
+            "product_type": "science_image",
+            "processing_level": "3",
+            "access_url": "https://example.test/image.fits",
+            "access_format": "image/fits",
+            "product_status": "discovered",
+        }
+        assert upsert_sed_archive_products(conn, product) == 1
+        stored_product = load_sed_archive_products(conn).iloc[0].to_dict()
+        stored_product.update(
+            {
+                "local_path": str(tmp_path / "image.fits"),
+                "content_hash": "abc123",
+                "size_bytes": 42,
+                "product_status": "downloaded",
+                "downloaded_at": "2026-07-30T00:00:00+00:00",
+            }
+        )
+        upsert_sed_archive_products(conn, stored_product)
+        upsert_sed_archive_products(conn, product)
+        resumed_product = load_sed_archive_products(conn).iloc[0]
+        assert resumed_product["product_status"] == "downloaded"
+        assert resumed_product["content_hash"] == "abc123"
+        assert resumed_product["size_bytes"] == 42
+
+        job = {
+            "coverage_id": coverage_id,
+            "candidate_id": "sed-v3-candidate",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "instrument": "IRAC",
+            "band": "IRAC1",
+            "job_type": "spitzer_seip_forced_photometry",
+            "job_status": "queued",
+        }
+        enqueue_sed_image_jobs(conn, job)
+        job_id = load_sed_image_jobs(conn).iloc[0]["job_id"]
+        update_sed_image_job(
+            conn,
+            job_id,
+            status="pending_validation",
+            output_measurement_id="sedm-output",
+            increment_attempt=True,
+        )
+        enqueue_sed_image_jobs(conn, job)
+        resumed_job = load_sed_image_jobs(conn).iloc[0]
+        assert resumed_job["job_status"] == "pending_validation"
+        assert resumed_job["attempt_count"] == 1
+        assert resumed_job["output_measurement_id"] == "sedm-output"
 
 
 def test_current_sed_schema_check_is_read_only_and_validation_is_explicit(tmp_path: Path) -> None:
@@ -225,6 +369,40 @@ def test_native_measurements_are_multi_epoch_idempotent_and_immutable(tmp_path: 
             store_sed_measurements(conn, [new_row, changed])
         # The whole batch rolls back when any immutable row conflicts.
         assert len(load_sed_measurements(conn, "sed-v3-candidate")) == 2
+
+
+def test_canonical_storage_separates_normalization_policy_from_native_quality() -> None:
+    measurements, normalizations = prepare_canonical_sed_rows(
+        pd.DataFrame(
+            [
+                {
+                    "candidate_id": "policy-separation",
+                    "source": "APASS",
+                    "band": "B",
+                    "mag": 13.2,
+                    "mag_system": "Vega",
+                    "is_upper_limit": 0.0,
+                    "is_synthetic": 0.0,
+                    "quality_flags": (
+                        "catalog_quality_ok;standardized_system_proxy;"
+                        "apass_b_red_leak_unassessed"
+                    ),
+                    "normalization_version": "sed-measurement-v3",
+                }
+            ]
+        )
+    )
+
+    measurement = measurements[0]
+    raw_payload = measurement["raw_measurement_json"]
+    assert measurement["quality_flags"] == "catalog_quality_ok"
+    assert raw_payload["quality_flags"] == "catalog_quality_ok"
+    assert raw_payload["is_upper_limit"] == 0
+    assert raw_payload["is_synthetic"] == 0
+    assert (
+        normalizations[0]["normalization_version"]
+        == CANONICAL_SED_NORMALIZATION_VERSION
+    )
 
 
 def test_normalizations_are_explicitly_versioned_and_join_to_native_rows(tmp_path: Path) -> None:
@@ -446,7 +624,7 @@ def test_canonical_fetch_rows_write_native_and_normalized_values_atomically(tmp_
         normalized = load_sed_normalizations(
             conn,
             "sed-v3-candidate",
-            normalization_version="sed-measurement-v3",
+            normalization_version=CANONICAL_SED_NORMALIZATION_VERSION,
         ).set_index("measurement_id")
         spitzer_id = prepared_by_source["Spitzer SEIP"]["measurement_id"]
         assert normalized.loc[spitzer_id, "lambda_reference_angstrom"] == pytest.approx(35500.0)

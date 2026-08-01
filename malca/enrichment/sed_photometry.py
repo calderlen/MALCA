@@ -24,6 +24,12 @@ from malca.enrichment.sed_alpha import (
     compute_sed_alpha_features,
     upsert_sed_alpha_results,
 )
+from malca.enrichment.sed_archive import (
+    ARCHIVE_QUERY_TIMEOUT_SECONDS,
+    ARCHIVE_DISCOVERY_SOURCE_KEYS,
+    discover_sed_archive_products,
+    resolve_archive_discovery_source_keys,
+)
 from malca.review.sed import (
     ALL_CATALOG_SOURCES,
     CANONICAL_SED_COLUMNS,
@@ -39,7 +45,16 @@ from malca.review.sed import (
     validate_sed_fetch_manifest,
 )
 from malca.review.store import db_connect
-from malca.io.table_io import read_feature_table, write_parquet_table
+from malca.review.sed_storage import (
+    SED_ARCHIVE_COVERAGE_COLUMNS,
+    SED_ARCHIVE_PRODUCT_COLUMNS,
+    SED_IMAGE_JOB_COLUMNS,
+    enqueue_sed_image_jobs,
+    ensure_sed_storage_schema,
+    upsert_sed_archive_coverage,
+    upsert_sed_archive_products,
+)
+from malca.io.table_io import read_feature_table, read_parquet_table, write_parquet_table
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -67,7 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="default",
         help=(
             "Comma-separated source keys, 'default'/'all', 'broad', or 'far-ir'. "
-            "Default uses the bounded payload/PS1/SkyMapper/SDSS profile; "
+            "Default uses the bounded payload/IRSA-AllWISE/PS1/SkyMapper/SDSS profile; "
             "'all' explicitly fetches every registered SED catalog. "
             f"Default: {', '.join(DEFAULT_PIPELINE_SED_SOURCES)}. "
             f"Available: {', '.join(ALL_CATALOG_SOURCES)}"
@@ -90,6 +105,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--all-candidates",
         action="store_true",
         help="Fetch SED photometry for all input rows instead of only failed_any=False passers.",
+    )
+    parser.add_argument(
+        "--candidate-id",
+        action="append",
+        default=[],
+        help="Limit acquisition/discovery to this candidate ID; repeat as needed.",
     )
     parser.add_argument(
         "--fit-workers",
@@ -124,6 +145,63 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         default=True,
         help="Skip 2-24 micron SED spectral-index feature calculation.",
+    )
+    parser.add_argument(
+        "--discover-archive-products",
+        dest="discover_archive_products",
+        action="store_true",
+        default=True,
+        help=(
+            "Discover Spitzer SEIP, Herschel HSA, and APEX products for the "
+            "selected archive-backed sources (default)."
+        ),
+    )
+    parser.add_argument(
+        "--no-discover-archive-products",
+        dest="discover_archive_products",
+        action="store_false",
+        help="Skip archive coverage/product discovery; catalog photometry is still fetched.",
+    )
+    parser.add_argument(
+        "--archive-coverage-output",
+        type=Path,
+        default=None,
+        help="Coverage ledger Parquet path (default: beside the SED output).",
+    )
+    parser.add_argument(
+        "--archive-products-output",
+        type=Path,
+        default=None,
+        help="Archive product ledger Parquet path (default: beside the SED output).",
+    )
+    parser.add_argument(
+        "--image-jobs-output",
+        type=Path,
+        default=None,
+        help="Image-measurement job ledger Parquet path (default: beside the SED output).",
+    )
+    parser.add_argument(
+        "--archive-query-timeout-seconds",
+        type=float,
+        default=ARCHIVE_QUERY_TIMEOUT_SECONDS,
+        help=(
+            "Connection/read timeout for each archive-discovery request "
+            f"(default: {ARCHIVE_QUERY_TIMEOUT_SECONDS:g} s)."
+        ),
+    )
+    parser.add_argument(
+        "--archive-checkpoint-size",
+        type=int,
+        default=25,
+        help="Completed archive target queries per atomic ledger checkpoint (default: 25).",
+    )
+    parser.add_argument(
+        "--refresh-archive-products",
+        action="store_true",
+        help=(
+            "Ignore and replace existing archive-ledger checkpoints. By default, "
+            "valid ledgers are resumed and completed target/source queries are reused."
+        ),
     )
     return parser
 
@@ -181,6 +259,207 @@ def _default_fetch_manifest_output_path(output_path: Path) -> Path:
         prefix = stem
     prefix_text = f"{prefix}_" if prefix else ""
     return output_path.with_name(f"{prefix_text}sed_fetch_manifest.parquet")
+
+
+def _default_archive_output_paths(output_path: Path) -> tuple[Path, Path, Path]:
+    stem = output_path.stem
+    if stem == "sed_photometry":
+        prefix = ""
+    elif stem.endswith("_sed_photometry"):
+        prefix = stem[: -len("_sed_photometry")]
+    else:
+        prefix = stem
+    prefix_text = f"{prefix}_" if prefix else ""
+    return (
+        output_path.with_name(f"{prefix_text}sed_archive_coverage.parquet"),
+        output_path.with_name(f"{prefix_text}sed_archive_products.parquet"),
+        output_path.with_name(f"{prefix_text}sed_image_measurement_jobs.parquet"),
+    )
+
+
+def _empty_archive_ledgers() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    return (
+        pd.DataFrame(columns=SED_ARCHIVE_COVERAGE_COLUMNS),
+        pd.DataFrame(columns=SED_ARCHIVE_PRODUCT_COLUMNS),
+        pd.DataFrame(columns=SED_IMAGE_JOB_COLUMNS),
+    )
+
+
+def _canonical_archive_ledger(
+    frame: pd.DataFrame,
+    *,
+    columns: list[str],
+    key_column: str,
+) -> pd.DataFrame:
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            out[column] = None
+    if key_column in out.columns:
+        out = out.drop_duplicates(subset=[key_column], keep="last")
+    return out[columns].reset_index(drop=True)
+
+
+def _load_archive_checkpoint(
+    *,
+    coverage_path: Path,
+    products_path: Path,
+    jobs_path: Path,
+    candidates: pd.DataFrame,
+    sources: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, bool, bool]:
+    """Load a structurally valid exact-scope archive checkpoint, if present."""
+
+    paths = (coverage_path, products_path, jobs_path)
+    exists = tuple(path.exists() for path in paths)
+    if not any(exists):
+        return (*_empty_archive_ledgers(), False, False)
+    if not all(exists):
+        missing = [str(path) for path, present in zip(paths, exists) if not present]
+        raise RuntimeError(
+            "Archive checkpoint is incomplete; refusing to mix old and new ledgers. "
+            "Missing: "
+            + ", ".join(missing)
+            + ". Restore the missing ledger or pass --refresh-archive-products."
+        )
+
+    coverage = read_parquet_table(coverage_path)
+    products = read_parquet_table(products_path)
+    jobs = read_parquet_table(jobs_path)
+    required = (
+        (
+            "coverage",
+            coverage,
+            {"coverage_id", "candidate_id", "source_key", "coverage_status", "discovery_signature"},
+        ),
+        (
+            "products",
+            products,
+            {"product_id", "coverage_id", "candidate_id", "source_key"},
+        ),
+        (
+            "jobs",
+            jobs,
+            {"job_id", "coverage_id", "candidate_id", "source_key"},
+        ),
+    )
+    schema_errors: list[str] = []
+    for label, frame, columns in required:
+        missing_columns = sorted(columns - set(frame.columns))
+        if missing_columns:
+            schema_errors.append(f"{label} missing columns {missing_columns}")
+    if schema_errors:
+        raise RuntimeError(
+            "Archive checkpoint schema is invalid: "
+            + "; ".join(schema_errors)
+            + ". Pass --refresh-archive-products to replace it."
+        )
+
+    expected_ids = set(candidates["candidate_id"].astype(str))
+    expected_sources = set(resolve_archive_discovery_source_keys(sources))
+    for label, frame, _ in required:
+        actual_ids = set(frame["candidate_id"].dropna().astype(str))
+        actual_sources = set(frame["source_key"].dropna().astype(str))
+        extra_ids = actual_ids - expected_ids
+        extra_sources = actual_sources - expected_sources
+        if extra_ids or extra_sources:
+            details: list[str] = []
+            if extra_ids:
+                details.append(f"{len(extra_ids)} candidate IDs outside this selection")
+            if extra_sources:
+                details.append(f"unexpected sources {sorted(extra_sources)}")
+            raise RuntimeError(
+                f"Archive {label} checkpoint has the wrong scope ("
+                + ", ".join(details)
+                + "). Use a different output path or pass --refresh-archive-products."
+            )
+
+    if (
+        coverage["discovery_signature"].isna()
+        | coverage["discovery_signature"].astype(str).str.strip().eq("")
+    ).any():
+        raise RuntimeError(
+            "Archive coverage checkpoint contains blank discovery signatures; "
+            "pass --refresh-archive-products to replace it."
+        )
+    coverage_ids = set(coverage["coverage_id"].dropna().astype(str))
+    invalid_product_refs = set(products["coverage_id"].dropna().astype(str)) - coverage_ids
+    invalid_job_refs = set(jobs["coverage_id"].dropna().astype(str)) - coverage_ids
+    if invalid_product_refs or invalid_job_refs:
+        raise RuntimeError(
+            "Archive checkpoint contains product/job rows without matching coverage "
+            f"({len(invalid_product_refs)} product refs, {len(invalid_job_refs)} job refs); "
+            "pass --refresh-archive-products to replace it."
+        )
+
+    canonical_coverage = _canonical_archive_ledger(
+        coverage,
+        columns=SED_ARCHIVE_COVERAGE_COLUMNS,
+        key_column="coverage_id",
+    )
+    canonical_products = _canonical_archive_ledger(
+        products,
+        columns=SED_ARCHIVE_PRODUCT_COLUMNS,
+        key_column="product_id",
+    )
+    canonical_jobs = _canonical_archive_ledger(
+        jobs,
+        columns=SED_IMAGE_JOB_COLUMNS,
+        key_column="job_id",
+    )
+    normalized = (
+        len(canonical_coverage) != len(coverage)
+        or len(canonical_products) != len(products)
+        or len(canonical_jobs) != len(jobs)
+    )
+    return (
+        canonical_coverage,
+        canonical_products,
+        canonical_jobs,
+        True,
+        normalized,
+    )
+
+
+def _completed_archive_candidates_by_source(
+    coverage: pd.DataFrame,
+) -> dict[str, set[str]]:
+    """Return target/source queries with a terminal non-error coverage result."""
+
+    completed: dict[str, set[str]] = {}
+    if coverage.empty:
+        return completed
+    for (source_key, candidate_id), group in coverage.groupby(
+        ["source_key", "candidate_id"],
+        dropna=False,
+    ):
+        statuses = {
+            str(value).strip().casefold()
+            for value in group["coverage_status"]
+            if str(value).strip()
+        }
+        if statuses - {"query_error"}:
+            completed.setdefault(str(source_key), set()).add(str(candidate_id))
+    return completed
+
+
+def _merge_archive_checkpoint_rows(
+    current: pd.DataFrame,
+    rows: pd.DataFrame | list[dict],
+    *,
+    columns: list[str],
+    key_column: str,
+) -> pd.DataFrame:
+    if rows is None:
+        return current
+    incoming = rows.copy() if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+    if incoming.empty:
+        return current
+    return _canonical_archive_ledger(
+        pd.concat([current, incoming], ignore_index=True, sort=False),
+        columns=columns,
+        key_column=key_column,
+    )
 
 
 def _is_sqlite_input(path: Path) -> bool:
@@ -258,11 +537,31 @@ def run(args: argparse.Namespace) -> Path:
         if args.review_db
         else (input_path if _is_sqlite_input(input_path) else None)
     )
+    if review_db_path:
+        with closing(db_connect(review_db_path)) as conn:
+            schema_changed = ensure_sed_storage_schema(conn)
+            conn.commit()
+        if schema_changed:
+            print(f"Initialized SED storage schema in {review_db_path}")
 
     df = _read_candidate_table(input_path)
     df = _ensure_candidate_id(df)
     df = with_feature_columns(df, ["failed_any", "ra", "dec", "gaia_id"])
-    if not getattr(args, "all_candidates", False):
+    selected_candidate_ids = {
+        str(value).strip()
+        for value in getattr(args, "candidate_id", [])
+        if str(value).strip()
+    }
+    if selected_candidate_ids:
+        available = set(df["candidate_id"].astype(str))
+        missing = sorted(selected_candidate_ids - available)
+        if missing:
+            raise KeyError(
+                "Requested candidate ID(s) are absent from the input: "
+                + ", ".join(missing)
+            )
+        df = df[df["candidate_id"].astype(str).isin(selected_candidate_ids)].copy()
+    elif not getattr(args, "all_candidates", False):
         df = select_passing_candidates_if_present(df, printer=print)
     requested_sources = args.sources
     print(f"Loaded {len(df)} candidates from {input_path}")
@@ -310,6 +609,185 @@ def run(args: argparse.Namespace) -> Path:
     if not manifest_counts.empty:
         print("\nFetch status by source:")
         print(manifest_counts.to_string())
+
+    archive_coverage = pd.DataFrame()
+    archive_products = pd.DataFrame()
+    image_jobs = pd.DataFrame()
+    archive_sources = set(requested) & ARCHIVE_DISCOVERY_SOURCE_KEYS
+    if bool(getattr(args, "discover_archive_products", True)) and archive_sources:
+        default_coverage_path, default_products_path, default_jobs_path = (
+            _default_archive_output_paths(output_path)
+        )
+        coverage_path = (
+            getattr(args, "archive_coverage_output", None) or default_coverage_path
+        ).expanduser()
+        products_path = (
+            getattr(args, "archive_products_output", None) or default_products_path
+        ).expanduser()
+        jobs_path = (
+            getattr(args, "image_jobs_output", None) or default_jobs_path
+        ).expanduser()
+        refresh_archive = bool(getattr(args, "refresh_archive_products", False))
+        if refresh_archive:
+            archive_coverage, archive_products, image_jobs = _empty_archive_ledgers()
+            checkpoint_loaded = False
+            checkpoint_normalized = False
+            print("Refreshing archive discovery; existing ledger checkpoints will be replaced.")
+        else:
+            (
+                archive_coverage,
+                archive_products,
+                image_jobs,
+                checkpoint_loaded,
+                checkpoint_normalized,
+            ) = _load_archive_checkpoint(
+                coverage_path=coverage_path,
+                products_path=products_path,
+                jobs_path=jobs_path,
+                candidates=df,
+                sources=requested,
+            )
+            if checkpoint_normalized:
+                write_parquet_table(archive_coverage, coverage_path)
+                write_parquet_table(archive_products, products_path)
+                write_parquet_table(image_jobs, jobs_path)
+                print(
+                    "Normalized duplicate stable IDs in the archive checkpoint "
+                    "before resuming."
+                )
+
+        completed_by_source = _completed_archive_candidates_by_source(archive_coverage)
+        resolved_archive_sources = resolve_archive_discovery_source_keys(requested)
+        expected_archive_queries = len(df) * len(resolved_archive_sources)
+        completed_archive_queries = sum(
+            len(completed_by_source.get(source_key, set()))
+            for source_key in resolved_archive_sources
+        )
+        if checkpoint_loaded:
+            print(
+                "Loaded archive checkpoint: "
+                f"{completed_archive_queries}/{expected_archive_queries} "
+                "target/source queries complete"
+            )
+
+        checkpoint_size = max(int(getattr(args, "archive_checkpoint_size", 25)), 1)
+        pending_checkpoint_targets = 0
+
+        def persist_archive_checkpoint(*, force: bool = False) -> None:
+            nonlocal pending_checkpoint_targets
+            if pending_checkpoint_targets <= 0 and not force:
+                return
+            write_parquet_table(archive_coverage, coverage_path)
+            write_parquet_table(archive_products, products_path)
+            write_parquet_table(image_jobs, jobs_path)
+            if pending_checkpoint_targets > 0:
+                print(
+                    "[SED archive] checkpointed "
+                    f"{pending_checkpoint_targets} completed target queries",
+                    flush=True,
+                )
+            pending_checkpoint_targets = 0
+
+        def archive_checkpoint_callback(
+            source_key: str,
+            coverage_rows: list[dict],
+            product_rows: list[dict],
+            job_rows: list[dict],
+        ) -> None:
+            nonlocal archive_coverage, archive_products, image_jobs
+            nonlocal pending_checkpoint_targets
+            archive_coverage = _merge_archive_checkpoint_rows(
+                archive_coverage,
+                coverage_rows,
+                columns=SED_ARCHIVE_COVERAGE_COLUMNS,
+                key_column="coverage_id",
+            )
+            archive_products = _merge_archive_checkpoint_rows(
+                archive_products,
+                product_rows,
+                columns=SED_ARCHIVE_PRODUCT_COLUMNS,
+                key_column="product_id",
+            )
+            image_jobs = _merge_archive_checkpoint_rows(
+                image_jobs,
+                job_rows,
+                columns=SED_IMAGE_JOB_COLUMNS,
+                key_column="job_id",
+            )
+            pending_checkpoint_targets += 1
+            if pending_checkpoint_targets >= checkpoint_size:
+                persist_archive_checkpoint()
+
+        if completed_archive_queries < expected_archive_queries:
+            try:
+                (
+                    discovered_coverage,
+                    discovered_products,
+                    discovered_jobs,
+                ) = discover_sed_archive_products(
+                    df,
+                    sources=requested,
+                    progress_callback=lambda msg: print(msg, flush=True),
+                    checkpoint_callback=archive_checkpoint_callback,
+                    completed_candidate_ids_by_source=completed_by_source,
+                    query_timeout_seconds=max(
+                        float(
+                            getattr(
+                                args,
+                                "archive_query_timeout_seconds",
+                                ARCHIVE_QUERY_TIMEOUT_SECONDS,
+                            )
+                        ),
+                        0.0,
+                    ),
+                )
+                archive_coverage = _merge_archive_checkpoint_rows(
+                    archive_coverage,
+                    discovered_coverage,
+                    columns=SED_ARCHIVE_COVERAGE_COLUMNS,
+                    key_column="coverage_id",
+                )
+                archive_products = _merge_archive_checkpoint_rows(
+                    archive_products,
+                    discovered_products,
+                    columns=SED_ARCHIVE_PRODUCT_COLUMNS,
+                    key_column="product_id",
+                )
+                image_jobs = _merge_archive_checkpoint_rows(
+                    image_jobs,
+                    discovered_jobs,
+                    columns=SED_IMAGE_JOB_COLUMNS,
+                    key_column="job_id",
+                )
+            except BaseException:
+                persist_archive_checkpoint(force=pending_checkpoint_targets > 0)
+                raise
+            persist_archive_checkpoint(force=True)
+        else:
+            print("[SED archive] Reusing complete archive ledgers; no remote discovery needed.")
+
+        completed_by_source = _completed_archive_candidates_by_source(archive_coverage)
+        completed_archive_queries = sum(
+            len(completed_by_source.get(source_key, set()))
+            for source_key in resolved_archive_sources
+        )
+        incomplete_archive_queries = expected_archive_queries - completed_archive_queries
+        print(
+            "Archive ledgers ready: "
+            f"{len(archive_coverage)} coverage rows, "
+            f"{len(archive_products)} product rows, "
+            f"{len(image_jobs)} image jobs "
+            f"({incomplete_archive_queries} retryable target/source queries)"
+        )
+        if review_db_path:
+            with closing(db_connect(review_db_path)) as conn:
+                n_coverage = upsert_sed_archive_coverage(conn, archive_coverage)
+                n_products = upsert_sed_archive_products(conn, archive_products)
+                n_jobs = enqueue_sed_image_jobs(conn, image_jobs)
+            print(
+                f"Upserted archive ledgers into {review_db_path}: "
+                f"{n_coverage} coverage, {n_products} products, {n_jobs} jobs"
+            )
 
     fetch_complete, manifest_errors = validate_sed_fetch_manifest(
         manifest,

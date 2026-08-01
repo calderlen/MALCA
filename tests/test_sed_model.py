@@ -13,7 +13,12 @@ import pandas as pd
 import pytest
 
 import malca.enrichment.sed_photometry as sed_photometry
-from malca.review.sed import SED_BANDPASSES, build_sed_dataframe
+from malca.review.sed import (
+    SED_BANDPASSES,
+    SED_FETCH_MANIFEST_ATTR,
+    SED_FETCH_POLICY_VERSION,
+    build_sed_dataframe,
+)
 from malca.review.store import db_connect, upsert_candidates_frame
 from malca.enrichment.sed_model import (
     NORMALIZATION_VERSION,
@@ -39,7 +44,7 @@ from malca.enrichment.synthetic_photometry import (
     response_pivot_wavelength_angstrom,
     top_hat_response,
 )
-from malca.io.table_io import read_parquet_table, write_feature_table
+from malca.io.table_io import read_parquet_table, write_feature_table, write_parquet_table
 
 _trapezoid = getattr(np, "trapezoid", np.trapz)
 _FILTER_CENTERS = {
@@ -807,3 +812,232 @@ def test_sed_photometry_cli_reads_candidates_from_review_db_by_default(tmp_path:
     with closing(db_connect(db_path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM sed_photometry").fetchone()[0] == len(sed_rows)
         assert conn.execute("SELECT COUNT(*) FROM sed_model_fits").fetchone()[0] == len(fits)
+
+
+def test_sed_photometry_cli_initializes_archive_schema_for_existing_db(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "review.db"
+    with closing(db_connect(db_path)) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "archive-schema-cand",
+                        "ra": 1.0,
+                        "dec": 2.0,
+                        "failed_any": False,
+                    }
+                ]
+            ),
+        )
+        for table in (
+            "sed_image_measurement_jobs",
+            "sed_archive_products",
+            "sed_archive_coverage",
+        ):
+            conn.execute(f"DROP TABLE {table}")
+        conn.commit()
+
+    def fake_fetch(df: pd.DataFrame, *args, **kwargs) -> pd.DataFrame:
+        out = pd.DataFrame(columns=sed_photometry.CANONICAL_SED_COLUMNS)
+        out.attrs[SED_FETCH_MANIFEST_ATTR] = pd.DataFrame(
+            [
+                {
+                    "candidate_id": "archive-schema-cand",
+                    "source_key": "spitzer",
+                    "source_label": "Spitzer",
+                    "status": "catalog_no_match",
+                    "n_rows": 0,
+                    "cache_updated_at": "2026-07-30T00:00:00Z",
+                    "is_complete": True,
+                    "fetch_policy_version": SED_FETCH_POLICY_VERSION,
+                }
+            ]
+        )
+        return out
+
+    coverage_id = "sedcov_archive_schema_test"
+    coverage = pd.DataFrame(
+        [
+            {
+                "coverage_id": coverage_id,
+                "candidate_id": "archive-schema-cand",
+                "source_key": "spitzer",
+                "archive": "IRSA",
+                "coverage_status": "not_observed",
+                "product_count": 1,
+                "discovery_signature": "schema-test-v1",
+            }
+        ]
+    )
+    products = pd.DataFrame(
+        [
+            {
+                "product_id": "sedprod_archive_schema_test",
+                "coverage_id": coverage_id,
+                "candidate_id": "archive-schema-cand",
+                "source_key": "spitzer",
+                "archive": "IRSA",
+                "product_type": "science_image",
+                "product_status": "discovered",
+            }
+        ]
+    )
+    jobs = pd.DataFrame(
+        [
+            {
+                "job_id": "sedjob_archive_schema_test",
+                "coverage_id": coverage_id,
+                "candidate_id": "archive-schema-cand",
+                "source_key": "spitzer",
+                "archive": "IRSA",
+                "job_type": "spitzer_seip_forced_photometry",
+                "job_status": "queued",
+            }
+        ]
+    )
+
+    monkeypatch.setattr(sed_photometry, "fetch_sed_photometry", fake_fetch)
+    monkeypatch.setattr(
+        sed_photometry,
+        "discover_sed_archive_products",
+        lambda *args, **kwargs: (coverage, products, jobs),
+    )
+
+    args = sed_photometry.build_arg_parser().parse_args(
+        [
+            str(db_path),
+            "--sources",
+            "spitzer",
+            "--no-fit-atmosphere",
+            "--no-alpha",
+        ]
+    )
+    sed_photometry.run(args)
+
+    with closing(db_connect(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sed_archive_coverage").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sed_archive_products").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sed_image_measurement_jobs").fetchone()[0] == 1
+
+
+def test_sed_photometry_cli_reuses_complete_archive_checkpoint_without_querying(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    db_path = tmp_path / "review.db"
+    with closing(db_connect(db_path)) as conn:
+        upsert_candidates_frame(
+            conn,
+            pd.DataFrame(
+                [
+                    {
+                        "candidate_id": "archive-resume-cand",
+                        "ra": 1.0,
+                        "dec": 2.0,
+                        "failed_any": False,
+                    }
+                ]
+            ),
+        )
+
+    def fake_fetch(df: pd.DataFrame, *args, **kwargs) -> pd.DataFrame:
+        out = pd.DataFrame(columns=sed_photometry.CANONICAL_SED_COLUMNS)
+        out.attrs[SED_FETCH_MANIFEST_ATTR] = pd.DataFrame(
+            [
+                {
+                    "candidate_id": "archive-resume-cand",
+                    "source_key": "spitzer",
+                    "source_label": "Spitzer",
+                    "status": "catalog_no_match",
+                    "n_rows": 0,
+                    "cache_updated_at": "2026-07-30T00:00:00Z",
+                    "is_complete": True,
+                    "fetch_policy_version": SED_FETCH_POLICY_VERSION,
+                }
+            ]
+        )
+        return out
+
+    output_path = tmp_path / "resume.parquet"
+    coverage_path, products_path, jobs_path = (
+        sed_photometry._default_archive_output_paths(output_path)
+    )
+    coverage_id = "sedcov_resume_test"
+    coverage_row = {
+        column: None for column in sed_photometry.SED_ARCHIVE_COVERAGE_COLUMNS
+    }
+    coverage_row.update(
+        {
+            "coverage_id": coverage_id,
+            "candidate_id": "archive-resume-cand",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "coverage_status": "not_observed",
+            "product_count": 1,
+            "discovery_signature": "resume-test-v1",
+        }
+    )
+    product_row = {
+        column: None for column in sed_photometry.SED_ARCHIVE_PRODUCT_COLUMNS
+    }
+    product_row.update(
+        {
+            "product_id": "sedprod_resume_test",
+            "coverage_id": coverage_id,
+            "candidate_id": "archive-resume-cand",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "product_type": "science_image",
+            "product_status": "discovered",
+        }
+    )
+    job_row = {column: None for column in sed_photometry.SED_IMAGE_JOB_COLUMNS}
+    job_row.update(
+        {
+            "job_id": "sedjob_resume_test",
+            "coverage_id": coverage_id,
+            "candidate_id": "archive-resume-cand",
+            "source_key": "spitzer",
+            "archive": "IRSA",
+            "job_type": "spitzer_seip_forced_photometry",
+            "job_status": "queued",
+        }
+    )
+    write_parquet_table(pd.DataFrame([coverage_row]), coverage_path)
+    write_parquet_table(pd.DataFrame([product_row]), products_path)
+    write_parquet_table(pd.DataFrame([job_row]), jobs_path)
+
+    monkeypatch.setattr(sed_photometry, "fetch_sed_photometry", fake_fetch)
+
+    def unexpected_discovery(*args, **kwargs):
+        raise AssertionError("complete archive checkpoint should suppress remote discovery")
+
+    monkeypatch.setattr(
+        sed_photometry,
+        "discover_sed_archive_products",
+        unexpected_discovery,
+    )
+
+    args = sed_photometry.build_arg_parser().parse_args(
+        [
+            str(db_path),
+            "--output",
+            str(output_path),
+            "--sources",
+            "spitzer",
+            "--no-fit-atmosphere",
+            "--no-alpha",
+        ]
+    )
+    sed_photometry.run(args)
+
+    assert "no remote discovery needed" in capsys.readouterr().out
+    with closing(db_connect(db_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM sed_archive_coverage").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sed_archive_products").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM sed_image_measurement_jobs").fetchone()[0] == 1

@@ -49,6 +49,7 @@ from malca.review.pipeline import (
 )
 from malca.review.store import db_connect
 from malca.review.sed_storage import (
+    CANONICAL_SED_NORMALIZATION_VERSION,
     make_sed_normalization_hash,
     store_sed_normalizations,
 )
@@ -195,7 +196,7 @@ def test_sed_sources_default_is_bounded_and_all_is_explicit() -> None:
     assert resolve_sed_sources("broad") == BROAD_CLASSIFICATION_SED_SOURCES
     assert resolve_sed_sources("classification") == BROAD_CLASSIFICATION_SED_SOURCES
     assert custom_sources == ("payload", "ps1")
-    assert resolve_sed_sources("far-ir") == ("akari", "iras", "herschel")
+    assert resolve_sed_sources("far-ir") == ("akari", "iras", "herschel", "apex_laboca")
     assert {"akari", "iras", "herschel"}.issubset(set(resolve_sed_sources("all")))
     assert {
         "gaia_xp", "galex", "catwise", "nsc", "vhs", "viking", "swift_uvot", "xmm_om",
@@ -729,6 +730,84 @@ def test_fetch_manifest_certifies_candidate_source_matrix(tmp_path: Path, monkey
     )
     assert not complete
     assert any("non-terminal statuses" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "cache_status",
+    [
+        "catalog_detection",
+        "image_detection",
+        "upper_limit",
+        "ambiguous_counterpart",
+        "unusable_measurement",
+        "reduction_required",
+        "covered_no_detection",
+        "catalog_no_match",
+        "not_observed",
+    ],
+)
+def test_fetch_manifest_preserves_expanded_terminal_statuses(
+    tmp_path: Path,
+    monkeypatch,
+    cache_status: str,
+) -> None:
+    monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
+    pd.DataFrame(
+        [
+            {
+                "_cache_candidate_id": "expanded-status",
+                "_cache_status": cache_status,
+                "_cache_updated_at": "2026-07-30T00:00:00Z",
+                "candidate_id": "expanded-status",
+                "source": "AllWISE",
+                "band": "W1" if cache_status.endswith("detection") else None,
+            }
+        ]
+    ).to_parquet(tmp_path / "allwise.parquet", index=False)
+    candidates = pd.DataFrame([{"candidate_id": "expanded-status"}])
+
+    manifest = review_sed.build_sed_fetch_manifest(
+        candidates,
+        sources=["allwise"],
+    )
+
+    assert manifest.loc[0, "status"] == cache_status
+    assert bool(manifest.loc[0, "is_complete"])
+    complete, errors = review_sed.validate_sed_fetch_manifest(
+        manifest,
+        candidates,
+        sources=["allwise"],
+    )
+    assert complete
+    assert errors == []
+
+
+def test_fetch_manifest_preserves_expanded_retryable_status(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
+    pd.DataFrame(
+        [
+            {
+                "_cache_candidate_id": "retryable-status",
+                "_cache_status": "query_error",
+                "_cache_updated_at": "2026-07-30T00:00:00Z",
+                "candidate_id": "retryable-status",
+                "source": "AllWISE",
+                "band": None,
+            }
+        ]
+    ).to_parquet(tmp_path / "allwise.parquet", index=False)
+    candidates = pd.DataFrame([{"candidate_id": "retryable-status"}])
+
+    manifest = review_sed.build_sed_fetch_manifest(
+        candidates,
+        sources=["allwise"],
+    )
+
+    assert manifest.loc[0, "status"] == "query_error"
+    assert not bool(manifest.loc[0, "is_complete"])
 
 
 def test_fetch_manifest_validation_requires_exact_cross_product(
@@ -1968,7 +2047,7 @@ def test_des_vizier_source_prefers_psf_columns(monkeypatch) -> None:
     assert math.isclose(float(g_row["mag_err"]), 0.02)
 
 
-def test_spitzer_flux_provenance_is_json_and_cache_writable(
+def test_direct_irsa_spitzer_provenance_is_json_and_cache_writable(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1977,20 +2056,30 @@ def test_spitzer_flux_provenance_is_json_and_cache_writable(
         "ra_deg": 10.0,
         "dec_deg": 20.0,
     }])
-    table = _table_from_dicts([{
-        "_r": 0.6,
-        "Name": "SEIP-test-source",
-        "F3.6Ap1": 1500.0,
-        "e_F3.6Ap1": 120.0,
+    table = pd.DataFrame([{
+        "ra": 10.0,
+        "dec": 20.0,
+        "objid": "SEIP-test-source",
+        "i1_f_ap1": 1500.0,
+        "i1_df_ap1": 120.0,
+        "i1_fluxtype": 1,
+        "i1_fluxflag": 0,
+        "i1_softsatflag": 0,
     }])
-    _patch_vizier_query(monkeypatch, {"II/368/sstsl2": table})
+    monkeypatch.setattr(
+        review_sed,
+        "_irsa_query_region_frame",
+        lambda *args, **kwargs: (table, 10.0, 20.0, "test_propagation"),
+    )
+    monkeypatch.setattr(review_sed, "_sleep_after_sed_request", lambda: None)
 
-    rows = review_sed.query_flux_catalog_source(candidates, "spitzer")
+    rows = review_sed.query_irsa_spitzer_photometry(candidates)
 
     assert len(rows) == 1
     provenance = json.loads(rows.iloc[0]["provenance_json"])
-    assert provenance["catalog"] == "II/368/sstsl2"
-    assert provenance["quality"] == {}
+    assert provenance["catalog"] == "slphotdr4"
+    assert provenance["coordinate_method"] == "test_propagation"
+    assert rows.iloc[0]["catalog_release"] == "slphotdr4"
 
     monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
     cache_rows = review_sed._cache_rows_for_sed_result(
@@ -2005,7 +2094,91 @@ def test_spitzer_flux_provenance_is_json_and_cache_writable(
         cached["_cache_status"].astype(str) == "hit",
         "provenance_json",
     ].iloc[0]
-    assert json.loads(cached_provenance)["quality"] == {}
+    assert json.loads(cached_provenance)["catalog"] == "slphotdr4"
+
+
+def test_direct_irsa_allwise_is_canonical_and_payload_is_not_a_fallback(
+    monkeypatch,
+) -> None:
+    candidates = pd.DataFrame(
+        [
+            {
+                "candidate_id": "cand-allwise",
+                "ra_deg": 10.0,
+                "dec_deg": 20.0,
+                "w1": 12.1,
+                "w1_err": 0.03,
+            }
+        ]
+    )
+    table = pd.DataFrame(
+        [
+            {
+                "ra": 10.0,
+                "dec": 20.0,
+                "designation": "J004000.00+200000.0",
+                "w1mpro": 12.0,
+                "w1sigmpro": 0.02,
+                "ph_qual": "A---",
+                "cc_flags": "0000",
+                "ext_flg": 0,
+                "w1snr": 50.0,
+                "w1rchi2": 1.0,
+                "w1sat": 0,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        review_sed,
+        "_irsa_query_region_frame",
+        lambda *args, **kwargs: (table, 10.0, 20.0, "test_propagation"),
+    )
+    monkeypatch.setattr(review_sed, "_sleep_after_sed_request", lambda: None)
+
+    rows = review_sed.query_irsa_allwise_photometry(candidates)
+    payload_rows = review_sed.rows_from_candidate_frame(candidates)
+
+    assert rows["band"].tolist() == ["W1"]
+    assert rows.iloc[0]["catalog_release"] == "allwise_p3as_psd"
+    assert rows.iloc[0]["mag"] == pytest.approx(12.0)
+    assert "AllWISE" not in set(payload_rows.get("source", pd.Series(dtype=str)))
+    assert review_sed.CATALOG_FETCHERS["allwise"] is review_sed.query_irsa_allwise_photometry
+    assert review_sed.CATALOG_FETCHERS["spitzer"] is review_sed.query_irsa_spitzer_photometry
+
+
+def test_sed_cache_signature_invalidates_changed_astrometry() -> None:
+    candidate = pd.Series(
+        {
+            "candidate_id": "signature-candidate",
+            "ra_deg": 10.0,
+            "dec_deg": 20.0,
+            "pmra": 1.0,
+            "pmdec": 2.0,
+            "ref_epoch": 2016.0,
+        }
+    )
+    original_hash = review_sed._candidate_astrometry_hash(candidate)
+    cache = review_sed._cache_rows_for_sed_result(
+        "allwise",
+        {"signature-candidate"},
+        pd.DataFrame(columns=review_sed.CANONICAL_SED_COLUMNS),
+        status_by_candidate={"signature-candidate": "covered_no_detection"},
+        astrometry_hashes={"signature-candidate": original_hash},
+    )
+    assert review_sed._cache_signature_mask(
+        cache,
+        "allwise",
+        {"signature-candidate": original_hash},
+    ).all()
+
+    moved = candidate.copy()
+    moved["ra_deg"] = 10.001
+    moved_hash = review_sed._candidate_astrometry_hash(moved)
+    assert not review_sed._cache_signature_mask(
+        cache,
+        "allwise",
+        {"signature-candidate": moved_hash},
+    ).any()
 
 
 def test_sed_cache_read_normalizes_legacy_struct_provenance(
@@ -2229,7 +2402,7 @@ def test_sed_rows_roundtrip_review_db(tmp_path: Path) -> None:
     assert loaded.loc[0, "band"] == "g"
 
 
-def test_v3_roundtrip_and_plot_preserve_exact_canonical_normalization(tmp_path: Path) -> None:
+def test_canonical_roundtrip_and_plot_preserve_exact_normalization(tmp_path: Path) -> None:
     db_path = tmp_path / "review.db"
     canonical = prepare_canonical_sed_measurements(
         pd.DataFrame([{
@@ -2253,7 +2426,7 @@ def test_v3_roundtrip_and_plot_preserve_exact_canonical_normalization(tmp_path: 
         assert upsert_sed_rows(conn, canonical) == 1
         loaded = load_sed_rows(conn, "cand-v3-exact")
 
-    assert loaded.loc[0, "normalization_version"] == "sed-measurement-v3"
+    assert loaded.loc[0, "normalization_version"] == CANONICAL_SED_NORMALIZATION_VERSION
     assert float(loaded.loc[0, "observed_flux_nu_jy"]) == pytest.approx(expected_fnu)
     assert float(loaded.loc[0, "plot_lambda_angstrom"]) == pytest.approx(6217.59)
     _, plotted, _ = build_sed_figure(

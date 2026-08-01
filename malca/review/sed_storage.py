@@ -27,8 +27,24 @@ SED_MEASUREMENT_TABLE = "sed_measurements"
 SED_NORMALIZATION_TABLE = "sed_measurement_normalizations"
 SED_FIT_RUN_TABLE = "sed_fit_runs"
 SED_FIT_INPUT_TABLE = "sed_fit_inputs"
+SED_ARCHIVE_COVERAGE_TABLE = "sed_archive_coverage"
+SED_ARCHIVE_PRODUCT_TABLE = "sed_archive_products"
+SED_IMAGE_JOB_TABLE = "sed_image_measurement_jobs"
+SED_MEASUREMENT_VALIDATION_TABLE = "sed_measurement_validations"
 SED_STORAGE_META_TABLE = "sed_storage_meta"
-SED_STORAGE_SCHEMA_VERSION = 5
+SED_STORAGE_SCHEMA_VERSION = 7
+CANONICAL_SED_NORMALIZATION_VERSION = "sed-measurement-v4-catalog-semantics"
+LEGACY_CANONICAL_SED_NORMALIZATION_VERSION = "sed-measurement-v3"
+SED_NORMALIZATION_ONLY_QUALITY_FLAGS = frozenset(
+    {
+        "apass_b_red_leak_unassessed",
+        "diagnostic_only",
+        "emission_line",
+        "legacy_response_metadata_fallback",
+        "legacy_vega_zero_point_fallback",
+        "standardized_system_proxy",
+    }
+)
 
 SED_MEASUREMENT_COLUMNS = [
     "measurement_id",
@@ -133,6 +149,90 @@ SED_FIT_INPUT_COLUMNS = [
     "calibration_hash",
     "normalization_hash",
     "input_hash",
+]
+
+SED_ARCHIVE_COVERAGE_COLUMNS = [
+    "coverage_id",
+    "candidate_id",
+    "source_key",
+    "archive",
+    "collection",
+    "instrument",
+    "band",
+    "observation_id",
+    "coverage_status",
+    "target_ra_deg",
+    "target_dec_deg",
+    "coordinate_epoch_jyear",
+    "coordinate_method",
+    "observation_start_mjd",
+    "observation_end_mjd",
+    "exposure_seconds",
+    "coverage_fraction",
+    "product_count",
+    "discovery_signature",
+    "provenance_json",
+    "discovered_at",
+    "updated_at",
+]
+
+SED_ARCHIVE_PRODUCT_COLUMNS = [
+    "product_id",
+    "coverage_id",
+    "candidate_id",
+    "source_key",
+    "archive",
+    "collection",
+    "observation_id",
+    "instrument",
+    "band",
+    "product_type",
+    "processing_level",
+    "access_url",
+    "access_format",
+    "local_path",
+    "content_hash",
+    "size_bytes",
+    "product_status",
+    "provenance_json",
+    "discovered_at",
+    "downloaded_at",
+    "updated_at",
+]
+
+SED_IMAGE_JOB_COLUMNS = [
+    "job_id",
+    "candidate_id",
+    "coverage_id",
+    "source_key",
+    "archive",
+    "instrument",
+    "band",
+    "job_type",
+    "job_status",
+    "priority",
+    "attempt_count",
+    "max_attempts",
+    "lease_owner",
+    "lease_expires_at",
+    "last_error",
+    "output_measurement_id",
+    "provenance_json",
+    "created_at",
+    "updated_at",
+]
+
+SED_MEASUREMENT_VALIDATION_COLUMNS = [
+    "validation_id",
+    "measurement_id",
+    "validation_version",
+    "validation_status",
+    "r24_eligible",
+    "validator",
+    "validation_method",
+    "notes",
+    "provenance_json",
+    "created_at",
 ]
 
 _JSON_COLUMNS = {
@@ -418,12 +518,20 @@ def validate_sed_storage_integrity(conn: sqlite3.Connection) -> None:
         SED_NORMALIZATION_TABLE: set(SED_NORMALIZATION_COLUMNS),
         SED_FIT_RUN_TABLE: set(SED_FIT_RUN_COLUMNS),
         SED_FIT_INPUT_TABLE: set(SED_FIT_INPUT_COLUMNS),
+        SED_ARCHIVE_COVERAGE_TABLE: set(SED_ARCHIVE_COVERAGE_COLUMNS),
+        SED_ARCHIVE_PRODUCT_TABLE: set(SED_ARCHIVE_PRODUCT_COLUMNS),
+        SED_IMAGE_JOB_TABLE: set(SED_IMAGE_JOB_COLUMNS),
+        SED_MEASUREMENT_VALIDATION_TABLE: set(SED_MEASUREMENT_VALIDATION_COLUMNS),
     }
     expected_references = {
         SED_MEASUREMENT_TABLE: {"candidates"},
         SED_NORMALIZATION_TABLE: {SED_MEASUREMENT_TABLE},
         SED_FIT_RUN_TABLE: {"candidates"},
         SED_FIT_INPUT_TABLE: {SED_FIT_RUN_TABLE, SED_NORMALIZATION_TABLE},
+        SED_ARCHIVE_COVERAGE_TABLE: {"candidates"},
+        SED_ARCHIVE_PRODUCT_TABLE: {SED_ARCHIVE_COVERAGE_TABLE, "candidates"},
+        SED_IMAGE_JOB_TABLE: {SED_ARCHIVE_COVERAGE_TABLE, "candidates"},
+        SED_MEASUREMENT_VALIDATION_TABLE: {SED_MEASUREMENT_TABLE},
     }
     for table, required in expected_columns.items():
         actual = {
@@ -634,6 +742,108 @@ def ensure_sed_storage_schema(
         )
         """
     )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SED_ARCHIVE_COVERAGE_TABLE} (
+            coverage_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            archive TEXT NOT NULL,
+            collection TEXT,
+            instrument TEXT,
+            band TEXT,
+            observation_id TEXT,
+            coverage_status TEXT NOT NULL,
+            target_ra_deg REAL,
+            target_dec_deg REAL,
+            coordinate_epoch_jyear REAL,
+            coordinate_method TEXT,
+            observation_start_mjd REAL,
+            observation_end_mjd REAL,
+            exposure_seconds REAL,
+            coverage_fraction REAL,
+            product_count INTEGER NOT NULL DEFAULT 0,
+            discovery_signature TEXT NOT NULL,
+            provenance_json TEXT,
+            discovered_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SED_ARCHIVE_PRODUCT_TABLE} (
+            product_id TEXT PRIMARY KEY,
+            coverage_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            archive TEXT NOT NULL,
+            collection TEXT,
+            observation_id TEXT,
+            instrument TEXT,
+            band TEXT,
+            product_type TEXT NOT NULL,
+            processing_level TEXT,
+            access_url TEXT,
+            access_format TEXT,
+            local_path TEXT,
+            content_hash TEXT,
+            size_bytes INTEGER,
+            product_status TEXT NOT NULL,
+            provenance_json TEXT,
+            discovered_at TEXT NOT NULL,
+            downloaded_at TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(coverage_id) REFERENCES {SED_ARCHIVE_COVERAGE_TABLE}(coverage_id),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SED_IMAGE_JOB_TABLE} (
+            job_id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            coverage_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            archive TEXT NOT NULL,
+            instrument TEXT,
+            band TEXT,
+            job_type TEXT NOT NULL,
+            job_status TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 100,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            last_error TEXT,
+            output_measurement_id TEXT,
+            provenance_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(coverage_id) REFERENCES {SED_ARCHIVE_COVERAGE_TABLE}(coverage_id),
+            FOREIGN KEY(candidate_id) REFERENCES candidates(candidate_id)
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {SED_MEASUREMENT_VALIDATION_TABLE} (
+            validation_id TEXT PRIMARY KEY,
+            measurement_id TEXT NOT NULL,
+            validation_version TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            r24_eligible INTEGER NOT NULL DEFAULT 0 CHECK(r24_eligible IN (0, 1)),
+            validator TEXT,
+            validation_method TEXT,
+            notes TEXT,
+            provenance_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(measurement_id) REFERENCES {SED_MEASUREMENT_TABLE}(measurement_id)
+        )
+        """
+    )
     existing_fit_input_columns = {
         str(row[1]).lower()
         for row in conn.execute(f"PRAGMA table_info({SED_FIT_INPUT_TABLE})").fetchall()
@@ -664,6 +874,24 @@ def ensure_sed_storage_schema(
         f"CREATE INDEX IF NOT EXISTS idx_sed_fit_runs_hash ON {SED_FIT_RUN_TABLE}(fit_run_hash)",
         f"CREATE INDEX IF NOT EXISTS idx_sed_fit_inputs_measurement ON {SED_FIT_INPUT_TABLE}(measurement_id)",
         f"CREATE INDEX IF NOT EXISTS idx_sed_fit_inputs_used ON {SED_FIT_INPUT_TABLE}(fit_run_id, used)",
+        f"CREATE INDEX IF NOT EXISTS idx_sed_archive_coverage_candidate "
+        f"ON {SED_ARCHIVE_COVERAGE_TABLE}(candidate_id, source_key, coverage_status)",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_archive_coverage_identity "
+        f"ON {SED_ARCHIVE_COVERAGE_TABLE}("
+        "candidate_id, source_key, archive, collection, instrument, band, observation_id"
+        ")",
+        f"CREATE INDEX IF NOT EXISTS idx_sed_archive_products_candidate "
+        f"ON {SED_ARCHIVE_PRODUCT_TABLE}(candidate_id, source_key, band, product_type)",
+        f"CREATE INDEX IF NOT EXISTS idx_sed_archive_products_coverage "
+        f"ON {SED_ARCHIVE_PRODUCT_TABLE}(coverage_id, product_status)",
+        f"CREATE INDEX IF NOT EXISTS idx_sed_image_jobs_queue "
+        f"ON {SED_IMAGE_JOB_TABLE}(job_status, priority, updated_at)",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_image_jobs_identity "
+        f"ON {SED_IMAGE_JOB_TABLE}(coverage_id, job_type)",
+        f"CREATE UNIQUE INDEX IF NOT EXISTS idx_sed_measurement_validations_version "
+        f"ON {SED_MEASUREMENT_VALIDATION_TABLE}(measurement_id, validation_version)",
+        f"CREATE INDEX IF NOT EXISTS idx_sed_measurement_validations_r24 "
+        f"ON {SED_MEASUREMENT_VALIDATION_TABLE}(r24_eligible, validation_status, created_at)",
     )
     for statement in index_statements:
         conn.execute(statement)
@@ -746,6 +974,579 @@ def _insert_immutable_rows(
                 f"Immutable {table} row ({key_text}) differs in: {', '.join(changed)}"
             )
     return inserted
+
+
+def make_sed_archive_coverage_id(row: Mapping[str, Any]) -> str:
+    """Return a stable identity for one target/archive coverage assertion."""
+
+    digest = stable_sed_hash(
+        {
+            key: _jsonable(row.get(key))
+            for key in (
+                "candidate_id",
+                "source_key",
+                "archive",
+                "collection",
+                "instrument",
+                "band",
+                "observation_id",
+            )
+        }
+    )
+    return f"sedcov_{digest[:32]}"
+
+
+def make_sed_archive_product_id(row: Mapping[str, Any]) -> str:
+    """Return a stable identity for one archive product."""
+
+    digest = stable_sed_hash(
+        {
+            key: _jsonable(row.get(key))
+            for key in (
+                "coverage_id",
+                "archive",
+                "collection",
+                "observation_id",
+                "instrument",
+                "band",
+                "product_type",
+                "processing_level",
+                "access_url",
+            )
+        }
+    )
+    return f"sedprod_{digest[:32]}"
+
+
+def make_sed_image_job_id(row: Mapping[str, Any]) -> str:
+    """Return a stable identity for one coverage/measurement operation."""
+
+    digest = stable_sed_hash(
+        {
+            key: _jsonable(row.get(key))
+            for key in ("coverage_id", "job_type")
+        }
+    )
+    return f"sedjob_{digest[:32]}"
+
+
+def make_sed_measurement_validation_id(row: Mapping[str, Any]) -> str:
+    """Return a stable ID for one versioned human or automated validation."""
+
+    digest = stable_sed_hash(
+        {
+            key: _jsonable(row.get(key))
+            for key in ("measurement_id", "validation_version")
+        }
+    )
+    return f"sedval_{digest[:32]}"
+
+
+def _upsert_mutable_rows(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    columns: Sequence[str],
+    key_column: str,
+    records: Sequence[Mapping[str, Any]],
+    preserve_columns: Sequence[str] = (),
+) -> int:
+    if not records:
+        return 0
+    placeholders = ", ".join("?" for _ in columns)
+    mutable_columns = [
+        column
+        for column in columns
+        if column != key_column and column not in preserve_columns
+    ]
+    update_clause = ", ".join(
+        f"{column} = excluded.{column}" for column in mutable_columns
+    )
+    sql = (
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
+        f"ON CONFLICT({key_column}) DO UPDATE SET {update_clause}"
+    )
+    for raw in records:
+        record = _normalize_columns(raw, columns)
+        conn.execute(sql, [record[column] for column in columns])
+    return len(records)
+
+
+def upsert_sed_archive_coverage(
+    conn: sqlite3.Connection,
+    rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Persist current archive coverage state while retaining stable identities."""
+
+    now = _utc_now()
+    prepared: list[dict[str, Any]] = []
+    for raw in _records(rows):
+        row = dict(raw)
+        required = ("candidate_id", "source_key", "archive", "coverage_status")
+        if any(_missing(row.get(column)) for column in required):
+            raise ValueError(
+                "SED archive coverage requires candidate_id, source_key, archive, "
+                "and coverage_status"
+            )
+        if _missing(row.get("discovery_signature")):
+            raise ValueError("SED archive coverage requires discovery_signature")
+        if not _valid_identifier(row.get("coverage_id")):
+            row["coverage_id"] = make_sed_archive_coverage_id(row)
+        product_count = row.get("product_count")
+        row["product_count"] = int(0 if _missing(product_count) else product_count)
+        row["discovered_at"] = _first_present(row, "discovered_at") or now
+        row["updated_at"] = now
+        prepared.append(row)
+    with _savepoint(conn, commit=commit):
+        return _upsert_mutable_rows(
+            conn,
+            table=SED_ARCHIVE_COVERAGE_TABLE,
+            columns=SED_ARCHIVE_COVERAGE_COLUMNS,
+            key_column="coverage_id",
+            records=prepared,
+            preserve_columns=("discovered_at",),
+        )
+
+
+def upsert_sed_archive_products(
+    conn: sqlite3.Connection,
+    rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Persist archive product discovery and download state."""
+
+    now = _utc_now()
+    prepared: list[dict[str, Any]] = []
+    for raw in _records(rows):
+        row = dict(raw)
+        required = (
+            "coverage_id",
+            "candidate_id",
+            "source_key",
+            "archive",
+            "product_type",
+            "product_status",
+        )
+        if any(_missing(row.get(column)) for column in required):
+            raise ValueError(
+                "SED archive products require coverage_id, candidate_id, source_key, "
+                "archive, product_type, and product_status"
+            )
+        if not _valid_identifier(row.get("product_id")):
+            row["product_id"] = make_sed_archive_product_id(row)
+        row["discovered_at"] = _first_present(row, "discovered_at") or now
+        row["updated_at"] = now
+        prepared.append(row)
+    with _savepoint(conn, commit=commit):
+        if not prepared:
+            return 0
+        columns = SED_ARCHIVE_PRODUCT_COLUMNS
+        placeholders = ", ".join("?" for _ in columns)
+        ordinary_updates = [
+            column
+            for column in columns
+            if column
+            not in {
+                "product_id",
+                "discovered_at",
+                "local_path",
+                "content_hash",
+                "size_bytes",
+                "product_status",
+                "downloaded_at",
+            }
+        ]
+        updates = [
+            *(f"{column} = excluded.{column}" for column in ordinary_updates),
+            (
+                f"local_path = COALESCE(excluded.local_path, "
+                f"{SED_ARCHIVE_PRODUCT_TABLE}.local_path)"
+            ),
+            (
+                f"content_hash = COALESCE(excluded.content_hash, "
+                f"{SED_ARCHIVE_PRODUCT_TABLE}.content_hash)"
+            ),
+            (
+                f"size_bytes = COALESCE(excluded.size_bytes, "
+                f"{SED_ARCHIVE_PRODUCT_TABLE}.size_bytes)"
+            ),
+            (
+                f"downloaded_at = COALESCE(excluded.downloaded_at, "
+                f"{SED_ARCHIVE_PRODUCT_TABLE}.downloaded_at)"
+            ),
+            (
+                "product_status = CASE "
+                "WHEN excluded.local_path IS NULL "
+                f"AND {SED_ARCHIVE_PRODUCT_TABLE}.local_path IS NOT NULL "
+                f"THEN {SED_ARCHIVE_PRODUCT_TABLE}.product_status "
+                "ELSE excluded.product_status END"
+            ),
+        ]
+        sql = (
+            f"INSERT INTO {SED_ARCHIVE_PRODUCT_TABLE} ({', '.join(columns)}) "
+            f"VALUES ({placeholders}) ON CONFLICT(product_id) DO UPDATE SET "
+            + ", ".join(updates)
+        )
+        for raw in prepared:
+            record = _normalize_columns(raw, columns)
+            conn.execute(sql, [record[column] for column in columns])
+        return len(prepared)
+
+
+def enqueue_sed_image_jobs(
+    conn: sqlite3.Connection,
+    rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Create or refresh resumable image-measurement jobs."""
+
+    now = _utc_now()
+    prepared: list[dict[str, Any]] = []
+    for raw in _records(rows):
+        row = dict(raw)
+        required = (
+            "coverage_id",
+            "candidate_id",
+            "source_key",
+            "archive",
+            "job_type",
+        )
+        if any(_missing(row.get(column)) for column in required):
+            raise ValueError(
+                "SED image jobs require coverage_id, candidate_id, source_key, "
+                "archive, and job_type"
+            )
+        if not _valid_identifier(row.get("job_id")):
+            row["job_id"] = make_sed_image_job_id(row)
+        row["job_status"] = _first_present(row, "job_status") or "queued"
+        priority = row.get("priority")
+        attempt_count = row.get("attempt_count")
+        max_attempts = row.get("max_attempts")
+        row["priority"] = int(100 if _missing(priority) else priority)
+        row["attempt_count"] = int(0 if _missing(attempt_count) else attempt_count)
+        row["max_attempts"] = int(3 if _missing(max_attempts) else max_attempts)
+        row["created_at"] = _first_present(row, "created_at") or now
+        row["updated_at"] = now
+        prepared.append(row)
+    with _savepoint(conn, commit=commit):
+        return _upsert_mutable_rows(
+            conn,
+            table=SED_IMAGE_JOB_TABLE,
+            columns=SED_IMAGE_JOB_COLUMNS,
+            key_column="job_id",
+            records=prepared,
+            preserve_columns=(
+                "created_at",
+                "job_status",
+                "attempt_count",
+                "lease_owner",
+                "lease_expires_at",
+                "last_error",
+                "output_measurement_id",
+            ),
+        )
+
+
+def load_sed_archive_coverage(
+    conn: sqlite3.Connection,
+    candidate_id: str | None = None,
+) -> pd.DataFrame:
+    params: list[Any] = []
+    where = ""
+    if candidate_id is not None:
+        where = " WHERE candidate_id = ?"
+        params.append(str(candidate_id))
+    return _read_frame(
+        conn,
+        f"SELECT {', '.join(SED_ARCHIVE_COVERAGE_COLUMNS)} "
+        f"FROM {SED_ARCHIVE_COVERAGE_TABLE}{where} "
+        "ORDER BY candidate_id, source_key, band, observation_id",
+        params,
+        SED_ARCHIVE_COVERAGE_COLUMNS,
+    )
+
+
+def load_sed_archive_products(
+    conn: sqlite3.Connection,
+    candidate_id: str | None = None,
+) -> pd.DataFrame:
+    params: list[Any] = []
+    where = ""
+    if candidate_id is not None:
+        where = " WHERE candidate_id = ?"
+        params.append(str(candidate_id))
+    return _read_frame(
+        conn,
+        f"SELECT {', '.join(SED_ARCHIVE_PRODUCT_COLUMNS)} "
+        f"FROM {SED_ARCHIVE_PRODUCT_TABLE}{where} "
+        "ORDER BY candidate_id, source_key, band, product_type, product_id",
+        params,
+        SED_ARCHIVE_PRODUCT_COLUMNS,
+    )
+
+
+def load_sed_image_jobs(
+    conn: sqlite3.Connection,
+    *,
+    statuses: Iterable[str] | None = None,
+    candidate_ids: Iterable[str] | None = None,
+    limit: int | None = None,
+) -> pd.DataFrame:
+    requested = [str(value) for value in (statuses or []) if str(value).strip()]
+    candidates = [
+        str(value) for value in (candidate_ids or []) if str(value).strip()
+    ]
+    params: list[Any] = []
+    clauses: list[str] = []
+    if requested:
+        clauses.append(f"job_status IN ({', '.join('?' for _ in requested)})")
+        params.extend(requested)
+    if candidates:
+        clauses.append(
+            f"candidate_id IN ({', '.join('?' for _ in candidates)})"
+        )
+        params.extend(candidates)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    suffix = f" LIMIT {max(int(limit), 0)}" if limit is not None else ""
+    return _read_frame(
+        conn,
+        f"SELECT {', '.join(SED_IMAGE_JOB_COLUMNS)} FROM {SED_IMAGE_JOB_TABLE}{where} "
+        f"ORDER BY priority, updated_at, job_id{suffix}",
+        params,
+        SED_IMAGE_JOB_COLUMNS,
+    )
+
+
+def update_sed_image_job(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    status: str,
+    last_error: str | None = None,
+    output_measurement_id: str | None = None,
+    lease_owner: str | None = None,
+    lease_expires_at: str | None = None,
+    increment_attempt: bool = False,
+    commit: bool = True,
+) -> None:
+    """Advance one image job without losing its retry history."""
+
+    attempt_sql = "attempt_count + 1" if increment_attempt else "attempt_count"
+    with _savepoint(conn, commit=commit):
+        cursor = conn.execute(
+            f"""
+            UPDATE {SED_IMAGE_JOB_TABLE}
+            SET job_status = ?,
+                last_error = ?,
+                output_measurement_id = COALESCE(?, output_measurement_id),
+                lease_owner = ?,
+                lease_expires_at = ?,
+                attempt_count = {attempt_sql},
+                updated_at = ?
+            WHERE job_id = ?
+            """,
+            (
+                str(status),
+                last_error,
+                output_measurement_id,
+                lease_owner,
+                lease_expires_at,
+                _utc_now(),
+                str(job_id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"Unknown SED image job {job_id!r}")
+
+
+def store_sed_measurement_validations(
+    conn: sqlite3.Connection,
+    rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
+    *,
+    commit: bool = True,
+) -> int:
+    """Store immutable, versioned decisions about model eligibility."""
+
+    prepared: list[dict[str, Any]] = []
+    for raw in _records(rows):
+        row = dict(raw)
+        if not _valid_identifier(row.get("measurement_id")):
+            raise ValueError("SED measurement validation requires measurement_id")
+        if not _valid_identifier(row.get("validation_version")):
+            raise ValueError("SED measurement validation requires validation_version")
+        status = str(row.get("validation_status") or "").strip().lower()
+        if status not in {"accepted", "validated", "rejected", "pending"}:
+            raise ValueError(
+                "validation_status must be accepted, validated, rejected, or pending"
+            )
+        row["validation_status"] = status
+        row["r24_eligible"] = _bool_int(row.get("r24_eligible"))
+        if row["r24_eligible"] and status not in {"accepted", "validated"}:
+            raise ValueError("Only accepted or validated measurements can be R24 eligible")
+        if not _valid_identifier(row.get("validation_id")):
+            row["validation_id"] = make_sed_measurement_validation_id(row)
+        row["created_at"] = _first_present(row, "created_at") or _utc_now()
+        prepared.append(row)
+    with _savepoint(conn, commit=commit):
+        return _insert_immutable_rows(
+            conn,
+            table=SED_MEASUREMENT_VALIDATION_TABLE,
+            columns=SED_MEASUREMENT_VALIDATION_COLUMNS,
+            key_columns=("validation_id",),
+            records=prepared,
+        )
+
+
+def load_sed_measurement_validations(
+    conn: sqlite3.Connection,
+    *,
+    measurement_ids: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    ids = [str(value) for value in (measurement_ids or [])]
+    params: list[Any] = []
+    where = ""
+    if ids:
+        where = f" WHERE measurement_id IN ({', '.join('?' for _ in ids)})"
+        params.extend(ids)
+    return _read_frame(
+        conn,
+        f"SELECT {', '.join(SED_MEASUREMENT_VALIDATION_COLUMNS)} "
+        f"FROM {SED_MEASUREMENT_VALIDATION_TABLE}{where} "
+        "ORDER BY measurement_id, created_at, validation_id",
+        params,
+        SED_MEASUREMENT_VALIDATION_COLUMNS,
+    )
+
+
+R24_READY_SED_COLUMNS = [
+    "measurement_id",
+    "candidate_id",
+    "source",
+    "catalog",
+    "release",
+    "catalog_object_id",
+    "catalog_measurement_id",
+    "exposure_id",
+    "instrument",
+    "band",
+    "epoch_mjd",
+    "is_upper_limit",
+    "quality_flags",
+    "quality_status",
+    "fit_policy",
+    "flux_nu_jy",
+    "flux_nu_jy_err",
+    "plot_lambda_angstrom",
+    "normalization_version",
+    "validation_id",
+    "validation_version",
+    "validation_status",
+    "r24_eligible",
+    "validator",
+    "validation_method",
+    "notes",
+    "measurement_provenance_json",
+    "validation_provenance_json",
+]
+
+
+def load_r24_ready_sed_measurements(
+    conn: sqlite3.Connection,
+    candidate_id: str | None = None,
+    *,
+    min_wavelength_angstrom: float = 10_000.0,
+) -> pd.DataFrame:
+    """Load only explicitly validated infrared measurements for R24.
+
+    The latest validation record controls eligibility.  Merely downloading an
+    image, obtaining a catalog match, or producing provisional forced
+    photometry can never make a point available to the R24 handoff.
+    """
+
+    params: list[Any] = []
+    candidate_clause = ""
+    if candidate_id is not None:
+        candidate_clause = " AND m.candidate_id = ?"
+        params.append(str(candidate_id))
+    params.append(float(min_wavelength_angstrom))
+    sql = f"""
+        WITH latest_validation AS (
+            SELECT v.*
+            FROM {SED_MEASUREMENT_VALIDATION_TABLE} v
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {SED_MEASUREMENT_VALIDATION_TABLE} newer
+                WHERE newer.measurement_id = v.measurement_id
+                  AND (
+                    newer.created_at > v.created_at
+                    OR (
+                        newer.created_at = v.created_at
+                        AND newer.validation_id > v.validation_id
+                    )
+                  )
+            )
+        ),
+        latest_normalization AS (
+            SELECT n.*
+            FROM {SED_NORMALIZATION_TABLE} n
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {SED_NORMALIZATION_TABLE} newer
+                WHERE newer.measurement_id = n.measurement_id
+                  AND (
+                    newer.created_at > n.created_at
+                    OR (
+                        newer.created_at = n.created_at
+                        AND newer.normalization_version > n.normalization_version
+                    )
+                  )
+            )
+        )
+        SELECT
+            m.measurement_id,
+            m.candidate_id,
+            m.source,
+            m.catalog,
+            m.release,
+            m.catalog_object_id,
+            m.catalog_measurement_id,
+            m.exposure_id,
+            m.instrument,
+            m.band,
+            m.epoch_mjd,
+            m.is_upper_limit,
+            m.quality_flags,
+            m.quality_status,
+            m.fit_policy,
+            n.flux_nu_jy,
+            n.flux_nu_jy_err,
+            n.plot_lambda_angstrom,
+            n.normalization_version,
+            v.validation_id,
+            v.validation_version,
+            v.validation_status,
+            v.r24_eligible,
+            v.validator,
+            v.validation_method,
+            v.notes,
+            m.provenance_json AS measurement_provenance_json,
+            v.provenance_json AS validation_provenance_json
+        FROM {SED_MEASUREMENT_TABLE} m
+        JOIN latest_normalization n ON n.measurement_id = m.measurement_id
+        JOIN latest_validation v ON v.measurement_id = m.measurement_id
+        WHERE v.validation_status IN ('accepted', 'validated')
+          AND v.r24_eligible = 1
+          AND n.flux_nu_jy > 0
+          AND n.plot_lambda_angstrom >= ?
+          {candidate_clause}
+        ORDER BY m.candidate_id, n.plot_lambda_angstrom, m.measurement_id
+    """
+    if candidate_id is not None:
+        # The candidate placeholder appears after the wavelength placeholder.
+        params = [float(min_wavelength_angstrom), str(candidate_id)]
+    return _read_frame(conn, sql, params, R24_READY_SED_COLUMNS)
 
 
 def store_sed_measurements(
@@ -1041,20 +1842,36 @@ def _canonical_native_payload(
             "observable_kind",
         )
     )
-    return {
+    payload = {
         key: row.get(key)
         for key in (*identity_and_quality, *native_fields)
         if key in row and not _missing(row.get(key))
     }
+    for key in ("is_upper_limit", "is_synthetic"):
+        if key in payload:
+            payload[key] = _bool_int(payload[key])
+    return payload
+
+
+def _native_measurement_quality_flags(value: Any) -> Any:
+    """Remove normalization diagnostics from immutable native quality fields."""
+
+    if not isinstance(value, str):
+        return value
+    return ";".join(
+        token
+        for token in value.split(";")
+        if token and token not in SED_NORMALIZATION_ONLY_QUALITY_FLAGS
+    )
 
 
 def prepare_canonical_sed_rows(
     rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
     *,
-    normalization_version: str = "sed-measurement-v3",
+    normalization_version: str = CANONICAL_SED_NORMALIZATION_VERSION,
     ingestion_version: str = "canonical-sed-v3",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Map fetched/canonical SED rows onto native and derived v3 records.
+    """Map fetched/canonical SED rows onto native and versioned derived records.
 
     AB and Vega rows retain their catalog magnitude as the native observable.
     Rows declared as ``Jy``/``quoted_fnu`` retain their catalog Jy value even
@@ -1071,6 +1888,11 @@ def prepare_canonical_sed_rows(
         if not candidate_id or not source or not band:
             raise ValueError("Canonical SED rows require candidate_id, source/catalog, and band")
         native_value, native_error, native_unit, observable_kind = _canonical_native_fields(raw)
+        native_quality_flags = _native_measurement_quality_flags(
+            raw.get("quality_flags")
+        )
+        native_payload_row = dict(raw)
+        native_payload_row["quality_flags"] = native_quality_flags
         supplied_measurement_id = raw.get("measurement_id")
         measurement = {
             "measurement_id": supplied_measurement_id if _valid_identifier(supplied_measurement_id) else None,
@@ -1100,7 +1922,7 @@ def prepare_canonical_sed_rows(
             "observable_kind": observable_kind,
             "is_upper_limit": raw.get("is_upper_limit"),
             "is_synthetic": raw.get("is_synthetic"),
-            "quality_flags": raw.get("quality_flags"),
+            "quality_flags": native_quality_flags,
             "quality_status": _first_present(raw, "quality_status")
             or ("rejected" if "bad_quality" in str(raw.get("quality_flags") or "") else "unparsed"),
             "match_sep_arcsec": _first_present(raw, "match_sep_arcsec", "sep_arcsec"),
@@ -1115,7 +1937,10 @@ def prepare_canonical_sed_rows(
             "fit_policy": raw.get("fit_policy"),
             "correlation_group": raw.get("correlation_group"),
             "raw_measurement_json": _first_present(raw, "raw_measurement_json")
-            or _canonical_native_payload(raw, observable_kind=observable_kind),
+            or _canonical_native_payload(
+                native_payload_row,
+                observable_kind=observable_kind,
+            ),
             "provenance_json": _first_present(
                 raw,
                 "measurement_provenance_json",
@@ -1128,12 +1953,25 @@ def prepare_canonical_sed_rows(
             measurement["measurement_id"] = make_sed_measurement_id(measurement)
         measurements.append(measurement)
 
+        supplied_normalization_version = _first_present(
+            raw,
+            "normalization_version",
+        )
+        if (
+            supplied_normalization_version
+            == LEGACY_CANONICAL_SED_NORMALIZATION_VERSION
+            and normalization_version == CANONICAL_SED_NORMALIZATION_VERSION
+        ):
+            effective_normalization_version = normalization_version
+        else:
+            effective_normalization_version = (
+                supplied_normalization_version or normalization_version
+            )
         plot_lambda = _first_present(raw, "plot_lambda_angstrom", "lambda_eff_angstrom")
         normalizations.append(
             {
                 "measurement_id": measurement["measurement_id"],
-                "normalization_version": _first_present(raw, "normalization_version")
-                or normalization_version,
+                "normalization_version": effective_normalization_version,
                 "flux_nu_jy": _first_present(raw, "observed_flux_nu_jy", "flux_nu_jy"),
                 "flux_nu_jy_err": _first_present(
                     raw,
@@ -1164,7 +2002,7 @@ def prepare_canonical_sed_rows(
                     "normalization_method",
                     "photometry_method",
                 )
-                or normalization_version,
+                or effective_normalization_version,
                 "provenance_json": _first_present(raw, "normalization_provenance_json")
                 or {"prepared_from": "canonical_sed_row"},
             }
@@ -1176,7 +2014,7 @@ def store_canonical_sed_rows(
     conn: sqlite3.Connection,
     rows: pd.DataFrame | Iterable[Mapping[str, Any]] | Mapping[str, Any] | None,
     *,
-    normalization_version: str = "sed-measurement-v3",
+    normalization_version: str = CANONICAL_SED_NORMALIZATION_VERSION,
     ingestion_version: str = "canonical-sed-v3",
     commit: bool = True,
 ) -> tuple[int, int]:

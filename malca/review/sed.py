@@ -25,14 +25,29 @@ from astropy import units as u
 
 from malca.config import DEFAULT_CACHE_DIR, PARQUET_CACHE_COMPRESSION
 from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
+from malca.review.sed_storage import (
+    CANONICAL_SED_NORMALIZATION_VERSION,
+    LEGACY_CANONICAL_SED_NORMALIZATION_VERSION,
+)
 
 SED_TABLE_NAME = "sed_photometry"
 VIZIER_QUERY_TIMEOUT_SEC = 30
 SED_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser() / "sed"
-SED_CACHE_META_COLUMNS = {"_cache_candidate_id", "_cache_status", "_cache_updated_at"}
+SED_CACHE_META_COLUMNS = {
+    "_cache_candidate_id",
+    "_cache_status",
+    "_cache_updated_at",
+    "_cache_catalog_release",
+    "_cache_adapter_version",
+    "_cache_match_policy_version",
+    "_cache_coordinate_epoch",
+    "_cache_quality_policy_version",
+    "_cache_fetch_signature",
+    "_cache_astrometry_hash",
+}
 SED_CACHE_SKIP_SOURCES = {"payload"}
 SED_FETCH_MANIFEST_ATTR = "sed_fetch_manifest"
-SED_FETCH_POLICY_VERSION = "sed-fetch-v2-resumable"
+SED_FETCH_POLICY_VERSION = "sed-fetch-v3-archive-ledger"
 SED_FETCH_CHUNK_SIZE = max(int(os.environ.get("MALCA_SED_FETCH_CHUNK_SIZE", "500")), 1)
 SED_FETCH_MAX_ATTEMPTS = max(int(os.environ.get("MALCA_SED_FETCH_MAX_ATTEMPTS", "3")), 1)
 SED_FETCH_RETRY_BASE_SECONDS = max(
@@ -78,9 +93,9 @@ SED_COLUMNS = [
     "av_coeff",
 ]
 
-# V3 consumers can opt into explicit measurement/calibration semantics without
-# changing the legacy ``sed_photometry`` table contract.  The historical
-# ``lambda_eff_angstrom`` column remains a compatibility alias for
+# Versioned-storage consumers can opt into explicit measurement/calibration
+# semantics without changing the legacy ``sed_photometry`` table contract.
+# The historical ``lambda_eff_angstrom`` column remains a compatibility alias for
 # ``plot_lambda_angstrom``.
 SED_SEMANTIC_COLUMNS = [
     "measurement_id",
@@ -119,9 +134,50 @@ SED_SEMANTIC_COLUMNS = [
 CANONICAL_SED_COLUMNS = [*SED_COLUMNS, *SED_SEMANTIC_COLUMNS]
 
 SED_FETCH_STATUS_ATTR = "sed_fetch_status_by_candidate"
-SED_CACHE_TERMINAL_STATUSES = frozenset({"hit", "miss", "outside_footprint"})
-SED_CACHE_RETRYABLE_STATUSES = frozenset({"error", "partial"})
+SED_CACHE_TERMINAL_STATUSES = frozenset(
+    {
+        "hit",
+        "miss",
+        "outside_footprint",
+        "not_observed",
+        "catalog_no_match",
+        "covered_no_detection",
+        "catalog_detection",
+        "image_detection",
+        "upper_limit",
+        "ambiguous_counterpart",
+        "unusable_measurement",
+        "reduction_required",
+    }
+)
+SED_CACHE_RETRYABLE_STATUSES = frozenset({"error", "query_error", "partial"})
+SED_MANIFEST_TERMINAL_STATUS_PRIORITY = (
+    "image_detection",
+    "catalog_detection",
+    "hit",
+    "upper_limit",
+    "ambiguous_counterpart",
+    "unusable_measurement",
+    "reduction_required",
+    "covered_no_detection",
+    "catalog_no_match",
+    "not_observed",
+    "outside_footprint",
+    "miss",
+)
 APASS_B_RED_LEAK_COLOR_THRESHOLD = 3.5
+
+
+@dataclass(frozen=True)
+class SedFetchSignature:
+    catalog_release: str
+    adapter_version: str
+    match_policy_version: str
+    coordinate_epoch: str
+    quality_policy_version: str
+
+
+SED_SOURCE_FETCH_SIGNATURES: dict[str, SedFetchSignature] = {}
 
 
 @dataclass(frozen=True)
@@ -416,6 +472,11 @@ for _b in [
     _bp("Herschel", "PACS70", "herschel_pacs70", "herschel_pacs70_err", "Jy", 700000.0, None, 0.0, "Herschel/Pacs.blue", confusion_risk=True),
     _bp("Herschel", "PACS100", "herschel_pacs100", "herschel_pacs100_err", "Jy", 1000000.0, None, 0.0, "Herschel/Pacs.green", confusion_risk=True),
     _bp("Herschel", "PACS160", "herschel_pacs160", "herschel_pacs160_err", "Jy", 1600000.0, None, 0.0, "Herschel/Pacs.red", confusion_risk=True),
+    _bp("Herschel", "SPIRE250", None, None, "Jy", 2500000.0, None, 0.0, "Herschel/SPIRE.PSW", confusion_risk=True),
+    _bp("Herschel", "SPIRE350", None, None, "Jy", 3500000.0, None, 0.0, "Herschel/SPIRE.PMW", confusion_risk=True),
+    _bp("Herschel", "SPIRE500", None, None, "Jy", 5000000.0, None, 0.0, "Herschel/SPIRE.PLW", confusion_risk=True),
+    _bp("APEX", "SABOCA350", None, None, "Jy", 3500000.0, None, 0.0, None, confusion_risk=True),
+    _bp("APEX", "LABOCA870", None, None, "Jy", 8700000.0, None, 0.0, None, confusion_risk=True),
 ]:
     SED_BANDPASSES[_band_key(_b.source, _b.band)] = _b
 
@@ -508,6 +569,7 @@ SOURCE_COLORS = {
     "AKARI": "#b2182b",
     "IRAS": "#8b0000",
     "Herschel": "#6a3d9a",
+    "APEX": "#5b2c83",
     # Midpoint between Gaia DR3 (#d7b43c) and 2MASS (#ffb347), matching
     # IPHAS H-alpha's intermediate wavelength in the source-ordered SED.
     "IPHAS": "#ebb442",
@@ -533,10 +595,13 @@ SED_SOURCE_LABELS = {
     "vphas": "VPHAS+",
     "swift_uvot": "Swift/UVOT",
     "xmm_om": "XMM-OM",
+    "allwise": "AllWISE IRSA",
     "spitzer": "Spitzer",
     "akari": "AKARI",
     "iras": "IRAS",
     "herschel": "Herschel",
+    "apex_laboca": "APEX/LABOCA",
+    "apex_saboca": "APEX/SABOCA",
 }
 
 _PAYLOAD_SED_SOURCES = {"gaia dr3", "apass", "2mass", "allwise", "iphas", "vphas+"}
@@ -573,6 +638,7 @@ _SED_ROW_SOURCE_TO_KEY = {
     "akari": "akari",
     "iras": "iras",
     "herschel": "herschel",
+    "apex": "apex_laboca",
 }
 
 
@@ -1144,7 +1210,7 @@ def _row_from_bandpass(
         ),
         "calibration_hash": metadata.get("calibration_hash"),
         "response_hash": metadata.get("response_hash"),
-        "normalization_version": "sed-measurement-v3",
+        "normalization_version": CANONICAL_SED_NORMALIZATION_VERSION,
     }
     # Measurement identity must be constructed from the native observation,
     # not merely candidate/source/band.  In particular, retain catalog,
@@ -2633,8 +2699,22 @@ def _load_review_sed_normalizations(
     baseline = load_prepared_sed_measurements(
         conn,
         str(candidate_id),
-        normalization_version="sed-measurement-v3",
+        normalization_version=CANONICAL_SED_NORMALIZATION_VERSION,
     )
+    legacy_baseline = load_prepared_sed_measurements(
+        conn,
+        str(candidate_id),
+        normalization_version=LEGACY_CANONICAL_SED_NORMALIZATION_VERSION,
+    )
+    if not legacy_baseline.empty:
+        current_ids = set(
+            baseline.get("measurement_id", pd.Series(dtype=str)).map(_clean_text)
+        )
+        if current_ids:
+            legacy_baseline = legacy_baseline.loc[
+                ~legacy_baseline["measurement_id"].map(_clean_text).isin(current_ids)
+            ]
+        baseline = _concat_sed_frames(baseline, legacy_baseline)
     references = _current_fit_normalization_references(conn, str(candidate_id))
     if references.empty:
         return baseline
@@ -2837,6 +2917,83 @@ def _sed_cache_path(source_key: str) -> Path:
     return SED_CACHE_DIR / f"{token or 'source'}.parquet"
 
 
+def _source_fetch_signature(source_key: str) -> tuple[SedFetchSignature, str]:
+    policy = SED_SOURCE_FETCH_SIGNATURES.get(
+        str(source_key).strip().lower(),
+        SedFetchSignature(
+            catalog_release=str(source_key).strip().lower(),
+            adapter_version="legacy-adapter-v1",
+            match_policy_version="nearest-neighbor-v1",
+            coordinate_epoch="catalog-default",
+            quality_policy_version="legacy-quality-v1",
+        ),
+    )
+    payload = {
+        "source_key": str(source_key).strip().lower(),
+        "catalog_release": policy.catalog_release,
+        "adapter_version": policy.adapter_version,
+        "match_policy_version": policy.match_policy_version,
+        "coordinate_epoch": policy.coordinate_epoch,
+        "quality_policy_version": policy.quality_policy_version,
+    }
+    signature = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return policy, signature
+
+
+def _candidate_astrometry_hash(row: pd.Series) -> str:
+    def first(*names: str) -> object | None:
+        for name in names:
+            if name in row:
+                value = row.get(name)
+                try:
+                    if value is not None and not pd.isna(value):
+                        return value
+                except (TypeError, ValueError):
+                    if value is not None:
+                        return value
+        return None
+
+    payload = {
+        "candidate_id": _candidate_id_for_row(row),
+        "ra_deg": _safe_float(first("ra_deg", "ra", "RA")),
+        "dec_deg": _safe_float(first("dec_deg", "dec", "DEC")),
+        "pmra_masyr": _safe_float(first("pmra", "gaia_pmra")),
+        "pmdec_masyr": _safe_float(first("pmdec", "gaia_pmdec")),
+        "ref_epoch_jyear": _safe_float(first("ref_epoch", "gaia_ref_epoch")) or 2016.0,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _expected_astrometry_hashes(df: pd.DataFrame) -> dict[str, str]:
+    return {
+        _candidate_id_for_row(row): _candidate_astrometry_hash(row)
+        for _, row in pd.DataFrame(df).iterrows()
+    }
+
+
+def _cache_signature_mask(
+    cache: pd.DataFrame,
+    source_key: str,
+    astrometry_hashes: Mapping[str, str],
+) -> pd.Series:
+    if cache.empty:
+        return pd.Series(False, index=cache.index, dtype=bool)
+    _policy, expected_signature = _source_fetch_signature(source_key)
+    if "_cache_fetch_signature" not in cache.columns or "_cache_astrometry_hash" not in cache.columns:
+        return pd.Series(False, index=cache.index, dtype=bool)
+    expected_astrometry = cache["_cache_candidate_id"].astype(str).map(astrometry_hashes)
+    return (
+        cache["_cache_fetch_signature"].fillna("").astype(str).eq(expected_signature)
+        & cache["_cache_astrometry_hash"].fillna("").astype(str).eq(
+            expected_astrometry.fillna("").astype(str)
+        )
+    )
+
+
 def _sed_candidate_ids(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(dtype=str)
@@ -2989,8 +3146,14 @@ def _cache_rows_for_sed_result(
     fetched: pd.DataFrame,
     *,
     status_by_candidate: Mapping[str, str] | None = None,
+    astrometry_hashes: Mapping[str, str] | None = None,
 ) -> pd.DataFrame:
     updated_at = pd.Timestamp.utcnow().isoformat()
+    policy, fetch_signature = _source_fetch_signature(source_key)
+    astrometry_map = {
+        str(key): str(value)
+        for key, value in (astrometry_hashes or {}).items()
+    }
     frames: list[pd.DataFrame] = []
     hit_ids: set[str] = set()
     status_map = {
@@ -3008,6 +3171,8 @@ def _cache_rows_for_sed_result(
             lambda cid: (
                 "partial"
                 if status_map.get(str(cid), "hit") in SED_CACHE_RETRYABLE_STATUSES
+                else status_map.get(str(cid), "hit")
+                if status_map.get(str(cid), "hit") in SED_CACHE_TERMINAL_STATUSES
                 else "hit"
             )
         )
@@ -3016,7 +3181,9 @@ def _cache_rows_for_sed_result(
         frames.append(hit_rows)
 
     non_hit_ids = sorted(input_ids - hit_ids)
-    for status in ("miss", "outside_footprint", "error", "partial"):
+    for status in (*sorted(SED_CACHE_TERMINAL_STATUSES), *sorted(SED_CACHE_RETRYABLE_STATUSES)):
+        if status == "hit":
+            continue
         status_ids = [cid for cid in non_hit_ids if status_map.get(cid, "error") == status]
         if not status_ids:
             continue
@@ -3028,7 +3195,19 @@ def _cache_rows_for_sed_result(
         status_rows["_cache_updated_at"] = updated_at
         frames.append(status_rows)
 
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    combined["_cache_catalog_release"] = policy.catalog_release
+    combined["_cache_adapter_version"] = policy.adapter_version
+    combined["_cache_match_policy_version"] = policy.match_policy_version
+    combined["_cache_coordinate_epoch"] = policy.coordinate_epoch
+    combined["_cache_quality_policy_version"] = policy.quality_policy_version
+    combined["_cache_fetch_signature"] = fetch_signature
+    combined["_cache_astrometry_hash"] = combined["_cache_candidate_id"].astype(str).map(
+        astrometry_map
+    )
+    return combined
 
 
 def _merge_sed_measurement_frames(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
@@ -3069,7 +3248,11 @@ def _candidate_fetch_outcomes(
         if reported in SED_CACHE_RETRYABLE_STATUSES:
             outcomes[str(cid)] = "partial" if str(cid) in row_ids else "error"
         elif str(cid) in row_ids:
-            outcomes[str(cid)] = "hit"
+            outcomes[str(cid)] = (
+                str(reported)
+                if reported in SED_CACHE_TERMINAL_STATUSES
+                else "hit"
+            )
         elif reported in SED_CACHE_TERMINAL_STATUSES:
             outcomes[str(cid)] = str(reported)
         else:
@@ -3094,7 +3277,11 @@ def _fetch_sed_source_with_cache(
 
     candidate_ids = _sed_candidate_ids(df)
     requested_ids = set(candidate_ids.astype(str))
+    astrometry_hashes = _expected_astrometry_hashes(df)
     cache = _read_sed_source_cache(source_key)
+    if not cache.empty:
+        signature_mask = _cache_signature_mask(cache, source_key, astrometry_hashes)
+        cache = cache.loc[signature_mask].copy()
     if not cache.empty:
         cache_status = (
             cache["_cache_status"].fillna("hit").astype(str).str.strip().str.lower()
@@ -3114,7 +3301,8 @@ def _fetch_sed_source_with_cache(
         )
         cached_rows = cache[
             cache["_cache_candidate_id"].isin(requested_ids)
-            & (status == "hit")
+            & status.isin(SED_CACHE_TERMINAL_STATUSES)
+            & cache.get("band", pd.Series(None, index=cache.index)).notna()
         ].copy()
         if not cached_rows.empty:
             hit_cache = cached_rows.reindex(columns=CANONICAL_SED_COLUMNS)
@@ -3158,6 +3346,7 @@ def _fetch_sed_source_with_cache(
                 preclassified_ids,
                 pd.DataFrame(columns=CANONICAL_SED_COLUMNS),
                 status_by_candidate=preclassified_status,
+                astrometry_hashes=astrometry_hashes,
             ),
         )
 
@@ -3219,6 +3408,7 @@ def _fetch_sed_source_with_cache(
             chunk_ids,
             accumulated,
             status_by_candidate=final_status,
+            astrometry_hashes=astrometry_hashes,
         )
         _write_sed_source_cache(source_key, cache_rows)
         completed_frames.append(accumulated)
@@ -3238,7 +3428,18 @@ def rows_from_candidate_frame(df: pd.DataFrame, progress_callback: ProgressCallb
         if progress_callback and (idx == 1 or idx % 1000 == 0 or idx == total):
             progress_callback(f"[SED] payload {idx}/{total}")
         payload = row.to_dict()
-        rows.append(rows_from_payload(payload, candidate_id=_candidate_id_for_row(row), extinction_mode="observed"))
+        payload_rows = rows_from_payload(
+            payload,
+            candidate_id=_candidate_id_for_row(row),
+            extinction_mode="observed",
+        )
+        # AllWISE is acquired canonically from IRSA.  Payload copies remain
+        # readable as legacy provenance, but are never an acquisition fallback.
+        if not payload_rows.empty:
+            payload_rows = payload_rows[
+                payload_rows["source"].astype(str) != "AllWISE"
+            ].copy()
+        rows.append(payload_rows)
     if not rows:
         return pd.DataFrame(columns=CANONICAL_SED_COLUMNS)
     if not any(not part.empty for part in rows):
@@ -4995,6 +5196,422 @@ def query_nsc_photometry(
     return _set_fetch_statuses(pd.DataFrame(rows, columns=CANONICAL_SED_COLUMNS), statuses)
 
 
+def _archive_query_position(
+    row: pd.Series,
+    *,
+    epoch_jyear: float,
+) -> tuple[float | None, float | None, str]:
+    ra, dec = _ra_dec_from_row(row)
+    if ra is None or dec is None:
+        return None, None, "missing_coordinates"
+    try:
+        from astropy.time import Time
+        from malca.enrichment.astrometry import propagate_linear_icrs
+
+        propagated_ra, propagated_dec, method = propagate_linear_icrs(
+            ra,
+            dec,
+            Time(float(epoch_jyear), format="jyear").mjd,
+            pmra_mas_per_year=_safe_float(_row_value(row, ("pmra", "gaia_pmra"))),
+            pmdec_mas_per_year=_safe_float(_row_value(row, ("pmdec", "gaia_pmdec"))),
+            reference_epoch_jyear=(
+                _safe_float(_row_value(row, ("ref_epoch", "gaia_ref_epoch"))) or 2016.0
+            ),
+        )
+        return float(propagated_ra), float(propagated_dec), str(method)
+    except Exception:
+        return float(ra), float(dec), "static_propagation_unavailable"
+
+
+def _nearest_archive_row(
+    frame: pd.DataFrame,
+    *,
+    target_ra_deg: float,
+    target_dec_deg: float,
+    radius_arcsec: float,
+) -> tuple[pd.Series | None, float | None, list[float]]:
+    if frame is None or frame.empty:
+        return None, None, []
+    from malca.enrichment.astrometry import angular_separation_arcsec
+
+    ra = pd.to_numeric(
+        frame.apply(lambda row: _row_value(row, ("ra", "RA", "RAJ2000", "RA_ICRS")), axis=1),
+        errors="coerce",
+    )
+    dec = pd.to_numeric(
+        frame.apply(
+            lambda row: _row_value(
+                row,
+                ("dec", "DEC", "DE", "DEJ2000", "DE_ICRS"),
+            ),
+            axis=1,
+        ),
+        errors="coerce",
+    )
+    valid = ra.notna() & dec.notna()
+    if not valid.any():
+        return None, None, []
+    separations = pd.Series(
+        angular_separation_arcsec(
+            target_ra_deg,
+            target_dec_deg,
+            ra.loc[valid].to_numpy(dtype=float),
+            dec.loc[valid].to_numpy(dtype=float),
+        ),
+        index=ra.loc[valid].index,
+        dtype=float,
+    )
+    separations = separations[np.isfinite(separations) & (separations <= float(radius_arcsec))]
+    if separations.empty:
+        return None, None, []
+    selected_index = separations.idxmin()
+    return frame.loc[selected_index], float(separations.loc[selected_index]), sorted(
+        float(value) for value in separations
+    )
+
+
+def _irsa_query_region_frame(
+    row: pd.Series,
+    *,
+    catalog: str,
+    epoch_jyear: float,
+    radius_arcsec: float,
+    columns: str = "*",
+) -> tuple[pd.DataFrame, float | None, float | None, str]:
+    from astroquery.ipac.irsa import Irsa
+    from astropy.coordinates import SkyCoord
+
+    ra, dec, coordinate_method = _archive_query_position(row, epoch_jyear=epoch_jyear)
+    if ra is None or dec is None:
+        return pd.DataFrame(), None, None, coordinate_method
+    result = Irsa.query_region(
+        SkyCoord(ra=ra * u.deg, dec=dec * u.deg),
+        catalog=catalog,
+        radius=float(radius_arcsec) * u.arcsec,
+        columns=columns,
+    )
+    if result is None:
+        return pd.DataFrame(), ra, dec, coordinate_method
+    if hasattr(result, "to_pandas"):
+        frame = result.to_pandas()
+    elif hasattr(result, "to_table"):
+        table = result.to_table()
+        frame = table.to_pandas() if hasattr(table, "to_pandas") else pd.DataFrame(table)
+    else:
+        frame = pd.DataFrame(result)
+    return frame, ra, dec, coordinate_method
+
+
+def _band_character(value: object, band_index: int) -> str:
+    text = _clean_text(value)
+    return text[band_index] if band_index < len(text) else ""
+
+
+def query_irsa_allwise_photometry(
+    df: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch canonical AllWISE W1-W4 profile-fit photometry directly from IRSA."""
+
+    rows: list[dict] = []
+    statuses = _all_candidate_status(df, "query_error")
+    columns = ",".join(
+        [
+            "designation",
+            "ra",
+            "dec",
+            "w1mpro",
+            "w1sigmpro",
+            "w2mpro",
+            "w2sigmpro",
+            "w3mpro",
+            "w3sigmpro",
+            "w4mpro",
+            "w4sigmpro",
+            "ph_qual",
+            "cc_flags",
+            "ext_flg",
+            "nb",
+            "na",
+            "var_flg",
+            "w1snr",
+            "w2snr",
+            "w3snr",
+            "w4snr",
+            "w1rchi2",
+            "w2rchi2",
+            "w3rchi2",
+            "w4rchi2",
+            "w1sat",
+            "w2sat",
+            "w3sat",
+            "w4sat",
+        ]
+    )
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        cid = _candidate_id_for_row(item)
+        if progress_callback and (idx == 1 or idx % 100 == 0 or idx == total):
+            progress_callback(f"[SED] allwise {idx}/{total}")
+        try:
+            result, target_ra, target_dec, coordinate_method = _irsa_query_region_frame(
+                item,
+                catalog="allwise_p3as_psd",
+                epoch_jyear=2010.5,
+                radius_arcsec=3.0,
+                columns=columns,
+            )
+            if target_ra is None or target_dec is None:
+                statuses[cid] = "query_error"
+                continue
+            match, separation, separations = _nearest_archive_row(
+                result,
+                target_ra_deg=target_ra,
+                target_dec_deg=target_dec,
+                radius_arcsec=3.0,
+            )
+            if match is None:
+                statuses[cid] = "covered_no_detection"
+                continue
+            designation = _clean_text(_row_value(match, ("designation", "source_id")))
+            match_flags = _counterpart_validation_flags(
+                item.to_dict(),
+                match,
+                source_key="allwise",
+                separation_arcsec=separation,
+                candidate_separations_arcsec=separations,
+                radius_arcsec=3.0,
+            )
+            candidate_rows: list[dict] = []
+            for band_index, band in enumerate(("W1", "W2", "W3", "W4")):
+                number = band_index + 1
+                mag = _catalog_mag_value(match, f"w{number}mpro")
+                if mag is None:
+                    continue
+                mag_err = _catalog_mag_error(match, f"w{number}sigmpro")
+                ph_qual = _band_character(_row_value(match, "ph_qual"), band_index).upper()
+                cc_flag = _band_character(_row_value(match, "cc_flags"), band_index)
+                snr = _row_float_value(match, f"w{number}snr")
+                rchi2 = _row_float_value(match, f"w{number}rchi2")
+                saturation = _row_float_value(match, f"w{number}sat")
+                ext_flg = _row_float_value(match, "ext_flg")
+                quality = [
+                    *match_flags,
+                    "irsa_direct",
+                    f"ph_qual={ph_qual or 'unknown'}",
+                    f"cc_flag={cc_flag or 'unknown'}",
+                ]
+                is_upper_limit = ph_qual == "U"
+                bad = (
+                    ph_qual not in {"A", "B", "U"}
+                    or (cc_flag not in {"", "0"})
+                    or (ext_flg is not None and ext_flg > 0)
+                    or (snr is not None and snr < 2.0 and not is_upper_limit)
+                    or (saturation is not None and saturation > 0)
+                )
+                if rchi2 is not None and rchi2 > 3.0:
+                    quality.append("allwise_large_rchi2")
+                if bad:
+                    quality.append("bad_quality")
+                bp = bandpass_for("AllWISE", band)
+                if bp is None:
+                    continue
+                provenance = {
+                    "catalog": "allwise_p3as_psd",
+                    "catalog_object_id": designation or None,
+                    "selected_sep_arcsec": separation,
+                    "match_count_returned": len(separations),
+                    "coordinate_method": coordinate_method,
+                    "ph_qual": ph_qual or None,
+                    "cc_flag": cc_flag or None,
+                    "ext_flg": ext_flg,
+                    "snr": snr,
+                    "rchi2": rchi2,
+                    "saturation": saturation,
+                }
+                sed_row = _row_from_bandpass(
+                    candidate_id=cid,
+                    bandpass=bp,
+                    mag=mag,
+                    mag_err=mag_err,
+                    distance_pc=distance_pc_from_payload(item.to_dict()),
+                    av=None,
+                    dereddened=False,
+                    sep_arcsec=separation,
+                    quality_flags=";".join(dict.fromkeys(quality)),
+                    is_upper_limit=is_upper_limit,
+                    wavelength_metadata={
+                        "catalog_release": "allwise_p3as_psd",
+                        "source_object_id": designation or None,
+                        "catalog_measurement_id": (
+                            f"{designation}:{band}" if designation else None
+                        ),
+                        "instrument": "WISE",
+                        "epoch_mjd": 55379.0,
+                        "correlation_group": (
+                            f"allwise:{designation}" if designation else f"allwise:{cid}"
+                        ),
+                        "provenance_json": _canonical_sed_json_text(provenance),
+                    },
+                    policy_payload=item.to_dict(),
+                )
+                if sed_row is not None:
+                    if bad:
+                        sed_row["fit_policy"] = "diagnostic_only"
+                    candidate_rows.append(sed_row)
+            rows.extend(candidate_rows)
+            statuses[cid] = "catalog_detection" if candidate_rows else "covered_no_detection"
+        except Exception as exc:
+            statuses[cid] = "query_error"
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] allwise first lookup failed: {exc}")
+        finally:
+            _sleep_after_sed_request()
+    return _fetch_result(rows, statuses)
+
+
+def query_irsa_spitzer_photometry(
+    df: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch SEIP Source List photometry directly from IRSA without fallbacks."""
+
+    rows: list[dict] = []
+    statuses = _all_candidate_status(df, "query_error")
+    total = len(df)
+    band_specs = {
+        "IRAC1": ("i1", "i1_f_ap1", "i1_df_ap1", "Spitzer/IRAC.I1"),
+        "IRAC2": ("i2", "i2_f_ap1", "i2_df_ap1", "Spitzer/IRAC.I2"),
+        "IRAC3": ("i3", "i3_f_ap1", "i3_df_ap1", "Spitzer/IRAC.I3"),
+        "IRAC4": ("i4", "i4_f_ap1", "i4_df_ap1", "Spitzer/IRAC.I4"),
+        "MIPS24": ("m1", "m1_f_psf", "m1_df_psf", "Spitzer/MIPS.24mu"),
+    }
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        cid = _candidate_id_for_row(item)
+        if progress_callback and (idx == 1 or idx % 100 == 0 or idx == total):
+            progress_callback(f"[SED] spitzer {idx}/{total}")
+        try:
+            result, target_ra, target_dec, coordinate_method = _irsa_query_region_frame(
+                item,
+                catalog="slphotdr4",
+                epoch_jyear=2008.0,
+                radius_arcsec=3.0,
+            )
+            if target_ra is None or target_dec is None:
+                statuses[cid] = "query_error"
+                continue
+            match, separation, separations = _nearest_archive_row(
+                result,
+                target_ra_deg=target_ra,
+                target_dec_deg=target_dec,
+                radius_arcsec=3.0,
+            )
+            if match is None:
+                statuses[cid] = "catalog_no_match"
+                continue
+            object_id = _clean_text(_row_value(match, ("objid", "source_id", "id")))
+            match_flags = _counterpart_validation_flags(
+                item.to_dict(),
+                match,
+                source_key="spitzer",
+                separation_arcsec=separation,
+                candidate_separations_arcsec=separations,
+                radius_arcsec=3.0,
+            )
+            candidate_rows: list[dict] = []
+            for band, (prefix, flux_col, error_col, _filter_id) in band_specs.items():
+                raw_flux = _row_float_value(match, flux_col)
+                if raw_flux is None or raw_flux <= 0:
+                    continue
+                raw_error = _row_float_value(match, error_col)
+                flux_type = _row_float_value(match, f"{prefix}_fluxtype")
+                flux_flag = _row_float_value(match, f"{prefix}_fluxflag")
+                soft_sat = _row_float_value(match, f"{prefix}_softsatflag")
+                brt_frac = _row_float_value(match, f"{prefix}_brtfrac")
+                ext_frac = _row_float_value(match, f"{prefix}_extfrac")
+                snr = _row_float_value(match, f"{prefix}_snr")
+                quality = [
+                    *match_flags,
+                    "irsa_direct",
+                    f"fluxtype={flux_type if flux_type is not None else 'unknown'}",
+                ]
+                bad = flux_type != 1
+                if band.startswith("IRAC"):
+                    if flux_flag != 0:
+                        quality.append("spitzer_flux_region_flag")
+                        bad = True
+                    if soft_sat != 0:
+                        quality.append("spitzer_soft_saturation")
+                        bad = True
+                else:
+                    if brt_frac is not None and brt_frac >= 0.5:
+                        quality.append("spitzer_bright_region")
+                        bad = True
+                    if ext_frac is not None and ext_frac >= 0.5:
+                        quality.append("spitzer_extended_region")
+                        bad = True
+                if bad:
+                    quality.append("bad_quality")
+                bp = bandpass_for("Spitzer SEIP", band)
+                if bp is None:
+                    continue
+                provenance = {
+                    "catalog": "slphotdr4",
+                    "catalog_object_id": object_id or None,
+                    "selected_sep_arcsec": separation,
+                    "match_count_returned": len(separations),
+                    "coordinate_method": coordinate_method,
+                    "fluxtype": flux_type,
+                    "fluxflag": flux_flag,
+                    "softsatflag": soft_sat,
+                    "bright_fraction": brt_frac,
+                    "extended_fraction": ext_frac,
+                    "snr": snr,
+                }
+                sed_row = _row_from_bandpass(
+                    candidate_id=cid,
+                    bandpass=bp,
+                    mag=None,
+                    mag_err=None,
+                    distance_pc=distance_pc_from_payload(item.to_dict()),
+                    av=None,
+                    dereddened=False,
+                    sep_arcsec=separation,
+                    quality_flags=";".join(dict.fromkeys(quality)),
+                    flux_nu_jy=raw_flux * 1.0e-6,
+                    flux_nu_jy_err=(
+                        raw_error * 1.0e-6
+                        if raw_error is not None and raw_error > 0
+                        else None
+                    ),
+                    wavelength_metadata={
+                        "catalog_release": "slphotdr4",
+                        "source_object_id": object_id or None,
+                        "catalog_measurement_id": (
+                            f"{object_id}:{band}" if object_id else None
+                        ),
+                        "instrument": "IRAC" if band.startswith("IRAC") else "MIPS",
+                        "correlation_group": (
+                            f"spitzer-seip:{object_id}" if object_id else f"spitzer-seip:{cid}"
+                        ),
+                        "provenance_json": _canonical_sed_json_text(provenance),
+                    },
+                    policy_payload=item.to_dict(),
+                )
+                if sed_row is not None:
+                    sed_row["fit_policy"] = "diagnostic_only"
+                    candidate_rows.append(sed_row)
+            rows.extend(candidate_rows)
+            statuses[cid] = "catalog_detection" if candidate_rows else "catalog_no_match"
+        except Exception as exc:
+            statuses[cid] = "query_error"
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] spitzer first lookup failed: {exc}")
+        finally:
+            _sleep_after_sed_request()
+    return _fetch_result(rows, statuses)
+
+
 @dataclass(frozen=True)
 class VizierFluxSpec:
     source: str
@@ -5006,13 +5623,6 @@ class VizierFluxSpec:
 
 
 VIZIER_FLUX_SPECS: dict[str, VizierFluxSpec] = {
-    "spitzer": VizierFluxSpec("Spitzer SEIP", "II/368/sstsl2", 2.0, {
-        "IRAC1": (("F3.6Ap1", "F3.6Ap2"), ("e_F3.6Ap1", "e_F3.6Ap2")),
-        "IRAC2": (("F4.5Ap1", "F4.5Ap2"), ("e_F4.5Ap1", "e_F4.5Ap2")),
-        "IRAC3": (("F5.8Ap1", "F5.8Ap2"), ("e_F5.8Ap1", "e_F5.8Ap2")),
-        "IRAC4": (("F8.0Ap1", "F8.0Ap2"), ("e_F8.0Ap1", "e_F8.0Ap2")),
-        "MIPS24": (("F24-PSF", "F24-Ap"), ("e_F24-PSF", "e_F24-Ap")),
-    }, flux_scale_to_jy=1.0e-6),
     "akari": VizierFluxSpec("AKARI", "II/297/irc", 5.0, {
         "S9W": ("S09", "e_S09"),
         "L18W": ("S18", "e_S18"),
@@ -5487,8 +6097,390 @@ def query_flux_catalog_source(
     return _fetch_result(out, statuses)
 
 
+def _direct_flux_sed_row(
+    *,
+    candidate_id: str,
+    payload: Mapping[str, object],
+    source: str,
+    band: str,
+    flux_jy: float,
+    flux_error_jy: float | None,
+    separation_arcsec: float | None,
+    catalog_release: str,
+    source_object_id: str | None,
+    observation_id: str | None,
+    instrument: str,
+    quality_flags: Iterable[str],
+    provenance: Mapping[str, object],
+) -> dict | None:
+    bp = bandpass_for(source, band)
+    if bp is None or not np.isfinite(float(flux_jy)) or float(flux_jy) <= 0:
+        return None
+    flags = list(dict.fromkeys(str(value) for value in quality_flags if str(value)))
+    row = _row_from_bandpass(
+        candidate_id=candidate_id,
+        bandpass=bp,
+        mag=None,
+        mag_err=None,
+        distance_pc=distance_pc_from_payload(payload),
+        av=None,
+        dereddened=False,
+        sep_arcsec=separation_arcsec,
+        quality_flags=";".join(flags),
+        flux_nu_jy=float(flux_jy),
+        flux_nu_jy_err=(
+            float(flux_error_jy)
+            if flux_error_jy is not None and np.isfinite(float(flux_error_jy))
+            else None
+        ),
+        wavelength_metadata={
+            "catalog_release": catalog_release,
+            "source_object_id": source_object_id,
+            "catalog_measurement_id": (
+                f"{source_object_id}:{observation_id}:{band}"
+                if source_object_id and observation_id
+                else f"{source_object_id}:{band}"
+                if source_object_id
+                else None
+            ),
+            "instrument": instrument,
+            "exposure_id": observation_id,
+            "correlation_group": (
+                f"{catalog_release}:{observation_id or source_object_id or candidate_id}"
+            ),
+            "provenance_json": _canonical_sed_json_text(dict(provenance)),
+        },
+        policy_payload=payload,
+    )
+    if row is not None:
+        row["fit_policy"] = "diagnostic_only"
+    return row
+
+
+def query_herschel_irsa_hsa_photometry(
+    df: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch HPPSC2 and SPIRE source catalogs from their primary archives."""
+
+    rows: list[dict] = []
+    statuses = _all_candidate_status(df, "query_error")
+    pacs_specs = (
+        ("hppsc2_bs", "PACS70", "f70", "e_f70", 8.0),
+        ("hppsc2_bl", "PACS100", "f100", "e_f100", 10.0),
+        ("hppsc2_r", "PACS160", "f160", "e_f160", 14.0),
+    )
+    spire_specs = (
+        ("hsa.spire_point_source_250", "SPIRE250", 18.0),
+        ("hsa.spire_point_source_350", "SPIRE350", 25.0),
+        ("hsa.spire_point_source_500", "SPIRE500", 36.0),
+    )
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        cid = _candidate_id_for_row(item)
+        if progress_callback and (idx == 1 or idx % 50 == 0 or idx == total):
+            progress_callback(f"[SED] herschel {idx}/{total}")
+        target_ra, target_dec, coordinate_method = _archive_query_position(
+            item,
+            epoch_jyear=2011.0,
+        )
+        if target_ra is None or target_dec is None:
+            statuses[cid] = "query_error"
+            continue
+        candidate_rows: list[dict] = []
+        query_failed = False
+        for catalog, band, flux_column, error_column, radius in pacs_specs:
+            try:
+                result, _ra, _dec, _method = _irsa_query_region_frame(
+                    item,
+                    catalog=catalog,
+                    epoch_jyear=2011.0,
+                    radius_arcsec=radius,
+                )
+                match, separation, separations = _nearest_archive_row(
+                    result,
+                    target_ra_deg=target_ra,
+                    target_dec_deg=target_dec,
+                    radius_arcsec=radius,
+                )
+                if match is None:
+                    continue
+                raw_flux_mjy = _row_float_value(match, flux_column)
+                if raw_flux_mjy is None or raw_flux_mjy <= 0:
+                    continue
+                raw_error_mjy = _row_float_value(match, error_column)
+                source_id = _clean_text(_row_value(match, ("cntr", "source_id")))
+                obs_id = _clean_text(_row_value(match, ("obsid", "OBSID")))
+                snr = _row_float_value(match, ("s_n", "snr"))
+                structure_noise = _row_float_value(match, "strn")
+                quality = ["confusion_risk", "irsa_direct", "hppsc2_high_reliability"]
+                if len(separations) > 1:
+                    quality.append("multiple_catalog_matches")
+                if snr is not None and snr < 3.0:
+                    quality.extend(("herschel_low_snr", "bad_quality"))
+                provenance = {
+                    "catalog": catalog,
+                    "catalog_object_id": source_id or None,
+                    "observation_id": obs_id or None,
+                    "selected_sep_arcsec": separation,
+                    "match_count_returned": len(separations),
+                    "coordinate_method": coordinate_method,
+                    "snr": snr,
+                    "structure_noise_mjy_sr": structure_noise,
+                }
+                sed_row = _direct_flux_sed_row(
+                    candidate_id=cid,
+                    payload=item.to_dict(),
+                    source="Herschel",
+                    band=band,
+                    flux_jy=raw_flux_mjy * 1.0e-3,
+                    flux_error_jy=(
+                        raw_error_mjy * 1.0e-3
+                        if raw_error_mjy is not None and raw_error_mjy > 0
+                        else None
+                    ),
+                    separation_arcsec=separation,
+                    catalog_release=catalog,
+                    source_object_id=source_id or None,
+                    observation_id=obs_id or None,
+                    instrument="PACS",
+                    quality_flags=quality,
+                    provenance=provenance,
+                )
+                if sed_row is not None:
+                    candidate_rows.append(sed_row)
+            except Exception as exc:
+                query_failed = True
+                if progress_callback and idx == 1:
+                    progress_callback(f"[SED] {catalog} first lookup failed: {exc}")
+            finally:
+                _sleep_after_sed_request()
+
+        try:
+            from astroquery.esa.hsa import HSA
+
+            for table_name, band, radius in spire_specs:
+                radius_deg = float(radius) / 3600.0
+                query = (
+                    f"SELECT TOP 5 * FROM {table_name} "
+                    "WHERE 1=CONTAINS("
+                    "POINT('ICRS', ra, dec), "
+                    f"CIRCLE('ICRS', {target_ra:.10f}, {target_dec:.10f}, {radius_deg:.10f})"
+                    ")"
+                )
+                try:
+                    table = HSA.query_hsa_tap(query)
+                    result = (
+                        table.to_pandas()
+                        if hasattr(table, "to_pandas")
+                        else pd.DataFrame(table)
+                    )
+                    match, separation, separations = _nearest_archive_row(
+                        result,
+                        target_ra_deg=target_ra,
+                        target_dec_deg=target_dec,
+                        radius_arcsec=radius,
+                    )
+                    if match is None:
+                        continue
+                    raw_flux_mjy = _row_float_value(match, "flux")
+                    if raw_flux_mjy is None or raw_flux_mjy <= 0:
+                        continue
+                    raw_error_mjy = _row_float_value(match, ("flux_err", "fluxtml_err"))
+                    source_id = _clean_text(_row_value(match, "source_id"))
+                    snr = _row_float_value(match, "snr")
+                    quality = ["confusion_risk", "hsa_direct", "spire_point_source_catalog"]
+                    bad_flag_columns = (
+                        "insterr_flag",
+                        "extsrc_flag",
+                        "largegal_flag",
+                        "mapedge_flag",
+                        "ssocont_flag",
+                    )
+                    bad = False
+                    quality_payload: dict[str, object] = {}
+                    for column in bad_flag_columns:
+                        value = _catalog_scalar(match, column)
+                        if value is None:
+                            continue
+                        quality_payload[column] = value
+                        if _truthy_catalog_flag(value):
+                            quality.append(f"herschel_{column}")
+                            bad = True
+                    if snr is not None and snr < 3.0:
+                        quality.append("herschel_low_snr")
+                        bad = True
+                    if bad:
+                        quality.append("bad_quality")
+                    provenance = {
+                        "catalog": table_name,
+                        "catalog_object_id": source_id or None,
+                        "selected_sep_arcsec": separation,
+                        "match_count_returned": len(separations),
+                        "coordinate_method": coordinate_method,
+                        "snr": snr,
+                        "quality": quality_payload,
+                    }
+                    sed_row = _direct_flux_sed_row(
+                        candidate_id=cid,
+                        payload=item.to_dict(),
+                        source="Herschel",
+                        band=band,
+                        flux_jy=raw_flux_mjy * 1.0e-3,
+                        flux_error_jy=(
+                            raw_error_mjy * 1.0e-3
+                            if raw_error_mjy is not None and raw_error_mjy > 0
+                            else None
+                        ),
+                        separation_arcsec=separation,
+                        catalog_release=table_name,
+                        source_object_id=source_id or None,
+                        observation_id=None,
+                        instrument="SPIRE",
+                        quality_flags=quality,
+                        provenance=provenance,
+                    )
+                    if sed_row is not None:
+                        candidate_rows.append(sed_row)
+                except Exception as exc:
+                    query_failed = True
+                    if progress_callback and idx == 1:
+                        progress_callback(f"[SED] {table_name} first lookup failed: {exc}")
+                finally:
+                    _sleep_after_sed_request()
+        except Exception as exc:
+            query_failed = True
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] HSA unavailable: {exc}")
+
+        rows.extend(candidate_rows)
+        if candidate_rows:
+            statuses[cid] = "partial" if query_failed else "catalog_detection"
+        else:
+            statuses[cid] = "query_error" if query_failed else "catalog_no_match"
+    return _fetch_result(rows, statuses)
+
+
+def query_atlasgal_laboca_photometry(
+    df: pd.DataFrame,
+    progress_callback: ProgressCallback | None = None,
+) -> pd.DataFrame:
+    """Fetch uniform ATLASGAL 870 micron catalog photometry from ESO TAP."""
+
+    rows: list[dict] = []
+    statuses = _all_candidate_status(df, "query_error")
+    try:
+        import pyvo
+
+        service = pyvo.dal.TAPService("https://archive.eso.org/tap_cat")
+    except Exception:
+        return _fetch_result(rows, statuses)
+    total = len(df)
+    for idx, (_, item) in enumerate(df.iterrows(), start=1):
+        cid = _candidate_id_for_row(item)
+        if progress_callback and (idx == 1 or idx % 100 == 0 or idx == total):
+            progress_callback(f"[SED] apex_laboca {idx}/{total}")
+        target_ra, target_dec, coordinate_method = _archive_query_position(
+            item,
+            epoch_jyear=2009.0,
+        )
+        if target_ra is None or target_dec is None:
+            statuses[cid] = "query_error"
+            continue
+        try:
+            radius_arcsec = 19.2
+            radius_deg = radius_arcsec / 3600.0
+            cos_dec = max(abs(math.cos(math.radians(target_dec))), 1.0e-3)
+            ra_half_width = radius_deg / cos_dec
+            ra_min = (target_ra - ra_half_width) % 360.0
+            ra_max = (target_ra + ra_half_width) % 360.0
+            if ra_min <= ra_max:
+                ra_clause = f"RA BETWEEN {ra_min:.10f} AND {ra_max:.10f}"
+            else:
+                ra_clause = (
+                    f"(RA >= {ra_min:.10f} OR RA <= {ra_max:.10f})"
+                )
+            query = (
+                "SELECT TOP 5 ATLAS_NAME, GC_ID, RA, DE, FLUX, "
+                "INT_FLUX, SNR, MAJOR_FWHM, MINOR_FWHM, PA "
+                "FROM ATLASGAL_V1 "
+                f"WHERE {ra_clause} AND "
+                f"DE BETWEEN {target_dec - radius_deg:.10f} "
+                f"AND {target_dec + radius_deg:.10f}"
+            )
+            result_table = service.search(query).to_table()
+            result = (
+                result_table.to_pandas()
+                if hasattr(result_table, "to_pandas")
+                else pd.DataFrame(result_table)
+            )
+            match, separation, separations = _nearest_archive_row(
+                result,
+                target_ra_deg=target_ra,
+                target_dec_deg=target_dec,
+                radius_arcsec=radius_arcsec,
+            )
+            if match is None:
+                statuses[cid] = "catalog_no_match"
+                continue
+            flux_jy = _row_float_value(match, ("FLUX", "flux"))
+            if flux_jy is None or flux_jy <= 0:
+                statuses[cid] = "catalog_no_match"
+                continue
+            snr = _row_float_value(match, ("SNR", "snr"))
+            flux_error_jy = flux_jy / snr if snr is not None and snr > 0 else None
+            source_id = _clean_text(_row_value(match, ("ATLAS_NAME", "GC_ID")))
+            quality = [
+                "confusion_risk",
+                "eso_tap_direct",
+                "atlasgal_peak_flux_jy_per_beam",
+                "diagnostic_only",
+            ]
+            if len(separations) > 1:
+                quality.append("multiple_catalog_matches")
+            provenance = {
+                "catalog": "ATLASGAL_V1",
+                "catalog_object_id": source_id or None,
+                "selected_sep_arcsec": separation,
+                "match_count_returned": len(separations),
+                "coordinate_method": coordinate_method,
+                "snr": snr,
+                "integrated_flux_jy": _row_float_value(match, ("INT_FLUX", "int_flux")),
+                "major_fwhm_arcsec": _row_float_value(match, ("MAJOR_FWHM", "major_fwhm")),
+                "minor_fwhm_arcsec": _row_float_value(match, ("MINOR_FWHM", "minor_fwhm")),
+            }
+            sed_row = _direct_flux_sed_row(
+                candidate_id=cid,
+                payload=item.to_dict(),
+                source="APEX",
+                band="LABOCA870",
+                flux_jy=flux_jy,
+                flux_error_jy=flux_error_jy,
+                separation_arcsec=separation,
+                catalog_release="ATLASGAL_V1",
+                source_object_id=source_id or None,
+                observation_id=None,
+                instrument="LABOCA",
+                quality_flags=quality,
+                provenance=provenance,
+            )
+            if sed_row is not None:
+                rows.append(sed_row)
+                statuses[cid] = "catalog_detection"
+            else:
+                statuses[cid] = "catalog_no_match"
+        except Exception as exc:
+            statuses[cid] = "query_error"
+            if progress_callback and idx == 1:
+                progress_callback(f"[SED] ATLASGAL first lookup failed: {exc}")
+        finally:
+            _sleep_after_sed_request()
+    return _fetch_result(rows, statuses)
+
+
 CATALOG_FETCHERS = {
     "payload": rows_from_candidate_frame,
+    "allwise": query_irsa_allwise_photometry,
     "gaia_gspc": query_gaia_gspc_photometry,
     "gaia_xp": query_gaia_xp_sampled,
     "galex": lambda df, progress_callback=None: query_vizier_source(df, "galex", progress_callback=progress_callback),
@@ -5506,15 +6498,49 @@ CATALOG_FETCHERS = {
     "vphas": lambda df, progress_callback=None: query_vizier_source(df, "vphas", progress_callback=progress_callback),
     "swift_uvot": lambda df, progress_callback=None: query_vizier_source(df, "swift_uvot", progress_callback=progress_callback),
     "xmm_om": lambda df, progress_callback=None: query_vizier_source(df, "xmm_om", progress_callback=progress_callback),
-    "spitzer": lambda df, progress_callback=None: query_flux_catalog_source(df, "spitzer", progress_callback=progress_callback),
+    "spitzer": query_irsa_spitzer_photometry,
     "akari": lambda df, progress_callback=None: query_flux_catalog_source(df, "akari", progress_callback=progress_callback),
     "iras": lambda df, progress_callback=None: query_flux_catalog_source(df, "iras", progress_callback=progress_callback),
-    "herschel": lambda df, progress_callback=None: query_flux_catalog_source(df, "herschel", progress_callback=progress_callback),
+    "herschel": query_herschel_irsa_hsa_photometry,
+    "apex_laboca": query_atlasgal_laboca_photometry,
 }
 
+SED_SOURCE_FETCH_SIGNATURES.update(
+    {
+        "allwise": SedFetchSignature(
+            catalog_release="irsa:allwise_p3as_psd",
+            adapter_version="irsa-allwise-v1",
+            match_policy_version="pm-propagated-nearest-3arcsec-v1",
+            coordinate_epoch="gaia-ref-to-j2010.5",
+            quality_policy_version="allwise-profilefit-quality-v1",
+        ),
+        "spitzer": SedFetchSignature(
+            catalog_release="irsa:slphotdr4",
+            adapter_version="irsa-seip-source-list-v1",
+            match_policy_version="pm-propagated-nearest-3arcsec-v1",
+            coordinate_epoch="gaia-ref-to-j2008.0",
+            quality_policy_version="seip-robust-flux-v1",
+        ),
+        "herschel": SedFetchSignature(
+            catalog_release="irsa:hppsc2+hsa:spire-point-source",
+            adapter_version="irsa-hppsc2-hsa-spire-v1",
+            match_policy_version="pm-propagated-band-radius-v1",
+            coordinate_epoch="gaia-ref-to-j2011.0",
+            quality_policy_version="hppsc2-spire-quality-v1",
+        ),
+        "apex_laboca": SedFetchSignature(
+            catalog_release="eso:ATLASGAL_V1",
+            adapter_version="eso-atlasgal-v1",
+            match_policy_version="pm-propagated-nearest-19p2arcsec-v1",
+            coordinate_epoch="gaia-ref-to-j2009.0",
+            quality_policy_version="atlasgal-diagnostic-v1",
+        ),
+    }
+)
+
 ALL_CATALOG_SOURCES = tuple(CATALOG_FETCHERS)
-FAR_IR_CATALOG_SOURCES = ("akari", "iras", "herschel")
-BROAD_CLASSIFICATION_SED_SOURCES = ("payload", "ps1", "skymapper", "sdss")
+FAR_IR_CATALOG_SOURCES = ("akari", "iras", "herschel", "apex_laboca")
+BROAD_CLASSIFICATION_SED_SOURCES = ("payload", "allwise", "ps1", "skymapper", "sdss")
 # Full-catalog acquisition is explicit because it is a long-running external
 # operation.  Routine review/pipeline work retains the bounded broad profile;
 # callers that want the complete registry must pass ``all``.
@@ -5543,10 +6569,16 @@ def _normalize_source_name(value: object) -> str:
     return " ".join(text.split())
 
 
-def _sed_source_key_for_row_source(value: object) -> str | None:
+def _sed_source_key_for_row_source(
+    value: object,
+    catalog_release: object | None = None,
+) -> str | None:
     norm = _normalize_source_name(value)
     if not norm:
         return None
+    release = _normalize_source_name(catalog_release)
+    if norm == "allwise" and "allwise p3as psd" in release:
+        return "allwise"
     if norm in _PAYLOAD_SED_SOURCES:
         return "payload"
     return _SED_ROW_SOURCE_TO_KEY.get(norm)
@@ -5590,7 +6622,14 @@ def _sed_source_rows_for_key(rows: pd.DataFrame | None, candidate_id: str, sourc
         frame = frame[frame["candidate_id"].astype(str) == str(candidate_id)].copy()
     if frame.empty:
         return pd.DataFrame()
-    key_mask = frame["source"].map(_sed_source_key_for_row_source) == source_key
+    releases = frame.get("catalog_release", pd.Series(None, index=frame.index))
+    key_mask = pd.Series(
+        [
+            _sed_source_key_for_row_source(source, release) == source_key
+            for source, release in zip(frame["source"], releases)
+        ],
+        index=frame.index,
+    )
     return frame.loc[key_mask].copy()
 
 
@@ -5606,7 +6645,10 @@ def sed_source_statuses(
     Status values are:
     - ``hit``: persisted SED rows exist, or a cache hit has rows.
     - ``partial``: some rows exist, but one or more source requests failed.
-    - ``miss``: the source was fetched and cached with no matched rows.
+    - ``catalog_no_match``: the catalog was queried but observation coverage is
+      not yet established.
+    - ``covered_no_detection``: valid archive coverage exists without a catalog
+      or image detection.
     - ``outside_footprint``: the source has deterministic sky coverage that
       excludes this candidate.
     - ``error``: the query failed and remains retryable.
@@ -5621,6 +6663,10 @@ def sed_source_statuses(
     if payload is not None and "payload" in requested:
         payload_dict = dict(payload) if not isinstance(payload, dict) else payload
         payload_rows = rows_from_payload(payload_dict, candidate_id=cid, extinction_mode="observed")
+        if not payload_rows.empty:
+            payload_rows = payload_rows[
+                payload_rows["source"].astype(str) != "AllWISE"
+            ].copy()
         persisted_payload_rows = _sed_source_rows_for_key(persisted, cid, "payload")
         if not persisted_payload_rows.empty:
             payload_rows = (
@@ -5670,6 +6716,14 @@ def sed_source_statuses(
             continue
 
         cache_rows = cache[cache["_cache_candidate_id"].astype(str) == cid].copy()
+        if not cache_rows.empty and payload is not None:
+            payload_series = pd.Series(dict(payload))
+            valid_signature = _cache_signature_mask(
+                cache_rows,
+                key,
+                {cid: _candidate_astrometry_hash(payload_series)},
+            )
+            cache_rows = cache_rows.loc[valid_signature].copy()
         if cache_rows.empty:
             statuses.append(_sed_source_row_summary(key, pd.DataFrame()))
             continue
@@ -5680,7 +6734,7 @@ def sed_source_statuses(
             else pd.Series("hit", index=cache_rows.index)
         )
         measurement_rows = cache_rows.loc[
-            cache_status.isin({"hit", "partial"})
+            cache_status.isin(SED_CACHE_TERMINAL_STATUSES | {"partial"})
             & cache_rows.get("band", pd.Series(None, index=cache_rows.index)).notna()
         ].copy()
         if not measurement_rows.empty:
@@ -5690,38 +6744,57 @@ def sed_source_statuses(
                 summary["message"] = "some measurements cached; source fetch remains retryable"
             summary["storage"] = "cache"
             statuses.append(summary)
-        elif (cache_status == "miss").any():
+        elif cache_status.isin(SED_CACHE_TERMINAL_STATUSES).any():
+            terminal_status = next(
+                (
+                    status
+                    for status in cache_status.astype(str)
+                    if status in SED_CACHE_TERMINAL_STATUSES
+                ),
+                "miss",
+            )
+            terminal_messages = {
+                "miss": "queried; no catalog match",
+                "catalog_no_match": "queried; no catalog match; coverage not established",
+                "outside_footprint": "outside the catalog footprint",
+                "not_observed": "archive search found no observation coverage",
+                "covered_no_detection": "valid coverage; no catalog or image detection",
+                "upper_limit": "valid coverage; upper limit measured",
+                "ambiguous_counterpart": "catalog counterpart is ambiguous",
+                "unusable_measurement": "measurement exists but failed quality validation",
+                "reduction_required": "covered product requires instrument-specific reduction",
+            }
             statuses.append({
                 "key": key,
                 "label": _sed_source_label(key),
-                "status": "miss",
+                "status": terminal_status,
                 "n_rows": 0,
                 "source_names": [],
                 "bands": [],
                 "storage": "cache",
-                "message": "queried; no catalog match",
+                "message": terminal_messages.get(
+                    terminal_status,
+                    terminal_status.replace("_", " "),
+                ),
             })
-        elif (cache_status == "outside_footprint").any():
+        elif cache_status.isin(SED_CACHE_RETRYABLE_STATUSES).any():
+            retry_status = next(
+                (
+                    status
+                    for status in cache_status.astype(str)
+                    if status in SED_CACHE_RETRYABLE_STATUSES
+                ),
+                "error",
+            )
             statuses.append({
                 "key": key,
                 "label": _sed_source_label(key),
-                "status": "outside_footprint",
+                "status": retry_status,
                 "n_rows": 0,
                 "source_names": [],
                 "bands": [],
                 "storage": "cache",
-                "message": "candidate is outside the catalog footprint",
-            })
-        elif (cache_status == "error").any():
-            statuses.append({
-                "key": key,
-                "label": _sed_source_label(key),
-                "status": "error",
-                "n_rows": 0,
-                "source_names": [],
-                "bands": [],
-                "storage": "cache",
-                "message": "catalog query failed; retryable",
+                "message": "archive query failed; retryable",
             })
         else:
             statuses.append({
@@ -5763,7 +6836,11 @@ def build_sed_fetch_manifest(
     if not fetched.empty and {"candidate_id", "source"}.issubset(fetched.columns):
         keyed = fetched[["candidate_id", "source"]].copy()
         keyed["candidate_id"] = keyed["candidate_id"].astype(str)
-        keyed["source_key"] = keyed["source"].map(_sed_source_key_for_row_source)
+        releases = fetched.get("catalog_release", pd.Series(None, index=fetched.index))
+        keyed["source_key"] = [
+            _sed_source_key_for_row_source(source, release)
+            for source, release in zip(keyed["source"], releases)
+        ]
         fetched_counts = {
             (str(cid), str(source_key)): int(count)
             for (cid, source_key), count in keyed.dropna(subset=["source_key"]).groupby(
@@ -5805,20 +6882,33 @@ def build_sed_fetch_manifest(
                         "band", pd.Series(None, index=candidate_cache.index)
                     ).notna()
                     n_rows = max(n_rows, int(cache_measurements.sum()))
-                    if "partial" in statuses or (
-                        "error" in statuses and bool(statuses & {"hit", "partial"})
-                    ):
-                        status = "partial"
-                    elif "error" in statuses:
-                        status = "error"
-                    elif "hit" in statuses:
-                        status = "hit"
-                    elif "outside_footprint" in statuses:
-                        status = "outside_footprint"
-                    elif "miss" in statuses:
-                        status = "miss"
-                    else:
+                    unrecognized = statuses - (
+                        SED_CACHE_TERMINAL_STATUSES | SED_CACHE_RETRYABLE_STATUSES
+                    )
+                    retryable = statuses & SED_CACHE_RETRYABLE_STATUSES
+                    terminal = statuses & SED_CACHE_TERMINAL_STATUSES
+                    if unrecognized:
                         status = "unknown"
+                    elif "partial" in retryable or (retryable and terminal):
+                        status = "partial"
+                    elif retryable:
+                        status = next(
+                            (
+                                candidate_status
+                                for candidate_status in ("query_error", "error")
+                                if candidate_status in retryable
+                            ),
+                            "partial",
+                        )
+                    else:
+                        status = next(
+                            (
+                                candidate_status
+                                for candidate_status in SED_MANIFEST_TERMINAL_STATUS_PRIORITY
+                                if candidate_status in terminal
+                            ),
+                            "unknown",
+                        )
                     if "_cache_updated_at" in candidate_cache.columns:
                         times = candidate_cache["_cache_updated_at"].dropna().astype(str)
                         updated_at = max(times, default="")
@@ -5969,6 +7059,14 @@ def fetch_sed_photometry(
             out.drop_duplicates(subset=["_measurement_key"], keep="first")
             .drop(columns=["_measurement_key"])
             .reset_index(drop=True)
+        )
+    if "normalization_version" in out.columns:
+        versions = out["normalization_version"].fillna("").astype(str).str.strip()
+        upgrade = versions.isin(
+            {"", LEGACY_CANONICAL_SED_NORMALIZATION_VERSION}
+        )
+        out.loc[upgrade, "normalization_version"] = (
+            CANONICAL_SED_NORMALIZATION_VERSION
         )
     out = _normalize_sed_json_text_columns(out)
     out.attrs[SED_FETCH_MANIFEST_ATTR] = build_sed_fetch_manifest(

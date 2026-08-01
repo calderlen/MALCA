@@ -14,6 +14,7 @@ import textwrap
 GROUP_ORDER = [
     "Discovery",
     "Review",
+    "Microlensing",
     "LTV",
     "Evaluation",
     "Enrichment",
@@ -40,6 +41,7 @@ COMMAND_GROUPS = {
     "review-sync": "Review",
     "review-taxonomy": "Review",
     "review-maint": "Review",
+    "microlensing-pipeline": "Microlensing",
     "ltv-pipeline": "LTV",
     "ltv-injection": "LTV",
     "ltv-new": "LTV",
@@ -62,6 +64,8 @@ COMMAND_GROUPS = {
     "feature-layers": "Enrichment",
     "migrate": "Enrichment",
     "sed-photometry": "Enrichment",
+    "sed-image-photometry": "Enrichment",
+    "sed-r24-inputs": "Enrichment",
     "sed-fit": "Enrichment",
     "sed-bandpasses": "Enrichment",
     "sed-excess": "Enrichment",
@@ -136,12 +140,13 @@ def main():
     if len(sys.argv) >= 2 and sys.argv[1] in [
         "manifest", "stv-pipeline", "reproduce", "dip-injection",
         "microlensing-injection",
+        "microlensing-pipeline",
         "nuclear-injection",
         "detection-rate", "validate", "stv-plot", "audit",
         "bad-photometry",
         "stv-events", "lc-plot", "gaia-fetch", "gaia-binary", "gaia-id-repair", "gaia-banyan-backfill", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-tui", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "sed-fit", "sed-bandpasses", "sed-excess", "nuclear-context",
+        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "sed-image-photometry", "sed-r24-inputs", "sed-fit", "sed-bandpasses", "sed-excess", "nuclear-context",
         "vetting",
         "ltv-pipeline", "ltv-injection", "ltv-new",
         "dev", "malcat-train",
@@ -166,6 +171,8 @@ def main():
             ml_inj = importlib.import_module("malca.evaluation.microlensing_injection")
             sys.argv = [sys.argv[0]] + remaining
             ml_inj.main()
+        elif command == "microlensing-pipeline":
+            _run_module_main("malca.microlensing.pipeline", remaining)
         elif command == "nuclear-injection":
             _run_module_main("malca.nuclear.injection", remaining)
         elif command == "detection-rate":
@@ -246,6 +253,10 @@ def main():
             _run_module_main("malca.migration.cli", remaining)
         elif command == "sed-photometry":
             _run_module_main("malca.enrichment.sed_photometry", remaining)
+        elif command == "sed-image-photometry":
+            _run_module_main("malca.enrichment.sed_image_photometry", remaining)
+        elif command == "sed-r24-inputs":
+            _run_module_main("malca.enrichment.sed_r24", remaining)
         elif command == "sed-fit":
             _run_module_main("malca.enrichment.sed_fit", remaining)
         elif command == "sed-bandpasses":
@@ -310,6 +321,8 @@ def main():
     subparsers.add_parser("review-sync", description="Import/export Git-trackable review bundle files")
     subparsers.add_parser("review-taxonomy", description="Migrate legacy review DBs to taxonomy schema")
     subparsers.add_parser("review-maint", description="Review DB maintenance commands")
+    # Microlensing
+    subparsers.add_parser("microlensing-pipeline", description="Fit shared PSPL geometry to cached ASAS-SN, ATLAS, and ZTF photometry")
     # LTV
     subparsers.add_parser(
         "ltv-pipeline",
@@ -339,6 +352,8 @@ def main():
     subparsers.add_parser("feature-layers", description="Materialize lc/external/derived feature layers for candidate tables")
     subparsers.add_parser("migrate", description="Mirror-copy outputs into the three-layer product structure")
     subparsers.add_parser("sed-photometry", description="Fetch and normalize SED photometry for candidate tables")
+    subparsers.add_parser("sed-image-photometry", description="Resume archive downloads and provisional image photometry")
+    subparsers.add_parser("sed-r24-inputs", description="Validate and export the strict R24 SED input set")
     subparsers.add_parser("sed-fit", description="Refit stored SED photometry without querying catalogs")
     subparsers.add_parser("sed-bandpasses", description="Cache and validate SVO filter response curves")
     subparsers.add_parser("sed-excess", description="Compute model-aware WISE SED excess posteriors")

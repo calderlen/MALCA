@@ -19,6 +19,10 @@ from malca.enrichment.sed_model import (
     upsert_sed_model_results,
 )
 from malca.enrichment.sed_photometry import _ensure_candidate_id, _expand_sqlite_candidate_payloads
+from malca.review.sed_storage import (
+    CANONICAL_SED_NORMALIZATION_VERSION,
+    LEGACY_CANONICAL_SED_NORMALIZATION_VERSION,
+)
 from malca.review.store import db_connect
 
 
@@ -457,15 +461,36 @@ def _stored_v3_photometry(conn: sqlite3.Connection, candidate_ids: list[str]) ->
                 f"SELECT {select_columns} "
                 "FROM sed_measurements m "
                 "JOIN sed_measurement_normalizations n ON n.measurement_id = m.measurement_id "
-                f"WHERE n.normalization_version = ? AND m.candidate_id IN ({placeholders}) "
+                "WHERE n.normalization_version IN (?, ?) "
+                f"AND m.candidate_id IN ({placeholders}) "
                 "ORDER BY m.candidate_id, m.epoch_mjd, m.source, m.band, m.measurement_id",
                 conn,
-                params=["sed-measurement-v3", *batch],
+                params=[
+                    CANONICAL_SED_NORMALIZATION_VERSION,
+                    LEGACY_CANONICAL_SED_NORMALIZATION_VERSION,
+                    *batch,
+                ],
             )
         )
     joined = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
     if joined.empty:
         return pd.DataFrame()
+    joined["_baseline_priority"] = (
+        joined["normalization_version"]
+        .astype(str)
+        .map(
+            {
+                CANONICAL_SED_NORMALIZATION_VERSION: 0,
+                LEGACY_CANONICAL_SED_NORMALIZATION_VERSION: 1,
+            }
+        )
+        .fillna(2)
+    )
+    joined = (
+        joined.sort_values(["measurement_id", "_baseline_priority"], kind="stable")
+        .drop_duplicates(subset=["measurement_id"], keep="first")
+        .drop(columns=["_baseline_priority"])
+    )
 
     records: list[dict[str, object]] = []
     for _, item in joined.iterrows():
