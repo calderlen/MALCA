@@ -10,8 +10,11 @@ import pytest
 from malca.evaluation.period_candidate_methods import (
     _bls_period_groups,
     CandidateScore,
+    DEFAULT_GLOBAL_METHODS,
     FIXED_METHODS,
     GLOBAL_METHODS,
+    LEGACY_AOV_GLOBAL_METHODS,
+    SUPPORTED_GLOBAL_METHODS,
     PeriodCandidate,
     PeriodCandidateMethodsConfig,
     event_epoch_detection_diagnostics,
@@ -21,6 +24,7 @@ from malca.evaluation.period_candidate_methods import (
     robust_event_comb_candidates,
     run_global_period_searches,
     run_period_candidate_suite,
+    select_scoring_shortlist,
     score_candidate_bank,
     score_fixed_period,
 )
@@ -35,6 +39,7 @@ from malca.evaluation.period_candidate_ranker import (
     RankerConfig,
     assign_grouped_splits,
     assign_solution_status,
+    default_feature_columns,
     default_baseline_feature_specs,
     fit_candidate_ranker,
     label_candidates,
@@ -85,11 +90,12 @@ def test_requested_global_and_fixed_methods_are_explicit() -> None:
         "bls_adaptive",
         "multiharmonic_ls_2",
         "multiharmonic_ls_3",
-        "multiharmonic_aov_2",
-        "multiharmonic_aov_3",
         "lafler_kinman",
         "supersmoother",
     } == set(GLOBAL_METHODS)
+    assert set(SUPPORTED_GLOBAL_METHODS) == (
+        set(GLOBAL_METHODS) | set(LEGACY_AOV_GLOBAL_METHODS)
+    )
     assert {
         "ls",
         "pdm",
@@ -107,8 +113,47 @@ def test_requested_global_and_fixed_methods_are_explicit() -> None:
     } == set(FIXED_METHODS)
     config = PeriodCandidateMethodsConfig()
     assert not hasattr(config, "n_bootstrap")
+    assert config.enabled_global_methods == DEFAULT_GLOBAL_METHODS
+    assert set(config.enabled_global_methods).isdisjoint(LEGACY_AOV_GLOBAL_METHODS)
+    assert "bls_coarse" in config.shortlist_reserved_methods
+    assert "supersmoother" in config.shortlist_reserved_methods
+    assert "bls_adaptive" not in config.shortlist_reserved_methods
     assert config.max_scored_candidates == 128
     assert config.max_refined_candidates == 64
+
+
+def test_default_shortlist_guarantees_one_bls_and_supersmoother_lane() -> None:
+    def candidate(method: str, rank: int) -> PeriodCandidate:
+        period = float(10 + rank)
+        return PeriodCandidate(
+            method=method,
+            period_days=period,
+            frequency_per_day=1.0 / period,
+            raw_score=float(100 - rank),
+            objective="maximize",
+            rank=rank,
+            normalized_score=float(1.0 / rank),
+            contributing_methods=(method,),
+        )
+
+    candidates = [candidate("ls_short", rank) for rank in range(1, 8)]
+    candidates.extend(
+        (
+            candidate("bls_coarse", 8),
+            candidate("supersmoother", 9),
+        )
+    )
+    config = PeriodCandidateMethodsConfig(
+        enabled_global_methods=("ls_short", "bls_coarse", "supersmoother"),
+        shortlist_reserved_methods=("ls_short", "bls_coarse", "supersmoother"),
+        max_scored_candidates=3,
+    )
+    shortlist = select_scoring_shortlist(candidates, config=config)
+    assert {item.method for item in shortlist} == {
+        "ls_short",
+        "bls_coarse",
+        "supersmoother",
+    }
 
 
 def test_frequency_peak_extraction_separates_physical_families() -> None:
@@ -691,7 +736,7 @@ def test_full_candidate_suite_caps_scoring_and_materializes_refinements() -> Non
         config=config,
     )
     assert result.status == "ok"
-    assert set(result.search_results) == set(GLOBAL_METHODS)
+    assert set(result.search_results) == set(config.enabled_global_methods)
     assert all(
         search.status == "ok"
         or (
@@ -904,6 +949,7 @@ def test_default_baseline_has_explicit_scientific_directions() -> None:
             "proposal_normalized_score": [0.8],
             "ls_power": [0.7],
             "fourier_2_bic": [12.0],
+            "fourier_2_aov_f": [15.0],
             "pdm_theta": [0.2],
             "event_rms_oc_days": [0.1],
             "bls_transit_time": [123.0],
@@ -919,6 +965,29 @@ def test_default_baseline_has_explicit_scientific_directions() -> None:
     assert specs["ls_power"].higher_is_better is True
     assert specs["pdm_theta"].higher_is_better is False
     assert specs["event_rms_oc_days"].higher_is_better is False
+
+
+def test_new_learned_rankers_exclude_redundant_aov_features() -> None:
+    frame = pd.DataFrame(
+        {
+            "base_trial_id": ["one", "two"],
+            "is_exact": [1, 0],
+            "fourier_2_power": [0.9, 0.2],
+            "fourier_2_aov_f": [30.0, 2.0],
+            "proposal_contributes_multiharmonic_aov_2": [1, 0],
+        }
+    )
+    inferred = default_feature_columns(frame)
+    assert "fourier_2_power" in inferred
+    assert all("aov" not in name.casefold() for name in inferred)
+
+    config = RankerConfig(feature_columns=("fourier_2_aov_f",))
+    with pytest.raises(ValueError, match="cannot include redundant AoV features"):
+        fit_candidate_ranker(
+            frame.iloc[[0]].copy(),
+            frame.iloc[[1]].copy(),
+            config=config,
+        )
 
 
 def test_ranker_is_group_safe_calibrated_and_threshold_constrained(

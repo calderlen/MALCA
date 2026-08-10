@@ -230,6 +230,14 @@ _SAFE_CATEGORICAL_NAMES: frozenset[str] = frozenset(
     )
 )
 
+_REDUNDANT_AOV_FEATURE_TOKEN = re.compile(r"(^|_)aov(?:_|$)")
+
+
+def _is_redundant_aov_feature(name: str) -> bool:
+    """Identify AoV columns derived from the same multiharmonic Fourier fit."""
+
+    return bool(_REDUNDANT_AOV_FEATURE_TOKEN.search(str(name).strip().casefold()))
+
 
 @dataclass(frozen=True)
 class BaselineFeatureSpec:
@@ -978,6 +986,8 @@ def default_feature_columns(frame: pd.DataFrame) -> tuple[str, ...]:
         normalized = name.casefold()
         if _feature_leakage_reason(name) is not None:
             continue
+        if _is_redundant_aov_feature(name):
+            continue
         if normalized in _SAFE_CATEGORICAL_NAMES:
             selected.append(name)
             continue
@@ -1008,9 +1018,6 @@ _DEFAULT_BASELINE_FEATURE_DIRECTIONS: tuple[tuple[str, bool], ...] = (
     ("fourier_1_power", True),
     ("fourier_2_power", True),
     ("fourier_3_power", True),
-    ("fourier_1_aov_f", True),
-    ("fourier_2_aov_f", True),
-    ("fourier_3_aov_f", True),
     ("lafler_kinman_t_phase", False),
     ("lafler_kinman_delta", False),
     ("supersmoother_cv_standardized_mse", False),
@@ -1507,6 +1514,12 @@ def fit_candidate_ranker(
         train, inferred, group_col=config.group_col
     )
     validate_feature_allowlist(validation, features, group_col=config.group_col)
+    redundant_aov = sorted(name for name in features if _is_redundant_aov_feature(name))
+    if redundant_aov:
+        raise ValueError(
+            "New candidate rankers cannot include redundant AoV features derived "
+            f"from multiharmonic Fourier power: {redundant_aov}"
+        )
     if config.split_group_col in features:
         raise ValueError(
             f"Split grouping column {config.split_group_col!r} cannot be a model feature"

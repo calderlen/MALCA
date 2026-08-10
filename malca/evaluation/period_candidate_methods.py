@@ -4,8 +4,8 @@ This module deliberately does not participate in MALCA's production period
 pipeline.  It provides the common experimental machinery needed by the period
 injection benchmark:
 
-* independent global LS, PDM, CE, coarse-BLS, multiharmonic-LS,
-  multiharmonic-AoV, Lafler--Kinman, SuperSmoother, and event-comb searches;
+* independent global LS, PDM, CE, BLS, multiharmonic-LS,
+  Lafler--Kinman, SuperSmoother, and event-comb searches;
 * frequency-resolution-aware peak extraction and candidate merging;
 * explicit harmonic-family expansion; and
 * fixed-period features for later deterministic or learned arbitration.
@@ -54,12 +54,21 @@ GLOBAL_METHODS = (
     "bls_adaptive",
     "multiharmonic_ls_2",
     "multiharmonic_ls_3",
-    "multiharmonic_aov_2",
-    "multiharmonic_aov_3",
     "lafler_kinman",
     "supersmoother",
     "event_comb",
 )
+
+# AoV views remain supported only so historical configurations and frozen
+# artifacts can be replayed.  For a fixed harmonic order their F statistics
+# are monotonic transformations of the corresponding multiharmonic LS power,
+# so current runs must not propose or rank them as independent evidence.
+LEGACY_AOV_GLOBAL_METHODS = (
+    "multiharmonic_aov_2",
+    "multiharmonic_aov_3",
+)
+SUPPORTED_GLOBAL_METHODS = (*GLOBAL_METHODS, *LEGACY_AOV_GLOBAL_METHODS)
+DEFAULT_GLOBAL_METHODS = GLOBAL_METHODS
 
 FIXED_METHODS = (
     "ls",
@@ -120,7 +129,7 @@ class PeriodCandidateMethodsConfig:
     smoke tests.  All periodic grids are uniform in frequency.
     """
 
-    enabled_global_methods: tuple[str, ...] = GLOBAL_METHODS
+    enabled_global_methods: tuple[str, ...] = DEFAULT_GLOBAL_METHODS
     enabled_fixed_methods: tuple[str, ...] = FIXED_METHODS
     # ``None`` scores the complete expanded bank.  The default retains that
     # bank for oracle-coverage accounting but applies expensive scorers only
@@ -134,10 +143,11 @@ class PeriodCandidateMethodsConfig:
         "pdm",
         "ce",
         "event_comb",
-        "bls_adaptive",
+        "bls_coarse",
         "multiharmonic_ls_2",
         "multiharmonic_ls_3",
         "lafler_kinman",
+        "supersmoother",
     )
 
     # Search bounds.  PDM/CE and the other general short searches use the
@@ -247,14 +257,16 @@ class PeriodCandidateMethodsConfig:
     min_points: int = 10
 
     def __post_init__(self) -> None:
-        unknown = sorted(set(self.enabled_global_methods) - set(GLOBAL_METHODS))
+        unknown = sorted(
+            set(self.enabled_global_methods) - set(SUPPORTED_GLOBAL_METHODS)
+        )
         if unknown:
             raise ValueError(f"Unknown global period methods: {unknown}")
         unknown_fixed = sorted(set(self.enabled_fixed_methods) - set(FIXED_METHODS))
         if unknown_fixed:
             raise ValueError(f"Unknown fixed-period methods: {unknown_fixed}")
         unknown_reserved = sorted(
-            set(self.shortlist_reserved_methods) - set(GLOBAL_METHODS)
+            set(self.shortlist_reserved_methods) - set(SUPPORTED_GLOBAL_METHODS)
         )
         if unknown_reserved:
             raise ValueError(
@@ -494,7 +506,7 @@ class CandidateScore:
             ),
             **self.features,
         }
-        for method in GLOBAL_METHODS:
+        for method in SUPPORTED_GLOBAL_METHODS:
             key = _method_feature_key(method)
             record[f"proposal_method_is_{key}"] = int(key == representative_key)
             record[f"proposal_contributes_{key}"] = int(method in contributing)
@@ -1543,7 +1555,7 @@ def _global_adaptive_bls(
 
 
 def _multiharmonic_aov_f(power: np.ndarray, n_points: int, nterms: int) -> np.ndarray:
-    """Convert standard multiharmonic LS power to its nested-model AoV F statistic.
+    """Convert multiharmonic LS power to a legacy diagnostic AoV F statistic.
 
     This is the regression/multiharmonic analysis-of-variance statistic:
 
@@ -1551,8 +1563,8 @@ def _multiharmonic_aov_f(power: np.ndarray, n_points: int, nterms: int) -> np.nd
 
     It is a true AoV-style test of the constant model against an H-harmonic
     Fourier model.  For a fixed H it is necessarily monotonic with standard
-    multiharmonic LS power; it is kept as a separate, scientifically named
-    method so the benchmark can quantify that redundancy explicitly.
+    multiharmonic LS power.  It is retained only for historical artifact replay
+    and diagnostic comparisons; current defaults neither propose nor rank it.
     """
     power = np.asarray(power, dtype=float)
     df_model = 2 * int(nterms)
@@ -2377,7 +2389,7 @@ def run_global_period_searches(
     """
     cfg = config or PeriodCandidateMethodsConfig()
     selected = tuple(cfg.enabled_global_methods if methods is None else methods)
-    unknown = sorted(set(selected) - set(GLOBAL_METHODS))
+    unknown = sorted(set(selected) - set(SUPPORTED_GLOBAL_METHODS))
     if unknown:
         raise ValueError(f"Unknown global period methods: {unknown}")
     time_arr, mag_arr, err_arr = _prepare_light_curve(time, mag, err)
@@ -4087,8 +4099,11 @@ def run_period_candidate_suite(
 
 
 __all__ = [
+    "DEFAULT_GLOBAL_METHODS",
     "FIXED_METHODS",
     "GLOBAL_METHODS",
+    "LEGACY_AOV_GLOBAL_METHODS",
+    "SUPPORTED_GLOBAL_METHODS",
     "CandidateScore",
     "PeriodCandidate",
     "PeriodCandidateMethodsConfig",
