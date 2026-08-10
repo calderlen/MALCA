@@ -30,6 +30,57 @@ def test_fractional_depth_delta_mag_conversion_round_trips() -> None:
     )
 
 
+def test_pipeline_run_overlay_metrics_keep_run_and_atlas_definitions_separate() -> None:
+    runs = pd.DataFrame(
+        {
+            "run_start_jd": [100.0, 160.0, 300.0],
+            "run_end_jd": [110.0, 170.0, 310.0],
+            "trigger_jds_json": ["[101.0, 102.0]", "[161.0]", "[301.0]"],
+        }
+    )
+
+    metrics = DIAGNOSTICS._pipeline_run_overlay_metrics(
+        runs,
+        event_start_jd=105.0,
+        event_end_jd=165.0,
+        peak_jd=108.0,
+    )
+
+    assert metrics == {
+        "pipeline_dip_run_count": 3,
+        "pipeline_dip_runs_overlapping_complex": 2,
+        "pipeline_trigger_point_count": 4,
+        "atlas_peak_inside_pipeline_dip_run": True,
+    }
+
+
+def test_read_pipeline_dip_runs_filters_candidates_and_preserves_provenance(
+    tmp_path: Path,
+) -> None:
+    replay_path = tmp_path / "triggered_dip_runs.parquet"
+    pd.DataFrame(
+        {
+            "event_id": ["a:0", "b:0"],
+            "candidate_id": ["a", "b"],
+            "run_number": [0, 0],
+            "run_start_jd": [100.0, 200.0],
+            "run_end_jd": [101.0, 202.0],
+            "dip_jd": [100.5, 201.0],
+            "n_trigger_points": [2, 3],
+            "run_peak_event_probability": [0.9, 0.8],
+            "trigger_jds_json": ["[100.0, 101.0]", "[200.0, 201.0, 202.0]"],
+            "detector_commit": ["deadbeef", "deadbeef"],
+            "run_table_schema_version": [2, 2],
+        }
+    ).to_parquet(replay_path, index=False)
+
+    selected = DIAGNOSTICS.read_pipeline_dip_runs(replay_path, ["b"])
+
+    assert selected["candidate_id"].tolist() == ["b"]
+    assert selected["event_id"].tolist() == ["b:0"]
+    assert selected.attrs["source_path"] == str(replay_path.resolve())
+
+
 def test_dimming_complex_duration_is_separate_and_censor_aware() -> None:
     bounded = DIAGNOSTICS._dimming_complex_metrics(
         100.0,

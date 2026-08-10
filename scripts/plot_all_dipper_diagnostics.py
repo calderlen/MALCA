@@ -74,6 +74,9 @@ DEFAULT_ALLWISE_QUALITY = (
 )
 DEFAULT_OUTPUT_DIR = Path("output/pdf/all_dipper_diagnostics")
 DEFAULT_BAILER_JONES_FILENAME = "all_dippers_bailer_jones_distances.csv"
+DEFAULT_TRIGGERED_DIP_RUNS = Path(
+    "output/notebooks/july1_triggered_dip_systematics/triggered_dip_runs.parquet"
+)
 DEFAULT_EVENT_MC_DRAWS = 1024
 MIN_DURATION_MC_RESOLVED_FRACTION = 0.90
 MIN_DURATION_MC_RESOLVED_DRAWS = 200
@@ -82,6 +85,21 @@ EVENT_METRICS_SCHEMA_VERSION = "dimming_complex_duration_v1"
 HALF_DEPTH_RECOVERY_WINDOW_EPOCHS = 6
 HALF_DEPTH_RECOVERY_REQUIRED_EPOCHS = 5
 HALF_DEPTH_RECOVERY_MIN_SPAN_DAYS = 7.0
+PIPELINE_DIP_RUN_COLOR = "#cc79a7"
+PIPELINE_DIP_RUN_EDGE_COLOR = "#8e2c6a"
+PIPELINE_DIP_RUN_COLUMNS = (
+    "event_id",
+    "candidate_id",
+    "run_number",
+    "run_start_jd",
+    "run_end_jd",
+    "dip_jd",
+    "n_trigger_points",
+    "run_peak_event_probability",
+    "trigger_jds_json",
+    "detector_commit",
+    "run_table_schema_version",
+)
 
 CLASS_ORDER = ("Class I", "Class II", "Flat", "Class III/photosphere", "Unknown")
 CLASS_STYLE = {
@@ -302,6 +320,190 @@ def read_all_dippers(review_db: Path) -> pd.DataFrame:
     )
     frame["plot_class"] = frame["sed_alpha_class"].map(_display_sed_alpha_class)
     return frame
+
+
+def read_pipeline_dip_runs(
+    replay_path: Path,
+    candidate_ids: pd.Series | np.ndarray | list[str] | tuple[str, ...],
+) -> pd.DataFrame:
+    """Read provenance-locked pipeline dip runs for the requested candidates."""
+    resolved = Path(replay_path).expanduser().resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Pipeline dip-run replay not found: {resolved}")
+    runs = pd.read_parquet(resolved, columns=list(PIPELINE_DIP_RUN_COLUMNS))
+    missing = set(PIPELINE_DIP_RUN_COLUMNS) - set(runs.columns)
+    if missing:
+        raise RuntimeError(
+            f"Pipeline dip-run replay is missing columns: {sorted(missing)}"
+        )
+    requested = {str(value) for value in candidate_ids}
+    runs["candidate_id"] = runs["candidate_id"].astype(str)
+    runs = runs.loc[runs["candidate_id"].isin(requested)].copy()
+    for column in (
+        "run_number",
+        "run_start_jd",
+        "run_end_jd",
+        "dip_jd",
+        "n_trigger_points",
+        "run_peak_event_probability",
+        "run_table_schema_version",
+    ):
+        runs[column] = pd.to_numeric(runs[column], errors="coerce")
+    invalid = (
+        ~np.isfinite(runs["run_start_jd"])
+        | ~np.isfinite(runs["run_end_jd"])
+        | (runs["run_end_jd"] < runs["run_start_jd"])
+    )
+    if bool(invalid.any()):
+        examples = runs.loc[
+            invalid, ["event_id", "candidate_id", "run_start_jd", "run_end_jd"]
+        ].head(10)
+        raise RuntimeError(
+            "Pipeline dip-run replay contains invalid selected intervals: "
+            f"{examples.to_dict(orient='records')}"
+        )
+    if runs["event_id"].astype(str).duplicated().any():
+        raise RuntimeError("Pipeline dip-run replay contains duplicate selected event IDs")
+    runs.attrs["source_path"] = str(resolved)
+    return runs.sort_values(
+        ["candidate_id", "run_start_jd", "run_end_jd", "run_number"],
+        kind="mergesort",
+        ignore_index=True,
+    )
+
+
+def _json_float_list(value: Any) -> list[float]:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    output: list[float] = []
+    for item in parsed:
+        number = _finite_number(item)
+        if np.isfinite(number):
+            output.append(float(number))
+    return output
+
+
+def _pipeline_trigger_jds(runs: pd.DataFrame | None) -> np.ndarray:
+    if runs is None or runs.empty or "trigger_jds_json" not in runs:
+        return np.array([], dtype=float)
+    values = [
+        jd
+        for blob in runs["trigger_jds_json"]
+        for jd in _json_float_list(blob)
+    ]
+    if not values:
+        return np.array([], dtype=float)
+    return np.unique(np.asarray(values, dtype=float))
+
+
+def _pipeline_run_overlay_metrics(
+    runs: pd.DataFrame | None,
+    *,
+    event_start_jd: float,
+    event_end_jd: float,
+    peak_jd: float,
+) -> dict[str, Any]:
+    if runs is None or runs.empty:
+        return {
+            "pipeline_dip_run_count": 0,
+            "pipeline_dip_runs_overlapping_complex": 0,
+            "pipeline_trigger_point_count": 0,
+            "atlas_peak_inside_pipeline_dip_run": False,
+        }
+    starts = pd.to_numeric(runs["run_start_jd"], errors="coerce").to_numpy(float)
+    ends = pd.to_numeric(runs["run_end_jd"], errors="coerce").to_numpy(float)
+    overlaps = (starts <= float(event_end_jd)) & (ends >= float(event_start_jd))
+    contains_peak = (starts <= float(peak_jd)) & (ends >= float(peak_jd))
+    return {
+        "pipeline_dip_run_count": int(len(runs)),
+        "pipeline_dip_runs_overlapping_complex": int(np.sum(overlaps)),
+        "pipeline_trigger_point_count": int(len(_pipeline_trigger_jds(runs))),
+        "atlas_peak_inside_pipeline_dip_run": bool(np.any(contains_peak)),
+    }
+
+
+def _nearest_observation_indices(
+    observation_jds: np.ndarray,
+    target_jds: np.ndarray,
+    *,
+    tolerance_days: float = 1.0e-4,
+) -> np.ndarray:
+    observations = np.asarray(observation_jds, dtype=float)
+    targets = np.asarray(target_jds, dtype=float)
+    if observations.size == 0 or targets.size == 0:
+        return np.array([], dtype=int)
+    indices: list[int] = []
+    for target in targets[np.isfinite(targets)]:
+        index = int(np.nanargmin(np.abs(observations - target)))
+        if abs(float(observations[index] - target)) <= float(tolerance_days):
+            indices.append(index)
+    return np.unique(np.asarray(indices, dtype=int)) if indices else np.array([], dtype=int)
+
+
+def _draw_pipeline_dip_run_overlay(
+    ax: plt.Axes,
+    runs: pd.DataFrame | None,
+    *,
+    observation_jds: np.ndarray,
+    observation_flux: np.ndarray,
+    time_offset: float,
+    observation_mask: np.ndarray | None = None,
+) -> None:
+    """Overlay historical pipeline-run windows and their triggered observations."""
+    if runs is None or runs.empty:
+        return
+    for run in runs.itertuples(index=False):
+        start = float(run.run_start_jd) - float(time_offset)
+        end = float(run.run_end_jd) - float(time_offset)
+        if end > start:
+            ax.axvspan(
+                start,
+                end,
+                color=PIPELINE_DIP_RUN_COLOR,
+                alpha=0.10,
+                linewidth=0,
+                zorder=0.35,
+            )
+            ax.plot(
+                [start, end],
+                [0.985, 0.985],
+                transform=ax.get_xaxis_transform(),
+                color=PIPELINE_DIP_RUN_EDGE_COLOR,
+                linewidth=2.2,
+                solid_capstyle="butt",
+                clip_on=True,
+                zorder=7,
+            )
+        else:
+            ax.axvline(
+                start,
+                color=PIPELINE_DIP_RUN_EDGE_COLOR,
+                linewidth=1.0,
+                alpha=0.9,
+                zorder=7,
+            )
+    trigger_jds = _pipeline_trigger_jds(runs)
+    trigger_indices = _nearest_observation_indices(observation_jds, trigger_jds)
+    if observation_mask is not None and trigger_indices.size:
+        visible = np.asarray(observation_mask, dtype=bool)
+        trigger_indices = trigger_indices[visible[trigger_indices]]
+    if trigger_indices.size:
+        ax.scatter(
+            np.asarray(observation_jds, dtype=float)[trigger_indices] - float(time_offset),
+            np.asarray(observation_flux, dtype=float)[trigger_indices],
+            s=28,
+            marker="D",
+            facecolors="none",
+            edgecolors=PIPELINE_DIP_RUN_EDGE_COLOR,
+            linewidths=0.9,
+            zorder=6.5,
+        )
 
 
 def add_color_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -2603,6 +2805,7 @@ def _plot_half_depth_candidate(
     candidate: pd.Series,
     measurement: dict[str, Any],
     trace: dict[str, Any],
+    pipeline_dip_runs: pd.DataFrame | None = None,
 ) -> None:
     observations = trace["observations"]
     epochs = trace["epochs"]
@@ -2651,6 +2854,13 @@ def _plot_half_depth_candidate(
             alpha=0.9,
             zorder=2.5,
         )
+    _draw_pipeline_dip_run_overlay(
+        full_ax,
+        pipeline_dip_runs,
+        observation_jds=obs_times,
+        observation_flux=obs_flux,
+        time_offset=time_offset,
+    )
     full_ax.axhline(1.0, color="#555555", linestyle=(0, (3, 2)), linewidth=0.8, zorder=0)
     full_ax.axvspan(zoom_left_x, zoom_right_x, color="#56b4e9", alpha=0.18, linewidth=0)
     full_ax.axvline(peak_x, color="#e69f00", linewidth=1.0, zorder=3)
@@ -2702,6 +2912,14 @@ def _plot_half_depth_candidate(
         edgecolor="white",
         linewidth=0.35,
         zorder=3,
+    )
+    _draw_pipeline_dip_run_overlay(
+        zoom_ax,
+        pipeline_dip_runs,
+        observation_jds=obs_times,
+        observation_flux=obs_flux,
+        time_offset=time_offset,
+        observation_mask=in_zoom,
     )
 
     left_inside = int(trace["left_inside"])
@@ -2972,9 +3190,42 @@ def _plot_half_depth_candidate(
         fontsize=7.3,
         linespacing=1.25,
     )
+    overlay = _pipeline_run_overlay_metrics(
+        pipeline_dip_runs,
+        event_start_jd=event_left,
+        event_end_jd=event_right,
+        peak_jd=peak_time,
+    )
+    if pipeline_dip_runs is not None:
+        run_count = int(overlay["pipeline_dip_run_count"])
+        overlap_count = int(overlay["pipeline_dip_runs_overlapping_complex"])
+        peak_relation = (
+            "peak inside a run"
+            if bool(overlay["atlas_peak_inside_pipeline_dip_run"])
+            else "peak outside runs"
+        )
+        metrics_ax.text(
+            0.02,
+            0.51,
+            (
+                f"Pipeline runs: {run_count}; overlap: {overlap_count}\n"
+                f"{peak_relation}"
+            ),
+            transform=metrics_ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=5.8,
+            linespacing=1.08,
+            color=PIPELINE_DIP_RUN_EDGE_COLOR,
+        )
+        complex_title_y = 0.37
+        complex_text_y = 0.25
+    else:
+        complex_title_y = 0.50
+        complex_text_y = 0.36
     metrics_ax.text(
         0.02,
-        0.50,
+        complex_title_y,
         "Dimming complex",
         transform=metrics_ax.transAxes,
         ha="left",
@@ -2985,7 +3236,7 @@ def _plot_half_depth_candidate(
     )
     metrics_ax.text(
         0.02,
-        0.36,
+        complex_text_y,
         f"{complex_expression}\n{complex_qualifier}\n{event_status_text}{gap_note}",
         transform=metrics_ax.transAxes,
         ha="left",
@@ -3021,13 +3272,37 @@ def plot_half_depth_diagnostic_atlas(
     output_dir: Path,
     *,
     rows_per_page: int = 4,
+    pipeline_dip_runs: pd.DataFrame | None = None,
+    atlas_stem: str = "all_dippers_half_depth_diagnostic_atlas",
+    compare_cached_metrics: bool = True,
 ) -> dict[str, Any]:
     """Write a paginated visual audit of every plotted half-depth measurement."""
+    if Path(atlas_stem).name != atlas_stem or Path(atlas_stem).suffix:
+        raise ValueError("atlas_stem must be a filename stem without a directory or suffix")
+    output_dir.mkdir(parents=True, exist_ok=True)
     ordered = frame.sort_values("candidate_id").reset_index(drop=True)
-    atlas_path = output_dir / "all_dippers_half_depth_diagnostic_atlas.pdf"
-    preview_path = output_dir / "all_dippers_half_depth_diagnostic_atlas_page01.png"
+    atlas_path = output_dir / f"{atlas_stem}.pdf"
+    preview_path = output_dir / f"{atlas_stem}_page01.png"
+    metrics_path = output_dir / f"{atlas_stem}_metrics.csv"
     audit_rows: list[dict[str, Any]] = []
     n_pages = int(np.ceil(len(ordered) / rows_per_page))
+    overlay_enabled = pipeline_dip_runs is not None
+    overlay_source = (
+        str(pipeline_dip_runs.attrs.get("source_path", ""))
+        if pipeline_dip_runs is not None
+        else ""
+    )
+    if pipeline_dip_runs is not None:
+        empty_runs = pipeline_dip_runs.iloc[0:0].copy()
+        run_groups = {
+            str(candidate_id): group.copy()
+            for candidate_id, group in pipeline_dip_runs.groupby(
+                "candidate_id", sort=False
+            )
+        }
+    else:
+        empty_runs = None
+        run_groups = {}
     legend_handles = [
         Line2D([0], [0], marker=".", linestyle="none", color="#8a8a8a", label="Individual observations"),
         Line2D([0], [0], marker="o", linestyle="none", color="#111111", markersize=4, label="Nightly medians"),
@@ -3053,11 +3328,36 @@ def plot_half_depth_diagnostic_atlas(
             label="Conditional MC 68% error",
         ),
     ]
+    if overlay_enabled:
+        legend_handles.extend(
+            [
+                Patch(
+                    facecolor=PIPELINE_DIP_RUN_COLOR,
+                    edgecolor=PIPELINE_DIP_RUN_EDGE_COLOR,
+                    alpha=0.18,
+                    label="Production dip-run interval",
+                ),
+                Line2D(
+                    [0],
+                    [0],
+                    marker="D",
+                    linestyle="none",
+                    markerfacecolor="none",
+                    markeredgecolor=PIPELINE_DIP_RUN_EDGE_COLOR,
+                    markersize=5,
+                    label="Pipeline-triggered observation",
+                ),
+            ]
+        )
 
     with PdfPages(
         atlas_path,
         metadata={
-            "Title": "All-dipper ASAS-SN FWHM and dimming-complex diagnostic atlas",
+            "Title": (
+                "All-dipper ASAS-SN half-depth and production dip-run comparison atlas"
+                if overlay_enabled
+                else "All-dipper ASAS-SN FWHM and dimming-complex diagnostic atlas"
+            ),
             "Creator": "MALCA",
         },
     ) as atlas:
@@ -3072,65 +3372,118 @@ def plot_half_depth_diagnostic_atlas(
             start = page_index * rows_per_page
             stop = min(start + rows_per_page, len(ordered))
             for row_index, (_, candidate) in enumerate(ordered.iloc[start:stop].iterrows()):
+                candidate_id = str(candidate["candidate_id"])
+                candidate_runs = (
+                    run_groups.get(candidate_id, empty_runs)
+                    if overlay_enabled
+                    else None
+                )
                 measurement = measure_half_depth_event(
-                    str(candidate["candidate_id"]),
+                    candidate_id,
                     Path(str(candidate["lc_path"])).expanduser(),
                     include_trace=True,
                 )
                 trace = measurement.pop("_trace", None)
-                cached_tau = _finite_number(candidate.get("tau_peak"))
-                cached_duration = _finite_number(candidate.get("duration_plot_days"))
-                recomputed_tau = _finite_number(measurement["tau_peak"])
-                recomputed_duration = _finite_number(measurement["duration_plot_days"])
-                cached_status = str(candidate.get("duration_status", ""))
-                recomputed_status = str(measurement["duration_status"])
-                tau_match = bool(
-                    (not np.isfinite(cached_tau) and not np.isfinite(recomputed_tau))
-                    or np.isclose(cached_tau, recomputed_tau, rtol=0, atol=1e-10)
-                )
-                duration_match = bool(
-                    (not np.isfinite(cached_duration) and not np.isfinite(recomputed_duration))
-                    or np.isclose(cached_duration, recomputed_duration, rtol=0, atol=1e-8)
-                )
-                bound_matches = []
-                for field in (
-                    "duration_lower_days",
-                    "duration_upper_days",
-                    "dimming_complex_duration_lower_days",
-                    "dimming_complex_duration_upper_days",
-                ):
-                    cached_bound = _finite_number(candidate.get(field))
-                    recomputed_bound = _finite_number(measurement[field])
-                    bound_matches.append(
-                        bool(
-                            (not np.isfinite(cached_bound) and not np.isfinite(recomputed_bound))
-                            or np.isclose(cached_bound, recomputed_bound, rtol=0, atol=1e-8)
+                if compare_cached_metrics:
+                    cached_tau = _finite_number(candidate.get("tau_peak"))
+                    cached_duration = _finite_number(candidate.get("duration_plot_days"))
+                    recomputed_tau = _finite_number(measurement["tau_peak"])
+                    recomputed_duration = _finite_number(measurement["duration_plot_days"])
+                    cached_status = str(candidate.get("duration_status", ""))
+                    recomputed_status = str(measurement["duration_status"])
+                    tau_match = bool(
+                        (not np.isfinite(cached_tau) and not np.isfinite(recomputed_tau))
+                        or np.isclose(cached_tau, recomputed_tau, rtol=0, atol=1e-10)
+                    )
+                    duration_match = bool(
+                        (
+                            not np.isfinite(cached_duration)
+                            and not np.isfinite(recomputed_duration)
+                        )
+                        or np.isclose(
+                            cached_duration, recomputed_duration, rtol=0, atol=1e-8
                         )
                     )
-                metric_match = bool(
-                    tau_match
-                    and duration_match
-                    and all(bound_matches)
-                    and cached_status == recomputed_status
-                    and str(candidate.get("fwhm_method_version", ""))
-                    == FWHM_METHOD_VERSION
-                    and str(candidate.get("event_metrics_schema_version", ""))
-                    == EVENT_METRICS_SCHEMA_VERSION
-                    and str(candidate.get("dimming_window_method_version", ""))
-                    == DIMMING_WINDOW_METHOD_VERSION
+                    bound_matches = []
+                    for field in (
+                        "duration_lower_days",
+                        "duration_upper_days",
+                        "dimming_complex_duration_lower_days",
+                        "dimming_complex_duration_upper_days",
+                    ):
+                        cached_bound = _finite_number(candidate.get(field))
+                        recomputed_bound = _finite_number(measurement[field])
+                        bound_matches.append(
+                            bool(
+                                (
+                                    not np.isfinite(cached_bound)
+                                    and not np.isfinite(recomputed_bound)
+                                )
+                                or np.isclose(
+                                    cached_bound,
+                                    recomputed_bound,
+                                    rtol=0,
+                                    atol=1e-8,
+                                )
+                            )
+                        )
+                    metric_match = bool(
+                        tau_match
+                        and duration_match
+                        and all(bound_matches)
+                        and cached_status == recomputed_status
+                        and str(candidate.get("fwhm_method_version", ""))
+                        == FWHM_METHOD_VERSION
+                        and str(candidate.get("event_metrics_schema_version", ""))
+                        == EVENT_METRICS_SCHEMA_VERSION
+                        and str(candidate.get("dimming_window_method_version", ""))
+                        == DIMMING_WINDOW_METHOD_VERSION
+                    )
+                    metric_audit_mode = "compared_with_cached_measurement"
+                else:
+                    metric_match = True
+                    metric_audit_mode = "fresh_measurement"
+                overlay_metrics = _pipeline_run_overlay_metrics(
+                    candidate_runs,
+                    event_start_jd=_finite_number(
+                        measurement.get("event_window_start_jd")
+                    ),
+                    event_end_jd=_finite_number(
+                        measurement.get("event_window_end_jd")
+                    ),
+                    peak_jd=_finite_number(measurement.get("peak_jd")),
                 )
-                audit_rows.append({**measurement, "matches_plotted_metric": metric_match})
+                audit_rows.append(
+                    {
+                        **measurement,
+                        **overlay_metrics,
+                        "dip_run_overlay_enabled": overlay_enabled,
+                        "dip_run_overlay_source": overlay_source,
+                        "metric_audit_mode": metric_audit_mode,
+                        "matches_plotted_metric": metric_match,
+                    }
+                )
                 if trace is None:
                     for ax in axes[row_index]:
                         ax.axis("off")
-                        ax.text(
-                            0.5,
-                            0.5,
-                            f"{candidate['candidate_id']}\n{measurement['measurement_error']}",
-                            ha="center",
-                            va="center",
-                            transform=ax.transAxes,
-                        )
+                    row_box = axes[row_index, 1].get_position()
+                    run_count = int(overlay_metrics["pipeline_dip_run_count"])
+                    fig.text(
+                        0.5,
+                        0.5 * (row_box.y0 + row_box.y1),
+                        (
+                            f"{candidate_id}\n"
+                            "Atlas half-depth estimator unavailable: "
+                            f"{measurement['measurement_error']}\n"
+                            f"Historical production replay: {run_count} dip runs. "
+                            "Candidate retained in the cohort."
+                        ),
+                        ha="center",
+                        va="center",
+                        fontsize=8.2,
+                        linespacing=1.35,
+                        color="#444444",
+                    )
                     continue
                 _plot_half_depth_candidate(
                     axes[row_index, 0],
@@ -3139,8 +3492,9 @@ def plot_half_depth_diagnostic_atlas(
                     candidate,
                     measurement,
                     trace,
+                    pipeline_dip_runs=candidate_runs,
                 )
-                if not metric_match:
+                if compare_cached_metrics and not metric_match:
                     axes[row_index, 2].text(
                         0.02,
                         0.68,
@@ -3188,7 +3542,12 @@ def plot_half_depth_diagnostic_atlas(
                 if ax.axison:
                     ax.set_xlabel("JD - 2,458,000 [days]", fontsize=8.5)
             fig.suptitle(
-                f"ASAS-SN dip measurements  |  page {page_index + 1} of {n_pages}",
+                (
+                    "ASAS-SN half-depth and production dip-run comparison"
+                    if overlay_enabled
+                    else "ASAS-SN dip measurements"
+                )
+                + f"  |  page {page_index + 1} of {n_pages}",
                 fontsize=13,
                 y=0.995,
             )
@@ -3196,8 +3555,8 @@ def plot_half_depth_diagnostic_atlas(
                 handles=legend_handles,
                 loc="upper center",
                 bbox_to_anchor=(0.5, 0.962),
-                ncol=7,
-                fontsize=7.4,
+                ncol=8 if overlay_enabled else 7,
+                fontsize=6.8 if overlay_enabled else 7.4,
                 frameon=True,
                 framealpha=1.0,
                 facecolor="white",
@@ -3206,10 +3565,15 @@ def plot_half_depth_diagnostic_atlas(
             fig.text(
                 0.5,
                 0.012,
-                "Grey: recovery-bracketed dimming complex. Blue: individual-dip FWHM. Finite FWHM intervals are bounds, not exact midpoint timescales; open event edges are lower limits.",
+                (
+                    "Magenta: historical production dip-run intervals and their triggered observations. "
+                    if overlay_enabled
+                    else ""
+                )
+                + "Grey: recovery-bracketed dimming complex. Blue: individual-dip FWHM; finite intervals are bounds and open event edges are lower limits.",
                 ha="center",
                 va="bottom",
-                fontsize=8.2,
+                fontsize=7.8 if overlay_enabled else 8.2,
             )
             fig.subplots_adjust(
                 left=0.055,
@@ -3224,16 +3588,27 @@ def plot_half_depth_diagnostic_atlas(
                 fig.savefig(preview_path, dpi=190, bbox_inches="tight")
             plt.close(fig)
 
-    pd.DataFrame(audit_rows).to_csv(
-        output_dir / "all_dippers_half_depth_diagnostic_atlas_metrics.csv",
-        index=False,
-    )
+    pd.DataFrame(audit_rows).to_csv(metrics_path, index=False)
     return {
         "n_candidates": int(len(ordered)),
         "n_pages": n_pages,
         "n_metrics_matching_plot": int(sum(row["matches_plotted_metric"] for row in audit_rows)),
+        "n_candidates_with_pipeline_dip_runs": int(
+            sum(row["pipeline_dip_run_count"] > 0 for row in audit_rows)
+        ),
+        "n_pipeline_dip_runs": int(
+            sum(row["pipeline_dip_run_count"] for row in audit_rows)
+        ),
+        "n_atlas_peaks_inside_pipeline_dip_run": int(
+            sum(row["atlas_peak_inside_pipeline_dip_run"] for row in audit_rows)
+        ),
+        "n_candidates_with_run_overlapping_complex": int(
+            sum(row["pipeline_dip_runs_overlapping_complex"] > 0 for row in audit_rows)
+        ),
+        "dip_run_overlay_source": overlay_source,
         "pdf": str(atlas_path),
         "preview": str(preview_path),
+        "metrics": str(metrics_path),
     }
 
 
@@ -4459,11 +4834,105 @@ def main() -> None:
         action="store_true",
         help="Reuse all_dippers_half_depth_metrics.csv if it already exists.",
     )
+    parser.add_argument(
+        "--half-depth-atlas-only",
+        action="store_true",
+        help=(
+            "Generate only the half-depth atlas, skipping catalog enrichment and "
+            "the other diagnostic figures."
+        ),
+    )
+    parser.add_argument(
+        "--dip-run-overlay",
+        type=Path,
+        default=None,
+        help=(
+            "Provenance-locked triggered_dip_runs.parquet to overlay as production "
+            "dip-run intervals and triggered observations."
+        ),
+    )
+    parser.add_argument(
+        "--half-depth-atlas-stem",
+        default=None,
+        help="Output filename stem for the atlas, preview, metrics, and manifest.",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    frame = add_color_columns(read_all_dippers(args.review_db.expanduser().resolve()))
+    review_db = args.review_db.expanduser().resolve()
+    frame = add_color_columns(read_all_dippers(review_db))
+    pipeline_dip_runs = (
+        read_pipeline_dip_runs(args.dip_run_overlay, frame["candidate_id"])
+        if args.dip_run_overlay is not None
+        else None
+    )
+    atlas_stem = args.half_depth_atlas_stem or (
+        "all_dippers_half_depth_diagnostic_atlas_with_pipeline_runs"
+        if pipeline_dip_runs is not None
+        else "all_dippers_half_depth_diagnostic_atlas"
+    )
+
+    if args.half_depth_atlas_only:
+        atlas_coverage = plot_half_depth_diagnostic_atlas(
+            frame,
+            output_dir,
+            pipeline_dip_runs=pipeline_dip_runs,
+            atlas_stem=atlas_stem,
+            compare_cached_metrics=False,
+        )
+        overlay_manifest_path = (
+            Path(str(pipeline_dip_runs.attrs.get("source_path", ""))).with_suffix(
+                ".manifest.json"
+            )
+            if pipeline_dip_runs is not None
+            else None
+        )
+        manifest = {
+            "review_db": str(review_db),
+            "selection": (
+                "lower(trim(reviews.event_class)) = 'dipper'; no "
+                "final_class/yso_class cut"
+            ),
+            "n_all_dippers": int(len(frame)),
+            "atlas_metrics": (
+                "Freshly recomputed from each light curve during atlas generation"
+            ),
+            "half_depth_method_versions": {
+                "dimming_window": DIMMING_WINDOW_METHOD_VERSION,
+                "fwhm": FWHM_METHOD_VERSION,
+                "event_metrics_schema": EVENT_METRICS_SCHEMA_VERSION,
+            },
+            "pipeline_dip_run_replay": {
+                "table": (
+                    str(pipeline_dip_runs.attrs.get("source_path", ""))
+                    if pipeline_dip_runs is not None
+                    else None
+                ),
+                "manifest": (
+                    str(overlay_manifest_path)
+                    if overlay_manifest_path is not None
+                    and overlay_manifest_path.is_file()
+                    else None
+                ),
+                "interpretation": (
+                    "Historical production Bayesian trigger runs are overlaid for "
+                    "comparison only; they do not define or alter the atlas window, "
+                    "peak, amplitude, or FWHM."
+                    if pipeline_dip_runs is not None
+                    else None
+                ),
+            },
+            "coverage": atlas_coverage,
+        }
+        manifest_path = output_dir / f"{atlas_stem}_manifest.json"
+        with manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+        print(f"Selected {len(frame)} reviewed dippers with no stellar-class cut.")
+        print(f"Wrote atlas: {atlas_coverage['pdf']}")
+        print(f"Wrote atlas metrics: {atlas_coverage['metrics']}")
+        print(f"Wrote atlas manifest: {manifest_path}")
+        return
 
     bj_cache = (
         args.bailer_jones_cache.expanduser().resolve()
@@ -4542,7 +5011,12 @@ def main() -> None:
     coverage["dimming_complex_duration"] = plot_dimming_complex_duration(frame, output_dir)
     coverage["eclipse_probability_proxy"] = plot_eclipse_probability_proxy(frame, output_dir)
     coverage["symmetry_duration"] = plot_symmetry_duration(frame, output_dir)
-    coverage["half_depth_atlas"] = plot_half_depth_diagnostic_atlas(frame, output_dir)
+    coverage["half_depth_atlas"] = plot_half_depth_diagnostic_atlas(
+        frame,
+        output_dir,
+        pipeline_dip_runs=pipeline_dip_runs,
+        atlas_stem=atlas_stem,
+    )
     write_summary(output_dir, args.review_db, frame, coverage)
 
     print(f"Selected {len(frame)} reviewed dippers with no stellar-class cut.")
