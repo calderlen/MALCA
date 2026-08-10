@@ -15,9 +15,20 @@ from malca.config import DEFAULT_OUTPUT_DIR, PARQUET_CACHE_COMPRESSION
 from malca.review.native_lightcurve import resolve_lightcurve_path
 from malca.review.store import get_candidate_payload
 
-from .datasets import load_candidate_datasets
-from .diagnostics import candidate_result_row, dataset_result_rows
-from .joint_fit import fit_individual_dataset_pspl, fit_joint_pspl, fit_leave_one_survey_out
+from .datasets import calibrate_atlas_datasets, load_candidate_datasets
+from .diagnostics import (
+    ATLAS_DIAGNOSTIC_COLUMNS,
+    atlas_diagnostic_rows,
+    candidate_result_row,
+    dataset_result_rows,
+)
+from .joint_fit import (
+    JointFitResult,
+    fit_asassn_only_pspl,
+    fit_individual_dataset_pspl,
+    fit_joint_pspl,
+    fit_leave_one_survey_out,
+)
 from .parallax import fit_joint_parallax
 from .plotting import plot_joint_fit
 from .schema import MICROLENSING_JOINT_COLUMN_SPECS, MICROLENSING_JOINT_VERSION
@@ -58,7 +69,9 @@ def _failure_candidate_row(candidate_id: str, status: str, error: str | None = N
     return row
 
 
-def _fit_candidate(task: _CandidateTask) -> tuple[dict[str, object], list[dict[str, object]]]:
+def _fit_candidate(
+    task: _CandidateTask,
+) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
     try:
         datasets = load_candidate_datasets(
             task.candidate_id,
@@ -68,7 +81,39 @@ def _fit_candidate(task: _CandidateTask) -> tuple[dict[str, object], list[dict[s
             candidate_aliases=(task.asas_sn_id,),
         )
         if not datasets:
-            return _failure_candidate_row(task.candidate_id, "no_datasets"), []
+            return _failure_candidate_row(task.candidate_id, "no_datasets"), [], []
+
+        loaded_atlas = [dataset for dataset in datasets if dataset.survey == "atlas"]
+        omitted_atlas = []
+        if loaded_atlas:
+            asassn_fit = fit_asassn_only_pspl(datasets)
+            if asassn_fit.success:
+                calibrated = calibrate_atlas_datasets(
+                    datasets,
+                    t0_jd=asassn_fit.t0_jd,
+                    u0=asassn_fit.u0,
+                    tE_days=asassn_fit.tE_days,
+                )
+                retained_atlas_ids = {
+                    dataset.dataset_id for dataset in calibrated if dataset.survey == "atlas"
+                }
+                omitted_atlas = [
+                    dataset
+                    for dataset in loaded_atlas
+                    if dataset.dataset_id not in retained_atlas_ids
+                ]
+                datasets = calibrated
+            else:
+                omitted_atlas = loaded_atlas
+                datasets = [dataset for dataset in datasets if dataset.survey != "atlas"]
+
+        if not datasets:
+            failed_fit = JointFitResult(False, "no_calibrated_datasets")
+            return (
+                _failure_candidate_row(task.candidate_id, "no_calibrated_datasets"),
+                [],
+                atlas_diagnostic_rows(task.candidate_id, omitted_atlas, failed_fit),
+            )
         fit = fit_joint_pspl(datasets)
         individual = fit_individual_dataset_pspl(datasets, joint_seed=fit)
         leave_one_out = fit_leave_one_survey_out(datasets, joint_seed=fit)
@@ -89,26 +134,45 @@ def _fit_candidate(task: _CandidateTask) -> tuple[dict[str, object], list[dict[s
             individual_fits=individual,
             leave_one_survey_out=leave_one_out,
         )
+        atlas_rows = atlas_diagnostic_rows(
+            task.candidate_id,
+            [dataset for dataset in datasets if dataset.survey == "atlas"] + omitted_atlas,
+            fit,
+        )
         if task.plot and fit.success:
             candidate_row["microlensing_joint_plot_path"] = str(
                 plot_joint_fit(task.candidate_id, datasets, fit, Path(task.output_dir) / "plots")
             )
-        return candidate_row, dataset_rows
+        return candidate_row, dataset_rows, atlas_rows
     except Exception as exc:
         return _failure_candidate_row(
             task.candidate_id,
             "error",
             f"{type(exc).__name__}: {exc}",
-        ), []
+        ), [], []
 
 
 def _review_candidates(review_db: Path, candidate_ids: list[str] | None) -> list[dict[str, object]]:
     with sqlite3.connect(review_db) as connection:
         query = """
-            SELECT c.candidate_id, c.asas_sn_id, c.ra, c.dec
+            SELECT DISTINCT c.candidate_id, c.asas_sn_id, c.ra, c.dec
             FROM candidates c
             JOIN reviews r ON r.candidate_id = c.candidate_id
-            WHERE r.event_class = 'microlensing'
+            WHERE (
+                lower(trim(coalesce(r.event_class, ''))) = 'microlensing'
+                OR lower(trim(coalesce(r.morphology_secondary, ''))) = 'possible_microlensing_event'
+                OR EXISTS (
+                    SELECT 1
+                    FROM json_each(
+                        CASE
+                            WHEN json_valid(r.morphology_secondary_json)
+                            THEN r.morphology_secondary_json
+                            ELSE '[]'
+                        END
+                    ) AS secondary
+                    WHERE lower(trim(cast(secondary.value AS TEXT))) = 'possible_microlensing_event'
+                )
+            )
         """
         params: list[object] = []
         if candidate_ids:
@@ -147,7 +211,7 @@ def run_pipeline(
     parallax_mcmc: bool = False,
     plot: bool = False,
     merge_review_db: bool = False,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     review_db = Path(review_db).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,12 +242,16 @@ def run_pipeline(
 
     candidate_rows = [item[0] for item in fitted]
     dataset_rows = [row for item in fitted for row in item[1]]
+    atlas_rows = [row for item in fitted for row in item[2]]
     candidate_table = pd.DataFrame(candidate_rows)
     dataset_table = pd.DataFrame(dataset_rows)
+    atlas_table = pd.DataFrame(atlas_rows, columns=ATLAS_DIAGNOSTIC_COLUMNS)
     candidate_path = output_dir / "microlensing_joint_results.parquet"
     dataset_path = output_dir / "microlensing_dataset_results.parquet"
+    atlas_path = output_dir / "microlensing_atlas_diagnostics.parquet"
     candidate_table.to_parquet(candidate_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
     dataset_table.to_parquet(dataset_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    atlas_table.to_parquet(atlas_path, index=False, compression=PARQUET_CACHE_COMPRESSION)
 
     if merge_review_db and not candidate_table.empty:
         from malca.review.store import db_connect, init_db, merge_candidate_results
@@ -199,7 +267,7 @@ def run_pipeline(
                 clear_columns=summary_columns[1:],
             )
 
-    return candidate_path, dataset_path
+    return candidate_path, dataset_path, atlas_path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -224,7 +292,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    candidate_path, dataset_path = run_pipeline(
+    candidate_path, dataset_path, atlas_path = run_pipeline(
         review_db=args.review_db,
         external_lc_dir=args.external_lc_dir,
         surveys=tuple(args.surveys),
@@ -238,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(candidate_path)
     print(dataset_path)
+    print(atlas_path)
     return 0
 
 

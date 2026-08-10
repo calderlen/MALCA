@@ -47,9 +47,24 @@ ATLAS_SUMMARY_COLUMNS = (
     "atlas_n_rejected",
 )
 
-ATLAS_PREPROCESS_VERSION = "atlas-reduced-direct-v1"
+ATLAS_PREPROCESS_VERSION = "atlas-reduced-direct-v2"
+ATLAS_NOISE_MODEL_VERSION = "atlas-empirical-noise-v1"
 ATLAS_PREPROCESS_DEFAULT_FILTERS = ("c", "o")
 ATLAS_PREPROCESS_DEFAULT_SNR_MIN = 5.0
+ATLAS_OBS_SITE_NAMES = {
+    "01": "maunaloa",
+    "02": "haleakala",
+    "03": "south_africa",
+    "04": "chile",
+}
+ATLAS_CHI_N_BINS = (
+    ("lt10", 0.0, 10.0),
+    ("10_30", 10.0, 30.0),
+    ("30_100", 30.0, 100.0),
+    ("100_300", 100.0, 300.0),
+    ("300_1000", 300.0, 1000.0),
+    ("ge1000", 1000.0, np.inf),
+)
 ATLAS_PREPROCESS_FAQ_REQUIRED_COLUMNS = (
     "duJy",
     "err",
@@ -228,6 +243,24 @@ def preprocess_atlas_frame(
     mag5sig = _atlas_numeric(out, "mag5sig")
     sky = _atlas_numeric(out, "Sky")
     ujy = _atlas_numeric(out, "uJy")
+    chi_n = (
+        pd.to_numeric(out["chi/N"], errors="coerce")
+        if "chi/N" in out.columns
+        else pd.Series(np.nan, index=out.index, dtype=float)
+    )
+    obs = (
+        out["Obs"].fillna("").astype(str).str.strip()
+        if "Obs" in out.columns
+        else pd.Series("", index=out.index, dtype=str)
+    )
+    site_code = obs.str.slice(0, 2).where(obs.str.slice(0, 2).str.fullmatch(r"\d{2}"), "")
+    camera = obs.str.slice(2, 3).where(obs.str.len() >= 3, "")
+    time_col = _first_present(out, ("MJD", "mjd"))
+    atlas_mjd = (
+        pd.to_numeric(out[time_col], errors="coerce")
+        if time_col is not None
+        else pd.Series(np.nan, index=out.index, dtype=float)
+    )
 
     faq_checks = (
         (dujy < 10000, "duJy_not_lt_10000"),
@@ -295,6 +328,16 @@ def preprocess_atlas_frame(
     out["atlas_snr_good"] = snr_good
     out["atlas_good"] = atlas_good
     out["flux_snr"] = flux_snr
+    out["atlas_row_id"] = np.arange(len(out), dtype=np.int64)
+    out["atlas_mjd"] = atlas_mjd
+    out["atlas_filter"] = normalized_filter
+    out["atlas_chi_n"] = chi_n
+    out["atlas_obs"] = obs
+    out["atlas_obs_site_code"] = site_code
+    out["atlas_obs_site"] = site_code.map(ATLAS_OBS_SITE_NAMES).fillna("unknown")
+    out["atlas_camera"] = camera
+    out["atlas_flux_ujy"] = ujy
+    out["atlas_flux_error_formal_ujy"] = dujy
     out["m_clean"] = np.nan
     out["dm_clean"] = np.nan
     out.loc[atlas_good, "m_clean"] = (
@@ -353,6 +396,464 @@ def atlas_science_view(
     science["mag_err"] = pd.to_numeric(science["dm_clean"], errors="coerce")
     science.attrs.update(flagged.attrs)
     return science
+
+
+def _aligned_array(
+    values: Iterable[object] | np.ndarray | pd.Series,
+    length: int,
+    *,
+    name: str,
+    dtype: object,
+) -> np.ndarray:
+    array = np.asarray(values, dtype=dtype)
+    if array.ndim != 1 or len(array) != int(length):
+        raise ValueError(f"{name} must be a one-dimensional array aligned to the ATLAS frame")
+    return array
+
+
+def _iterative_robust_location_scatter(
+    values: np.ndarray,
+    *,
+    clip_sigma: float,
+    max_iterations: int,
+) -> tuple[float, float, np.ndarray]:
+    values = np.asarray(values, dtype=float)
+    keep = np.isfinite(values)
+    if not np.any(keep):
+        return np.nan, np.nan, keep
+    for _ in range(max(1, int(max_iterations))):
+        selected = values[keep]
+        location = float(np.nanmedian(selected))
+        scatter = float(1.4826 * np.nanmedian(np.abs(selected - location)))
+        if not np.isfinite(scatter) or scatter <= 0.0:
+            break
+        next_keep = np.isfinite(values) & (np.abs(values - location) <= float(clip_sigma) * scatter)
+        if np.array_equal(next_keep, keep):
+            keep = next_keep
+            break
+        keep = next_keep
+        if not np.any(keep):
+            break
+    if not np.any(keep):
+        return np.nan, np.nan, keep
+    selected = values[keep]
+    location = float(np.nanmedian(selected))
+    scatter = float(1.4826 * np.nanmedian(np.abs(selected - location)))
+    if not np.isfinite(scatter):
+        scatter = np.nan
+    return location, scatter, keep
+
+
+def estimate_atlas_noise_model(
+    frame: pd.DataFrame,
+    *,
+    calibration_mask: Iterable[bool] | np.ndarray | pd.Series,
+    reference_flux_ujy: Iterable[float] | np.ndarray | pd.Series | None = None,
+    group_columns: tuple[str, ...] = ("atlas_filter", "atlas_obs_site_code"),
+    include_band_fallback: bool = True,
+    min_points: int = 30,
+    min_time_span_days: float = 30.0,
+    clip_sigma: float = 5.0,
+    max_iterations: int = 5,
+) -> pd.DataFrame:
+    """Estimate empirical ATLAS flux-error floors from caller-defined quiet data.
+
+    The caller owns ``calibration_mask`` because only the scientific analysis
+    can distinguish quiescent measurements from real variability.  The raw
+    ``duJy`` values are never modified.  Site-level estimates are accompanied
+    by optional passband-level fallback estimates.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    required = {
+        "atlas_good",
+        "atlas_filter",
+        "atlas_obs_site_code",
+        "atlas_flux_ujy",
+        "atlas_flux_error_formal_ujy",
+        "atlas_mjd",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("ATLAS frame is missing preprocessing columns: " + ", ".join(missing))
+    if not group_columns or any(column not in frame.columns for column in group_columns):
+        raise ValueError("group_columns must name existing ATLAS preprocessing columns")
+    if int(min_points) < 2:
+        raise ValueError("min_points must be at least 2")
+    if not math.isfinite(float(min_time_span_days)) or float(min_time_span_days) < 0.0:
+        raise ValueError("min_time_span_days must be finite and non-negative")
+    if not math.isfinite(float(clip_sigma)) or float(clip_sigma) <= 0.0:
+        raise ValueError("clip_sigma must be finite and positive")
+
+    calibration = _aligned_array(
+        calibration_mask,
+        len(frame),
+        name="calibration_mask",
+        dtype=bool,
+    )
+    reference = None
+    if reference_flux_ujy is not None:
+        reference = _aligned_array(
+            reference_flux_ujy,
+            len(frame),
+            name="reference_flux_ujy",
+            dtype=float,
+        )
+
+    work = frame.copy()
+    work["_atlas_calibration_mask"] = calibration
+    if reference is not None:
+        work["_atlas_reference_flux_ujy"] = reference
+
+    rows: list[dict[str, object]] = []
+
+    def append_groups(columns: tuple[str, ...], scope: str) -> None:
+        grouper: str | list[str] = columns[0] if len(columns) == 1 else list(columns)
+        for key, group in work.groupby(grouper, sort=True, dropna=False):
+            keys = key if isinstance(key, tuple) else (key,)
+            values = dict(zip(columns, keys))
+            flux = pd.to_numeric(group["atlas_flux_ujy"], errors="coerce").to_numpy(dtype=float)
+            formal = pd.to_numeric(
+                group["atlas_flux_error_formal_ujy"], errors="coerce"
+            ).to_numpy(dtype=float)
+            mjd = pd.to_numeric(group["atlas_mjd"], errors="coerce").to_numpy(dtype=float)
+            good = group["atlas_good"].fillna(False).to_numpy(dtype=bool)
+            selected = group["_atlas_calibration_mask"].to_numpy(dtype=bool)
+            finite = good & selected & np.isfinite(flux) & np.isfinite(formal) & (formal > 0.0)
+            if reference is not None:
+                group_reference = pd.to_numeric(
+                    group["_atlas_reference_flux_ujy"], errors="coerce"
+                ).to_numpy(dtype=float)
+                finite &= np.isfinite(group_reference)
+                residual = flux - group_reference
+                reference_mode = "supplied"
+            else:
+                residual = flux.copy()
+                reference_mode = "group_median"
+
+            calibration_values = residual[finite]
+            location, scatter, robust_keep = _iterative_robust_location_scatter(
+                calibration_values,
+                clip_sigma=float(clip_sigma),
+                max_iterations=int(max_iterations),
+            )
+            selected_times = mjd[finite]
+            selected_formal = formal[finite]
+            n_calibration = int(len(calibration_values))
+            n_used = int(np.sum(robust_keep))
+            time_span = (
+                float(np.nanmax(selected_times) - np.nanmin(selected_times))
+                if np.sum(np.isfinite(selected_times)) >= 2
+                else 0.0
+            )
+            median_formal = (
+                float(np.nanmedian(selected_formal[robust_keep]))
+                if n_used and len(selected_formal) == len(robust_keep)
+                else np.nan
+            )
+            median_formal_variance = (
+                float(np.nanmedian(np.square(selected_formal[robust_keep])))
+                if n_used and len(selected_formal) == len(robust_keep)
+                else np.nan
+            )
+            usable = True
+            status = "ok"
+            if n_used < int(min_points):
+                usable = False
+                status = "insufficient_calibration_points"
+            elif time_span < float(min_time_span_days):
+                usable = False
+                status = "insufficient_time_span"
+            elif not np.isfinite(scatter) or not np.isfinite(median_formal_variance):
+                usable = False
+                status = "nonfinite_scatter"
+            floor = (
+                float(np.sqrt(max(float(scatter) ** 2 - median_formal_variance, 0.0)))
+                if usable
+                else np.nan
+            )
+            row: dict[str, object] = {
+                "atlas_noise_model_version": ATLAS_NOISE_MODEL_VERSION,
+                "atlas_noise_scope": scope,
+                "atlas_noise_status": status,
+                "atlas_noise_usable": bool(usable),
+                "atlas_noise_reference_mode": reference_mode,
+                "atlas_noise_n_total": int(len(group)),
+                "atlas_noise_n_good": int(np.sum(good)),
+                "atlas_noise_n_calibration": n_calibration,
+                "atlas_noise_n_used": n_used,
+                "atlas_noise_n_clipped": max(n_calibration - n_used, 0),
+                "atlas_noise_time_span_days": time_span,
+                "atlas_noise_robust_location_ujy": location,
+                "atlas_noise_robust_scatter_ujy": scatter,
+                "atlas_noise_median_formal_error_ujy": median_formal,
+                "atlas_noise_floor_ujy": floor,
+            }
+            row.update(values)
+            if "atlas_filter" not in row:
+                row["atlas_filter"] = ""
+            if "atlas_obs_site_code" not in row:
+                row["atlas_obs_site_code"] = ""
+            row["atlas_noise_group"] = (
+                f"{row['atlas_filter']}:{row['atlas_obs_site_code']}"
+                if scope == "site"
+                else f"{row['atlas_filter']}:all_sites"
+            )
+            rows.append(row)
+
+    append_groups(tuple(group_columns), "site")
+    if include_band_fallback and "atlas_filter" in group_columns:
+        append_groups(("atlas_filter",), "band")
+    return pd.DataFrame(rows)
+
+
+def apply_atlas_noise_model(frame: pd.DataFrame, noise_model: pd.DataFrame) -> pd.DataFrame:
+    """Attach effective uncertainties from an empirical ATLAS noise model."""
+    if not isinstance(frame, pd.DataFrame) or not isinstance(noise_model, pd.DataFrame):
+        raise TypeError("frame and noise_model must be pandas DataFrames")
+    required = {
+        "atlas_filter",
+        "atlas_obs_site_code",
+        "atlas_flux_ujy",
+        "atlas_flux_error_formal_ujy",
+        "atlas_good",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("ATLAS frame is missing preprocessing columns: " + ", ".join(missing))
+
+    out = frame.copy()
+    n_rows = len(out)
+    floor = np.full(n_rows, np.nan, dtype=float)
+    location = np.full(n_rows, np.nan, dtype=float)
+    scope = np.full(n_rows, "", dtype=object)
+    group_name = np.full(n_rows, "", dtype=object)
+    status = np.full(n_rows, "no_usable_noise_model", dtype=object)
+    usable = np.zeros(n_rows, dtype=bool)
+
+    site_models: dict[tuple[str, str], object] = {}
+    band_models: dict[str, object] = {}
+    if not noise_model.empty:
+        for row in noise_model.itertuples(index=False):
+            if not bool(getattr(row, "atlas_noise_usable", False)):
+                continue
+            band = str(getattr(row, "atlas_filter", ""))
+            model_scope = str(getattr(row, "atlas_noise_scope", ""))
+            if model_scope == "site":
+                site_models[(band, str(getattr(row, "atlas_obs_site_code", "")))] = row
+            elif model_scope == "band":
+                band_models[band] = row
+
+    bands = out["atlas_filter"].fillna("").astype(str).to_numpy()
+    sites = out["atlas_obs_site_code"].fillna("").astype(str).to_numpy()
+    good = out["atlas_good"].fillna(False).to_numpy(dtype=bool)
+    for index, (band, site) in enumerate(zip(bands, sites)):
+        if not good[index]:
+            status[index] = "rejected_by_epoch_quality"
+            continue
+        model = site_models.get((band, site))
+        if model is None:
+            model = band_models.get(band)
+        if model is None:
+            continue
+        floor[index] = float(getattr(model, "atlas_noise_floor_ujy"))
+        location[index] = float(getattr(model, "atlas_noise_robust_location_ujy"))
+        scope[index] = str(getattr(model, "atlas_noise_scope"))
+        group_name[index] = str(getattr(model, "atlas_noise_group"))
+        status[index] = str(getattr(model, "atlas_noise_status"))
+        usable[index] = True
+
+    formal = pd.to_numeric(
+        out["atlas_flux_error_formal_ujy"], errors="coerce"
+    ).to_numpy(dtype=float)
+    flux = pd.to_numeric(out["atlas_flux_ujy"], errors="coerce").to_numpy(dtype=float)
+    effective = np.sqrt(np.square(formal) + np.square(floor))
+    effective[~usable | ~np.isfinite(effective) | (effective <= 0.0)] = np.nan
+    mag_error_effective = np.full(n_rows, np.nan, dtype=float)
+    positive = usable & np.isfinite(flux) & (flux > 0.0) & np.isfinite(effective)
+    mag_error_effective[positive] = (
+        (2.5 / np.log(10.0)) * effective[positive] / flux[positive]
+    )
+
+    out["atlas_noise_model_version"] = ATLAS_NOISE_MODEL_VERSION
+    out["atlas_noise_model_usable"] = usable
+    out["atlas_noise_status"] = status
+    out["atlas_noise_scope"] = scope
+    out["atlas_noise_group"] = group_name
+    out["atlas_noise_location_ujy"] = location
+    out["atlas_noise_floor_ujy"] = floor
+    out["atlas_flux_error_eff_ujy"] = effective
+    out["atlas_mag_error_eff"] = mag_error_effective
+    out.attrs.update(frame.attrs)
+    out.attrs["atlas_noise_model_version"] = ATLAS_NOISE_MODEL_VERSION
+    return out
+
+
+def atlas_huber_weights(
+    residuals: Iterable[float] | np.ndarray | pd.Series,
+    uncertainties: Iterable[float] | np.ndarray | pd.Series,
+    *,
+    tuning: float = 5.0,
+) -> np.ndarray:
+    """Return fixed Huber weights for already defined ATLAS residuals."""
+    if not math.isfinite(float(tuning)) or float(tuning) <= 0.0:
+        raise ValueError("tuning must be finite and positive")
+    residual = np.asarray(residuals, dtype=float)
+    uncertainty = np.asarray(uncertainties, dtype=float)
+    if residual.shape != uncertainty.shape:
+        raise ValueError("residuals and uncertainties must have matching shapes")
+    weights = np.zeros_like(residual, dtype=float)
+    valid = np.isfinite(residual) & np.isfinite(uncertainty) & (uncertainty > 0.0)
+    standardized = np.full_like(residual, np.nan, dtype=float)
+    standardized[valid] = np.abs(residual[valid] / uncertainty[valid])
+    weights[valid] = 1.0
+    tail = valid & (standardized > float(tuning))
+    weights[tail] = float(tuning) / standardized[tail]
+    return weights
+
+
+def summarize_atlas_residuals(
+    frame: pd.DataFrame,
+    *,
+    residual_flux_ujy: Iterable[float] | np.ndarray | pd.Series,
+    robust_weights: Iterable[float] | np.ndarray | pd.Series | None = None,
+) -> pd.DataFrame:
+    """Summarize model residuals by ATLAS passband, site, and ``chi/N`` bin."""
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    required = {
+        "atlas_filter",
+        "atlas_obs_site_code",
+        "atlas_obs_site",
+        "atlas_chi_n",
+        "atlas_flux_error_formal_ujy",
+        "atlas_flux_error_eff_ujy",
+    }
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError("ATLAS frame is missing calibrated columns: " + ", ".join(missing))
+    residual = _aligned_array(
+        residual_flux_ujy,
+        len(frame),
+        name="residual_flux_ujy",
+        dtype=float,
+    )
+    weights = (
+        np.ones(len(frame), dtype=float)
+        if robust_weights is None
+        else _aligned_array(robust_weights, len(frame), name="robust_weights", dtype=float)
+    )
+    formal = pd.to_numeric(
+        frame["atlas_flux_error_formal_ujy"], errors="coerce"
+    ).to_numpy(dtype=float)
+    effective = pd.to_numeric(
+        frame["atlas_flux_error_eff_ujy"], errors="coerce"
+    ).to_numpy(dtype=float)
+    floor = (
+        pd.to_numeric(frame["atlas_noise_floor_ujy"], errors="coerce").to_numpy(dtype=float)
+        if "atlas_noise_floor_ujy" in frame.columns
+        else np.full(len(frame), np.nan, dtype=float)
+    )
+    chi_n = pd.to_numeric(frame["atlas_chi_n"], errors="coerce").to_numpy(dtype=float)
+    pre_z = np.divide(
+        residual,
+        formal,
+        out=np.full_like(residual, np.nan),
+        where=np.isfinite(formal) & (formal > 0.0),
+    )
+    post_z = np.divide(
+        residual,
+        effective,
+        out=np.full_like(residual, np.nan),
+        where=np.isfinite(effective) & (effective > 0.0),
+    )
+    bands = frame["atlas_filter"].fillna("").astype(str).to_numpy()
+    site_codes = frame["atlas_obs_site_code"].fillna("").astype(str).to_numpy()
+    site_names = frame["atlas_obs_site"].fillna("unknown").astype(str).to_numpy()
+    rows: list[dict[str, object]] = []
+
+    def append_row(mask: np.ndarray, *, band: str, site_code: str, site_name: str, scope: str, chi_bin: str) -> None:
+        valid = mask & np.isfinite(residual)
+        n_points = int(np.sum(valid))
+        if not n_points:
+            return
+        selected_residual = residual[valid]
+        residual_location = float(np.nanmedian(selected_residual))
+        residual_scatter = float(
+            1.4826 * np.nanmedian(np.abs(selected_residual - residual_location))
+        )
+        selected_pre = pre_z[valid & np.isfinite(pre_z)]
+        selected_post = post_z[valid & np.isfinite(post_z)]
+        selected_chi = chi_n[valid & np.isfinite(chi_n)]
+        selected_weights = weights[valid & np.isfinite(weights)]
+        rows.append(
+            {
+                "atlas_noise_model_version": ATLAS_NOISE_MODEL_VERSION,
+                "atlas_filter": band,
+                "atlas_obs_site_code": site_code,
+                "atlas_obs_site": site_name,
+                "diagnostic_scope": scope,
+                "chi_n_bin": chi_bin,
+                "n_points": n_points,
+                "median_formal_error_ujy": float(np.nanmedian(formal[valid])),
+                "median_effective_error_ujy": float(np.nanmedian(effective[valid])),
+                "median_noise_floor_ujy": float(np.nanmedian(floor[valid])),
+                "chi_n_median": float(np.nanmedian(selected_chi)) if selected_chi.size else np.nan,
+                "chi_n_p90": float(np.nanpercentile(selected_chi, 90.0)) if selected_chi.size else np.nan,
+                "chi_n_p99": float(np.nanpercentile(selected_chi, 99.0)) if selected_chi.size else np.nan,
+                "residual_median_ujy": residual_location,
+                "residual_robust_scatter_ujy": residual_scatter,
+                "reduced_chi2_formal": (
+                    float(np.sum(np.square(selected_pre)) / max(len(selected_pre) - 2, 1))
+                    if selected_pre.size
+                    else np.nan
+                ),
+                "reduced_chi2_effective": (
+                    float(np.sum(np.square(selected_post)) / max(len(selected_post) - 2, 1))
+                    if selected_post.size
+                    else np.nan
+                ),
+                "fraction_gt3_formal": float(np.mean(np.abs(selected_pre) > 3.0)) if selected_pre.size else np.nan,
+                "fraction_gt5_formal": float(np.mean(np.abs(selected_pre) > 5.0)) if selected_pre.size else np.nan,
+                "fraction_gt10_formal": float(np.mean(np.abs(selected_pre) > 10.0)) if selected_pre.size else np.nan,
+                "fraction_gt3_effective": (
+                    float(np.mean(np.abs(selected_post) > 3.0))
+                    if selected_post.size
+                    else np.nan
+                ),
+                "fraction_gt5_effective": (
+                    float(np.mean(np.abs(selected_post) > 5.0))
+                    if selected_post.size
+                    else np.nan
+                ),
+                "fraction_gt10_effective": (
+                    float(np.mean(np.abs(selected_post) > 10.0))
+                    if selected_post.size
+                    else np.nan
+                ),
+                "median_robust_weight": float(np.nanmedian(selected_weights)) if selected_weights.size else np.nan,
+                "n_downweighted": int(np.sum(selected_weights < 1.0)) if selected_weights.size else 0,
+                "n_excluded": int(np.sum(selected_weights <= 0.0)) if selected_weights.size else 0,
+            }
+        )
+
+    for band in sorted(set(bands)):
+        for site_code in sorted(set(site_codes[bands == band])):
+            base = (bands == band) & (site_codes == site_code)
+            names = site_names[base]
+            site_name = str(names[0]) if names.size else ATLAS_OBS_SITE_NAMES.get(site_code, "unknown")
+            append_row(base, band=band, site_code=site_code, site_name=site_name, scope="site", chi_bin="all")
+            for label, lower, upper in ATLAS_CHI_N_BINS:
+                chi_mask = base & np.isfinite(chi_n) & (chi_n >= lower) & (chi_n < upper)
+                append_row(
+                    chi_mask,
+                    band=band,
+                    site_code=site_code,
+                    site_name=site_name,
+                    scope="chi_n_bin",
+                    chi_bin=label,
+                )
+    return pd.DataFrame(rows)
 
 
 def summarize_atlas_lc(lc: pd.DataFrame) -> dict[str, object]:

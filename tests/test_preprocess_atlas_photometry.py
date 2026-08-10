@@ -11,6 +11,12 @@ from scripts.preprocess_atlas_photometry import (
     preprocess_atlas_frame,
     run_preprocessing,
 )
+from malca.enrichment.atlas_forced_photometry import (
+    apply_atlas_noise_model,
+    atlas_huber_weights,
+    estimate_atlas_noise_model,
+    summarize_atlas_residuals,
+)
 from malca.review.lightcurve_sources import normalize_external_lc_dataframe
 
 
@@ -33,6 +39,7 @@ def _atlas_frame(rows: int = 1) -> pd.DataFrame:
             "mag5sig": [19.0] * rows,
             "Sky": [20.0] * rows,
             "atlas_image_type": ["reduced"] * rows,
+            "Obs": [f"01a{index:05d}" for index in range(rows)],
         }
     )
     frame.attrs["atlas_image_types"] = ["reduced"]
@@ -84,6 +91,71 @@ def test_clean_magnitude_is_derived_from_flux_without_changing_raw_magnitude() -
     assert flagged.loc[0, "dm_clean"] == pytest.approx(
         (2.5 / np.log(10.0)) * 10.0 / 100.0
     )
+    assert flagged.loc[0, "atlas_obs_site_code"] == "01"
+    assert flagged.loc[0, "atlas_obs_site"] == "maunaloa"
+    assert flagged.loc[0, "atlas_camera"] == "a"
+    assert flagged.loc[0, "atlas_obs"] == "01a00000"
+    assert flagged.loc[0, "atlas_flux_ujy"] == 100.0
+    assert flagged.loc[0, "atlas_flux_error_formal_ujy"] == 10.0
+
+
+def test_empirical_noise_model_adds_site_floor_without_overwriting_formal_errors() -> None:
+    raw = _atlas_frame(rows=100)
+    raw["duJy"] = 2.0
+    raw["uJy"] = 100.0 + np.tile([-8.0, -4.0, 0.0, 4.0, 8.0], 20)
+    raw["Obs"] = [
+        f"{'01' if index < 50 else '02'}a{index:05d}" for index in range(len(raw))
+    ]
+    flagged = preprocess_atlas_frame(raw)
+    original_formal = flagged["duJy"].copy()
+
+    model = estimate_atlas_noise_model(
+        flagged,
+        calibration_mask=np.ones(len(flagged), dtype=bool),
+        min_points=20,
+        min_time_span_days=20.0,
+    )
+    calibrated = apply_atlas_noise_model(flagged, model)
+
+    site_models = model.loc[model["atlas_noise_scope"].eq("site")]
+    assert len(site_models) == 2
+    assert site_models["atlas_noise_usable"].all()
+    assert (site_models["atlas_noise_floor_ujy"] > 0.0).all()
+    pd.testing.assert_series_equal(calibrated["duJy"], original_formal)
+    assert np.all(
+        calibrated.loc[calibrated["atlas_good"], "atlas_flux_error_eff_ujy"]
+        > calibrated.loc[calibrated["atlas_good"], "atlas_flux_error_formal_ujy"]
+    )
+
+
+def test_huber_weights_and_residual_diagnostics_preserve_chi_n_as_diagnostic() -> None:
+    raw = _atlas_frame(rows=60)
+    raw["duJy"] = 2.0
+    raw["uJy"] = 100.0 + np.tile([-5.0, 0.0, 5.0], 20)
+    raw["chi/N"] = np.linspace(1.0, 1200.0, len(raw))
+    flagged = preprocess_atlas_frame(raw)
+    model = estimate_atlas_noise_model(
+        flagged,
+        calibration_mask=np.ones(len(flagged), dtype=bool),
+        min_points=20,
+        min_time_span_days=20.0,
+    )
+    calibrated = apply_atlas_noise_model(flagged, model)
+    residual = calibrated["atlas_flux_ujy"].to_numpy(dtype=float) - 100.0
+    weights = atlas_huber_weights(
+        np.array([0.0, 10.0]), np.array([1.0, 1.0]), tuning=5.0
+    )
+    np.testing.assert_allclose(weights, [1.0, 0.5])
+
+    diagnostics = summarize_atlas_residuals(
+        calibrated,
+        residual_flux_ujy=residual,
+    )
+
+    assert {"site", "chi_n_bin"}.issubset(set(diagnostics["diagnostic_scope"]))
+    site = diagnostics.loc[diagnostics["diagnostic_scope"].eq("site")].iloc[0]
+    assert site["reduced_chi2_effective"] < site["reduced_chi2_formal"]
+    assert site["chi_n_p90"] > site["chi_n_median"]
 
 
 def test_flux_filter_snr_and_image_type_are_separate_from_faq_mask() -> None:

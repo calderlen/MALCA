@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 import pandas as pd
 
+from malca.microlensing import pipeline as microlensing_pipeline
 from scripts import microlensing
 from scripts.microlensing import load_review_microlensing_candidate_ids
 
@@ -63,6 +64,89 @@ def test_load_review_microlensing_candidate_ids_uses_review_labels(tmp_path):
         "possible-json",
         "possible-scalar",
     ]
+
+
+def test_package_pipeline_uses_primary_or_possible_microlensing_labels(monkeypatch, tmp_path):
+    db_path = tmp_path / "review.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE candidates (
+                candidate_id TEXT PRIMARY KEY,
+                asas_sn_id TEXT,
+                ra REAL,
+                dec REAL
+            );
+            CREATE TABLE reviews (
+                candidate_id TEXT,
+                event_class TEXT,
+                morphology_secondary TEXT,
+                morphology_secondary_json TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO candidates(candidate_id, asas_sn_id, ra, dec) VALUES (?, ?, ?, ?)",
+            [
+                ("both", "1", 1.0, 2.0),
+                ("primary", "2", 3.0, 4.0),
+                ("possible-json", "3", 5.0, 6.0),
+                ("possible-scalar", "4", 7.0, 8.0),
+                ("unrelated", "5", 9.0, 10.0),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO reviews(
+                candidate_id,
+                event_class,
+                morphology_secondary,
+                morphology_secondary_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    "both",
+                    " Microlensing ",
+                    "possible_microlensing_event",
+                    '["possible_microlensing_event"]',
+                ),
+                ("primary", "microlensing", None, None),
+                (
+                    "possible-json",
+                    "brightening_event",
+                    "single_brightening",
+                    '["single_brightening", "possible_microlensing_event"]',
+                ),
+                (
+                    "possible-scalar",
+                    "brightening_event",
+                    " Possible_Microlensing_Event ",
+                    "not-json",
+                ),
+                ("unrelated", "brightening_event", "single_brightening", "not-json"),
+                ("stale", "microlensing", None, None),
+            ],
+        )
+
+    monkeypatch.setattr(microlensing_pipeline, "get_candidate_payload", lambda conn, candidate_id: {})
+    monkeypatch.setattr(
+        microlensing_pipeline,
+        "resolve_lightcurve_path",
+        lambda payload, plot_dir: plot_dir / f"{payload['candidate_id']}.dat3",
+    )
+
+    selected = microlensing_pipeline._review_candidates(db_path, None)
+    assert [row["candidate_id"] for row in selected] == [
+        "both",
+        "possible-json",
+        "possible-scalar",
+        "primary",
+    ]
+    assert len(selected) == len({row["candidate_id"] for row in selected})
+
+    possible_only = microlensing_pipeline._review_candidates(db_path, ["possible-json"])
+    assert [row["candidate_id"] for row in possible_only] == ["possible-json"]
 
 
 def test_fitting_uses_configured_review_connections(monkeypatch, tmp_path):

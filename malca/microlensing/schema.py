@@ -1,9 +1,9 @@
 """Column names and versioning for joint microlensing products."""
 
-MICROLENSING_JOINT_VERSION = "joint-pspl-v1"
+MICROLENSING_JOINT_VERSION = "joint-pspl-v2"
 
 # Compact candidate-level summary optionally materialized in Review. Detailed
-# per-survey results stay in the two Parquet science products.
+# per-survey results stay in the three Parquet science products.
 MICROLENSING_JOINT_COLUMN_SPECS: tuple[tuple[str, str, str], ...] = (
     ("microlensing_joint_version", "TEXT", "text"),
     ("microlensing_joint_status", "TEXT", "select"),
