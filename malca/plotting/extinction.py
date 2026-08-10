@@ -7,17 +7,20 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from malca.extinction import mid_ir_av_coefficient
 
-# A_lambda / A_V for the project's R_V=3.1 bandpass convention.  Keep these
-# aligned with the ``Bandpass.av_coeff`` values in ``malca.review.sed``.
+
+# Scalar A_lambda / A_V values for the project's R_V=3.1 catalog-color
+# convention.  W3/W4 use the versioned nominal-wavelength G23 policy; keep all
+# values aligned with ``Bandpass.av_coeff`` in ``malca.review.sed``.
 IR_AV_COEFFICIENTS: dict[str, float] = {
     "tmass_j": 0.282,
     "tmass_h": 0.175,
     "tmass_k": 0.112,
     "w1": 0.061,
     "w2": 0.047,
-    "w3": 0.0,
-    "w4": 0.0,
+    "w3": float(mid_ir_av_coefficient("AllWISE", "W3")),
+    "w4": float(mid_ir_av_coefficient("AllWISE", "W4")),
 }
 
 

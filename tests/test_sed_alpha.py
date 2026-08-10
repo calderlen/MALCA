@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from malca.extinction import mid_ir_av_coefficient
 from malca.enrichment.sed_alpha import (
     compute_sed_alpha_features,
     fit_sed_alpha_for_candidate,
@@ -61,6 +62,68 @@ def test_sed_alpha_falls_back_to_lambda_flux_lambda() -> None:
     assert result["sed_alpha_status"] == "ok"
     assert result["sed_alpha"] == pytest.approx(0.45, abs=1.0e-12)
     assert result["sed_alpha_class"] == "Class I"
+
+
+def test_sed_alpha_replaces_legacy_zero_mid_ir_coefficients() -> None:
+    rows = pd.DataFrame(
+        [
+            {
+                "candidate_id": "legacy-mid-ir",
+                "source": "2MASS",
+                "band": "Ks",
+                "lambda_eff_angstrom": 2.159e4,
+                "lambda_l_lambda": 1.0,
+                "flux_lambda": 1.0 / 2.159e4,
+                "quality_flags": "",
+                "is_upper_limit": False,
+                "is_synthetic": False,
+                "av_coeff": 0.112,
+            },
+            {
+                "candidate_id": "legacy-mid-ir",
+                "source": "AllWISE",
+                "band": "W3",
+                "lambda_eff_angstrom": 11.5608e4,
+                "lambda_l_lambda": 1.0,
+                "flux_lambda": 1.0 / 11.5608e4,
+                "quality_flags": "",
+                "is_upper_limit": False,
+                "is_synthetic": False,
+                "av_coeff": 0.0,
+            },
+            {
+                "candidate_id": "legacy-mid-ir",
+                "source": "AllWISE",
+                "band": "W4",
+                "lambda_eff_angstrom": 22.0883e4,
+                "lambda_l_lambda": 1.0,
+                "flux_lambda": 1.0 / 22.0883e4,
+                "quality_flags": "",
+                "is_upper_limit": False,
+                "is_synthetic": False,
+                "av_coeff": 0.0,
+            },
+        ]
+    )
+    av = 2.0
+    wavelengths = np.array([2.159, 11.5608, 22.0883])
+    coefficients = np.array(
+        [
+            0.112,
+            float(mid_ir_av_coefficient("AllWISE", "W3")),
+            float(mid_ir_av_coefficient("AllWISE", "W4")),
+        ]
+    )
+    expected = np.polyfit(np.log10(wavelengths), 0.4 * av * coefficients, 1)[0]
+
+    result = fit_sed_alpha_for_candidate(
+        "legacy-mid-ir",
+        rows,
+        candidate={"candidate_id": "legacy-mid-ir", "A_v_3d": av},
+    )
+
+    assert result["sed_alpha_status"] == "ok"
+    assert result["sed_alpha"] == pytest.approx(expected, abs=1.0e-12)
 
 
 def test_sed_alpha_uses_consistent_flux_scale_when_luminosity_is_incomplete() -> None:

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from malca.extinction import mid_ir_av_coefficient
 from malca.plotting.paper_figures import (
     _deredden_ir_colors,
     _galactic_radians,
@@ -42,7 +43,10 @@ def test_deredden_ir_colors_applies_av() -> None:
     )
     out = _deredden_ir_colors(frame)
     assert out["ks_w2_0"].iloc[0] == pytest.approx((10.0 - 0.112 * 2.0) - (9.0 - 0.047 * 2.0))
-    assert out["ks_w4_0"].iloc[0] == pytest.approx((10.0 - 0.112 * 2.0) - (8.0 - 0.0 * 2.0))
+    w4_coefficient = float(mid_ir_av_coefficient("AllWISE", "W4"))
+    assert out["ks_w4_0"].iloc[0] == pytest.approx(
+        (10.0 - 0.112 * 2.0) - (8.0 - w4_coefficient * 2.0)
+    )
 
 
 def test_galactic_radians_from_ra_dec() -> None:

@@ -15,8 +15,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from malca.extinction import MID_IR_EXTINCTION_POLICY_VERSION
 from malca.plotting.color_color_labels import LABEL_KS_W3_0, LABEL_KS_W4_0
-from malca.plotting.extinction import add_dereddened_ir_magnitudes, dereddened_color
+from malca.plotting.extinction import (
+    IR_AV_COEFFICIENTS,
+    add_dereddened_ir_magnitudes,
+    dereddened_color,
+)
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
@@ -297,7 +302,13 @@ def main() -> None:
                 "n_missing_axes": int(len(df) - plotted),
                 "n_with_errors": int(df["has_disk_color_errors"].sum()),
                 "disk_region_counts": region_counts,
-                "extinction_correction": "Foreground A_v_3d with the project's R_V=3.1 band coefficients.",
+                "extinction_correction": "Foreground A_v_3d with scalar R_V=3.1 band coefficients.",
+                "extinction_policy_version": MID_IR_EXTINCTION_POLICY_VERSION,
+                "band_av_coefficients": {
+                    "2MASS_Ks": IR_AV_COEFFICIENTS["tmass_k"],
+                    "AllWISE_W3": IR_AV_COEFFICIENTS["w3"],
+                    "AllWISE_W4": IR_AV_COEFFICIENTS["w4"],
+                },
                 "output_dir": str(args.output_dir),
             },
             fh,

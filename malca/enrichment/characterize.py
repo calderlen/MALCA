@@ -65,6 +65,8 @@ from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
 from malca.enrichment.banyan import BANYAN_OUTPUT_COLUMNS, compute_banyan_membership
+from malca.enrichment.open_clusters import OPEN_CLUSTER_OUTPUT_COLUMNS, add_open_cluster_context
+from malca.extinction import mid_ir_av_coefficient
 
 
 
@@ -148,6 +150,7 @@ VPHAS_CACHE_COLUMNS = [
     "vphas_ha_excess",
 ]
 OPEN_CLUSTER_CACHE_COLUMNS = ["cluster_name", "cluster_age_myr", "cluster_dist_pc"]
+OPEN_CLUSTER_BULK_CACHE_COLUMNS = list(OPEN_CLUSTER_OUTPUT_COLUMNS)
 DUST_BASE_CACHE_COLUMNS = [
     "A_v_3d", "ebv_3d", "dust_sigma", "dust_max_dist_kpc",
     "dust_status", "dust_distance_source", "dust_distance_pc",
@@ -982,6 +985,8 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         'tmass_k': 0.112,
         'w1': 0.061,
         'w2': 0.047,
+        'w3': float(mid_ir_av_coefficient('AllWISE', 'W3')),
+        'w4': float(mid_ir_av_coefficient('AllWISE', 'W4')),
         'apass_b': 1.321,
         'apass_v': 1.000,
         'apass_g': 1.199,
@@ -1955,6 +1960,23 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = CLUSTER_M
     return df
 
 
+def crossmatch_open_clusters_bulk(
+    df: pd.DataFrame,
+    *,
+    ucc_dir: str | Path,
+    hr24_dir: str | Path | None = None,
+    include_proximity: bool = True,
+) -> pd.DataFrame:
+    """Use pinned local UCC/HR24 tables and exact Gaia IDs for membership."""
+    result = add_open_cluster_context(
+        df,
+        ucc_dir=ucc_dir,
+        hr24_dir=hr24_dir,
+        include_proximity=include_proximity,
+    )
+    return result.sources
+
+
 # =============================================================================
 # unWISE/unTimely IR VARIABILITY
 # =============================================================================
@@ -2290,6 +2312,9 @@ def characterize_candidates_df(
     run_vphas: bool = True,
     run_sfr: bool = True,
     run_clusters: bool = True,
+    ucc_dir: Path | None = None,
+    hr24_dir: Path | None = None,
+    cluster_proximity: bool = True,
     run_unwise: bool = True,
     run_apass: bool = True,
     run_galex: bool = True,
@@ -2715,16 +2740,40 @@ def characterize_candidates_df(
         )
 
     if not _module_completed(df_char, "clusters"):
+        cluster_cache_module = (
+            f"open_clusters_ucc_{Path(ucc_dir).expanduser().name}"
+            if ucc_dir is not None
+            else "open_clusters"
+        )
+        cluster_func = (
+            (lambda frame: crossmatch_open_clusters_bulk(
+                frame,
+                ucc_dir=Path(ucc_dir).expanduser(),
+                hr24_dir=Path(hr24_dir).expanduser() if hr24_dir is not None else None,
+                include_proximity=cluster_proximity,
+            ))
+            if ucc_dir is not None
+            else crossmatch_open_clusters
+        )
+        cluster_columns = (
+            OPEN_CLUSTER_BULK_CACHE_COLUMNS
+            if ucc_dir is not None
+            else OPEN_CLUSTER_CACHE_COLUMNS
+        )
         df_char = _run_optional_module(
             df_char,
             module="clusters",
             enabled=run_clusters,
-            description="Running open cluster crossmatch...",
+            description=(
+                "Running exact-ID UCC/Hunt-Reffert open cluster enrichment..."
+                if ucc_dir is not None
+                else "Running legacy open cluster crossmatch..."
+            ),
             func=lambda frame: _run_cached_characterization_module(
                 frame,
-                module="open_clusters",
-                func=crossmatch_open_clusters,
-                output_columns=OPEN_CLUSTER_CACHE_COLUMNS,
+                module=cluster_cache_module,
+                func=cluster_func,
+                output_columns=cluster_columns,
             ),
         )
         if checkpoint_path:
@@ -2810,6 +2859,9 @@ def main():
     parser.add_argument("--no-characterize-vphas", dest="characterize_vphas", action="store_false", help="Disable VPHAS+ enrichment")
     parser.add_argument("--no-characterize-sfr", dest="characterize_sfr", action="store_false", help="Disable star-forming-region enrichment")
     parser.add_argument("--no-characterize-clusters", dest="characterize_clusters", action="store_false", help="Disable open-cluster enrichment")
+    parser.add_argument("--ucc-dir", type=Path, default=None, help="Pinned UCC release directory for exact Gaia-ID membership")
+    parser.add_argument("--hr24-dir", type=Path, default=None, help="Optional Hunt-Reffert 2024 clusters/members directory")
+    parser.add_argument("--no-cluster-proximity", dest="cluster_proximity", action="store_false", help="Skip nearest UCC-centre diagnostics")
     parser.add_argument("--characterize-unwise", dest="characterize_unwise", action="store_true", help="Enable unWISE/unTimely variability enrichment (default: disabled)")
     parser.add_argument("--no-characterize-unwise", dest="characterize_unwise", action="store_false", help="Disable unWISE variability enrichment")
     parser.add_argument("--all-candidates", action="store_true", help="Characterize all input rows instead of only failed_any=False passers")
@@ -2819,6 +2871,7 @@ def main():
         characterize_vphas=True,
         characterize_sfr=True,
         characterize_clusters=True,
+        cluster_proximity=True,
         characterize_unwise=False,
     )
     
@@ -2843,6 +2896,9 @@ def main():
         run_vphas=args.characterize_vphas,
         run_sfr=args.characterize_sfr,
         run_clusters=args.characterize_clusters,
+        ucc_dir=args.ucc_dir,
+        hr24_dir=args.hr24_dir,
+        cluster_proximity=args.cluster_proximity,
         run_unwise=args.characterize_unwise,
         unwise_workers=args.unwise_workers,
         unwise_checkpoint_every=args.unwise_checkpoint_every,

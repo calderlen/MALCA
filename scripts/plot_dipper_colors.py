@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 from matplotlib.ticker import AutoMinorLocator
 
 from malca.enrichment.characterize import crossmatch_2mass, crossmatch_allwise
@@ -53,15 +52,6 @@ SPITZER_PHOTOMETRY: Path | None = None
 
 # Compact markers retain the error bars while reducing overlap in the colour planes.
 COLOR_POINT_MARKERSIZE = 4.0
-
-EXCESS_CLASS_STYLES = {
-    "robust": ("Robust", "#b2182b"),
-    "probable": ("Probable", "#ef8a62"),
-    "single_band_candidate": ("Single-band candidate", "#7b3294"),
-    "none": ("No excess", "#2166ac"),
-    "unassessable": ("Unassessable", "#969696"),
-    "not_evaluated": ("Not evaluated", "#252525"),
-}
 
 WISE_COLS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]
 TMASS_COLS = ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
@@ -825,15 +815,15 @@ def _shade_sed_alpha_bands(ax: plt.Axes, y_min: float, y_max: float, *, labels: 
 
 def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: float) -> None:
     for _, row in data.iterrows():
-        class_key = str(row.get("excess_class", "not_evaluated"))
-        if class_key not in EXCESS_CLASS_STYLES:
-            class_key = "not_evaluated"
-        _, color = EXCESS_CLASS_STYLES[class_key]
         alpha_err = pd.to_numeric(pd.Series([row.get("sed_alpha_err")]), errors="coerce").iloc[0]
+        # A finite alpha error is only produced when every retained SED-alpha
+        # point has a finite, positive measurement uncertainty. Keep the marker
+        # filled only when both the SED slope and Teff have usable bounds.
         has_alpha_err = bool(np.isfinite(alpha_err) and alpha_err > 0)
         lower = pd.to_numeric(pd.Series([row.get("teff_err_lower")]), errors="coerce").iloc[0]
         upper = pd.to_numeric(pd.Series([row.get("teff_err_upper")]), errors="coerce").iloc[0]
         has_teff_err = bool(np.isfinite(lower) and np.isfinite(upper) and lower >= 0 and upper >= 0)
+        has_complete_errors = has_alpha_err and has_teff_err
         xerr = np.array([[lower], [upper]]) if has_teff_err else None
         ax.errorbar(
             [float(row["teff"])],
@@ -841,17 +831,17 @@ def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: flo
             xerr=xerr,
             yerr=[[alpha_err], [alpha_err]] if has_alpha_err else None,
             fmt="o",
-            color=color,
-            ecolor=color,
+            color="black",
+            ecolor="black",
             elinewidth=0.7,
             capsize=2.5,
             capthick=0.7,
-            markerfacecolor=color if has_alpha_err else "white",
-            markeredgecolor=color,
-            markeredgewidth=1.1,
+            markerfacecolor="black" if has_complete_errors else "none",
+            markeredgecolor="black",
+            markeredgewidth=1.0 if has_complete_errors else 0.6,
             markersize=markersize,
             linestyle="none",
-            alpha=0.9 if class_key != "unassessable" else 0.72,
+            alpha=1.0,
             zorder=5,
         )
 
@@ -867,44 +857,14 @@ def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7.6, 5.8))
     _shade_sed_alpha_bands(ax, y_min, y_max, labels=False)
-    _draw_teff_alpha_points(ax, finite, markersize=6.0)
+    _draw_teff_alpha_points(ax, finite, markersize=7.0)
     ax.set_xlabel(r"$T_{\rm eff}$ [K]")
     ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]")
     ax.set_ylim(y_min, y_max)
     ax.xaxis.set_minor_locator(AutoMinorLocator(2))
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
-    class_counts = finite["excess_class"].fillna("not_evaluated").value_counts()
-    class_handles = []
-    for key, (label, color) in EXCESS_CLASS_STYLES.items():
-        count = int(class_counts.get(key, 0))
-        if count == 0:
-            continue
-        class_handles.append(
-            Line2D(
-                [],
-                [],
-                marker="o",
-                linestyle="none",
-                markerfacecolor=color,
-                markeredgecolor=color,
-                markersize=6,
-                label=f"{label} ({count})",
-            )
-        )
-    uncertainty_handles = [
-        Line2D([], [], marker="o", linestyle="none", markerfacecolor="0.25", markeredgecolor="0.25", markersize=6, label=r"$\alpha$ uncertainty available"),
-        Line2D([], [], marker="o", linestyle="none", markerfacecolor="white", markeredgecolor="0.25", markersize=6, label=r"$\alpha$ uncertainty unavailable"),
-    ]
-    fig.legend(
-        handles=[*class_handles, *uncertainty_handles],
-        loc="lower center",
-        bbox_to_anchor=(0.5, 0.005),
-        ncol=4,
-        frameon=True,
-        fontsize=8,
-    )
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.97, bottom=0.22)
+    fig.subplots_adjust(left=0.12, right=0.98, top=0.97, bottom=0.14)
     out_path = out_dir / "dipper_sed_alpha_teff.pdf"
     fig.savefig(out_path)
     plt.close(fig)

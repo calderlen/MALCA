@@ -14,6 +14,7 @@ from astropy import units as u
 from astropy.table import Table
 
 import malca.review.sed as review_sed
+from malca.extinction import mid_ir_av_coefficient
 from malca.review.sed import (
     ALL_CATALOG_SOURCES,
     BROAD_CLASSIFICATION_SED_SOURCES,
@@ -248,6 +249,13 @@ def test_exact_nsc_and_mission_reference_registrations() -> None:
     mips24 = bandpass_for("Spitzer SEIP", "MIPS24")
     assert mips24 is not None
     assert mips24.lambda_reference_angstrom == pytest.approx(236750.0)
+    assert mips24.av_coeff == pytest.approx(mid_ir_av_coefficient("Spitzer SEIP", "MIPS24"))
+    assert bandpass_for("AllWISE", "W3").av_coeff == pytest.approx(
+        mid_ir_av_coefficient("AllWISE", "W3")
+    )
+    assert bandpass_for("AllWISE", "W4").av_coeff == pytest.approx(
+        mid_ir_av_coefficient("AllWISE", "W4")
+    )
     uvot_bands = ("UVW2", "UVM2", "UVW1", "U", "B", "V")
     assert all(bandpass_for("Swift/UVOT", band).mag_system == "AB" for band in uvot_bands)
     assert all(bandpass_for("XMM-OM", band).mag_system == "AB" for band in uvot_bands)
@@ -1616,6 +1624,41 @@ def test_jy_catalog_rows_roundtrip_as_flux_density() -> None:
     assert rows.loc[0, "native_flux_unit"] == "Jy"
     assert rows.loc[0, "plot_lambda_kind"] == "mission_reference"
     assert "confusion_risk" in rows.loc[0, "quality_flags"]
+
+
+def test_corrected_jy_catalog_rows_apply_mid_ir_extinction() -> None:
+    av = 2.0
+    observed_flux = 2.0
+    observed_error = 0.2
+    coefficient = float(mid_ir_av_coefficient("AKARI", "S9W"))
+    scale = 10.0 ** (0.4 * av * coefficient)
+    payload = {
+        "candidate_id": "cand-4b-corrected",
+        "distance_gspphot": 1000.0,
+        "A_v_3d": av,
+    }
+    external = pd.DataFrame([
+        {
+            "candidate_id": "cand-4b-corrected",
+            "source": "AKARI",
+            "band": "S9W",
+            "flux_nu_jy": observed_flux,
+            "flux_nu_jy_err": observed_error,
+            "mag_system": "Jy",
+            "lambda_eff_angstrom": 90000.0,
+        }
+    ])
+
+    rows = build_sed_dataframe(
+        payload,
+        external_rows=external,
+        extinction_mode="corrected",
+    )
+
+    assert float(rows.loc[0, "av_coeff"]) == pytest.approx(coefficient)
+    assert float(rows.loc[0, "flux_nu_jy"]) == pytest.approx(observed_flux * scale)
+    assert float(rows.loc[0, "flux_nu_jy_err"]) == pytest.approx(observed_error * scale)
+    assert "ism_corrected" in str(rows.loc[0, "quality_flags"])
 
 
 def test_canonical_measurement_uses_response_zero_point_and_explicit_wavelength() -> None:

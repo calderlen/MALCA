@@ -10,6 +10,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from malca.extinction import mid_ir_av_coefficient
+
 
 SED_ALPHA_COLUMNS = [
     "candidate_id",
@@ -239,6 +241,13 @@ def _prepared_alpha_points(
     av = _safe_float(candidate.get("A_v_3d")) if candidate is not None else None
     if av is not None and av > 0 and "av_coeff" in frame.columns:
         coeff = pd.to_numeric(frame["av_coeff"], errors="coerce").to_numpy(dtype=float)
+        # Legacy normalized rows stored zero for several mid-IR bands.  Prefer
+        # the active, versioned G23 scalar policy for those registered bands so
+        # recomputing alpha corrects old rows without rewriting raw photometry.
+        for position, (_, row) in enumerate(frame.iterrows()):
+            active_coefficient = mid_ir_av_coefficient(row.get("source"), row.get("band"))
+            if active_coefficient is not None:
+                coeff[position] = active_coefficient
         flags = frame.get("quality_flags")
         if flags is None:
             already_corrected = np.zeros(len(frame), dtype=bool)

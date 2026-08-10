@@ -24,6 +24,7 @@ import plotly.graph_objects as go
 from astropy import units as u
 
 from malca.config import DEFAULT_CACHE_DIR, PARQUET_CACHE_COMPRESSION
+from malca.extinction import mid_ir_av_coefficient
 from malca.plotting.lightcurve_publication import PUBLICATION_PLOTLY_FONT
 from malca.review.sed_storage import (
     CANONICAL_SED_NORMALIZATION_VERSION,
@@ -310,8 +311,8 @@ for _b in [
     _bp("2MASS", "Ks", "tmass_k", "tmass_k_err", "Vega", 21590.0, 666.7, 0.112, "2MASS/2MASS.Ks"),
     _bp("AllWISE", "W1", "w1", "w1_err", "Vega", 33526.0, 309.540, 0.061, "WISE/WISE.W1"),
     _bp("AllWISE", "W2", "w2", "w2_err", "Vega", 46028.0, 171.787, 0.047, "WISE/WISE.W2"),
-    _bp("AllWISE", "W3", "w3", "w3_err", "Vega", 115608.0, 31.674, 0.0, "WISE/WISE.W3"),
-    _bp("AllWISE", "W4", "w4", "w4_err", "Vega", 220883.0, 8.363, 0.0, "WISE/WISE.W4"),
+    _bp("AllWISE", "W3", "w3", "w3_err", "Vega", 115608.0, 31.674, mid_ir_av_coefficient("AllWISE", "W3"), "WISE/WISE.W3"),
+    _bp("AllWISE", "W4", "w4", "w4_err", "Vega", 220883.0, 8.363, mid_ir_av_coefficient("AllWISE", "W4"), "WISE/WISE.W4"),
     _bp(
         "IPHAS", "Halpha", "iphas_ha_mag", None, "Vega", 6568.0, 2950.0, 0.815, "INT/IPHAS.Ha",
         response_kind="emission_line_filter",
@@ -454,19 +455,19 @@ for _b in [
         fit_policy="diagnostic_only",
         policy_flags=("emission_line", "diagnostic_only"),
     ),
-    _bp("Spitzer SEIP", "IRAC1", "spitzer_irac1", "spitzer_irac1_err", "Jy", 35500.0, None, 0.0, "Spitzer/IRAC.I1", confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC2", "spitzer_irac2", "spitzer_irac2_err", "Jy", 44930.0, None, 0.0, "Spitzer/IRAC.I2", confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC3", "spitzer_irac3", "spitzer_irac3_err", "Jy", 57310.0, None, 0.0, "Spitzer/IRAC.I3", confusion_risk=True),
-    _bp("Spitzer SEIP", "IRAC4", "spitzer_irac4", "spitzer_irac4_err", "Jy", 78720.0, None, 0.0, "Spitzer/IRAC.I4", confusion_risk=True),
-    _bp("Spitzer SEIP", "MIPS24", "spitzer_mips24", "spitzer_mips24_err", "Jy", 236750.0, None, 0.0, "Spitzer/MIPS.24mu", confusion_risk=True),
-    _bp("AKARI", "S9W", "akari_s9w", "akari_s9w_err", "Jy", 90000.0, None, 0.0, "AKARI/IRC.S9W", confusion_risk=True),
-    _bp("AKARI", "L18W", "akari_l18w", "akari_l18w_err", "Jy", 180000.0, None, 0.0, "AKARI/IRC.L18W", confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC1", "spitzer_irac1", "spitzer_irac1_err", "Jy", 35500.0, None, mid_ir_av_coefficient("Spitzer SEIP", "IRAC1"), "Spitzer/IRAC.I1", confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC2", "spitzer_irac2", "spitzer_irac2_err", "Jy", 44930.0, None, mid_ir_av_coefficient("Spitzer SEIP", "IRAC2"), "Spitzer/IRAC.I2", confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC3", "spitzer_irac3", "spitzer_irac3_err", "Jy", 57310.0, None, mid_ir_av_coefficient("Spitzer SEIP", "IRAC3"), "Spitzer/IRAC.I3", confusion_risk=True),
+    _bp("Spitzer SEIP", "IRAC4", "spitzer_irac4", "spitzer_irac4_err", "Jy", 78720.0, None, mid_ir_av_coefficient("Spitzer SEIP", "IRAC4"), "Spitzer/IRAC.I4", confusion_risk=True),
+    _bp("Spitzer SEIP", "MIPS24", "spitzer_mips24", "spitzer_mips24_err", "Jy", 236750.0, None, mid_ir_av_coefficient("Spitzer SEIP", "MIPS24"), "Spitzer/MIPS.24mu", confusion_risk=True),
+    _bp("AKARI", "S9W", "akari_s9w", "akari_s9w_err", "Jy", 90000.0, None, mid_ir_av_coefficient("AKARI", "S9W"), "AKARI/IRC.S9W", confusion_risk=True),
+    _bp("AKARI", "L18W", "akari_l18w", "akari_l18w_err", "Jy", 180000.0, None, mid_ir_av_coefficient("AKARI", "L18W"), "AKARI/IRC.L18W", confusion_risk=True),
     _bp("AKARI", "N60", "akari_n60", "akari_n60_err", "Jy", 650000.0, None, 0.0, "AKARI/FIS.N60", confusion_risk=True),
     _bp("AKARI", "WIDE-S", "akari_wide_s", "akari_wide_s_err", "Jy", 900000.0, None, 0.0, "AKARI/FIS.WIDE-S", confusion_risk=True),
     _bp("AKARI", "WIDE-L", "akari_wide_l", "akari_wide_l_err", "Jy", 1400000.0, None, 0.0, "AKARI/FIS.WIDE-L", confusion_risk=True),
     _bp("AKARI", "N160", "akari_n160", "akari_n160_err", "Jy", 1600000.0, None, 0.0, "AKARI/FIS.N160", confusion_risk=True),
-    _bp("IRAS", "12", "iras_12", "iras_12_err", "Jy", 120000.0, None, 0.0, "IRAS/IRAS.12mu", confusion_risk=True),
-    _bp("IRAS", "25", "iras_25", "iras_25_err", "Jy", 250000.0, None, 0.0, "IRAS/IRAS.25mu", confusion_risk=True),
+    _bp("IRAS", "12", "iras_12", "iras_12_err", "Jy", 120000.0, None, mid_ir_av_coefficient("IRAS", "12"), "IRAS/IRAS.12mu", confusion_risk=True),
+    _bp("IRAS", "25", "iras_25", "iras_25_err", "Jy", 250000.0, None, mid_ir_av_coefficient("IRAS", "25"), "IRAS/IRAS.25mu", confusion_risk=True),
     _bp("IRAS", "60", "iras_60", "iras_60_err", "Jy", 600000.0, None, 0.0, "IRAS/IRAS.60mu", confusion_risk=True),
     _bp("IRAS", "100", "iras_100", "iras_100_err", "Jy", 1000000.0, None, 0.0, "IRAS/IRAS.100mu", confusion_risk=True),
     _bp("Herschel", "PACS70", "herschel_pacs70", "herschel_pacs70_err", "Jy", 700000.0, None, 0.0, "Herschel/Pacs.blue", confusion_risk=True),
@@ -1085,18 +1086,23 @@ def _row_from_bandpass(
     if bandpass.confusion_risk and "confusion_risk" not in flags:
         flags.append("confusion_risk")
     effective_mag = _safe_float(mag)
-    if dereddened and system != "JY" and effective_mag is not None:
-        if av is not None and bandpass.av_coeff is not None:
-            effective_mag = effective_mag - float(av) * float(bandpass.av_coeff)
+    input_flux_scale = 1.0
+    can_deredden = dereddened and av is not None and bandpass.av_coeff is not None
+    if dereddened:
+        if can_deredden:
+            input_flux_scale = 10.0 ** (0.4 * float(av) * float(bandpass.av_coeff))
             flags.append("ism_corrected")
         else:
             flags.append("no_extinction_coeff")
+    if can_deredden and system != "JY" and effective_mag is not None:
+        effective_mag = effective_mag - float(av) * float(bandpass.av_coeff)
     calibration_source = "native_catalog_flux"
-    input_flux_scale = 1.0
     if system == "JY":
         flux_nu = _safe_float(flux_nu_jy)
         if flux_nu is None:
             flux_nu = effective_mag
+        if flux_nu is not None:
+            flux_nu = float(flux_nu) * input_flux_scale
         effective_mag = None
     else:
         # An explicitly supplied response view (e.g. the fitter's in-memory
@@ -1120,13 +1126,14 @@ def _row_from_bandpass(
             # A stored v3 value is the exact observed normalization.  Apply
             # extinction as a multiplicative correction to that value instead
             # of rebuilding it from a potentially different Vega zero point.
-            if dereddened and av is not None and bandpass.av_coeff is not None:
-                input_flux_scale = 10.0 ** (0.4 * float(av) * float(bandpass.av_coeff))
+            if can_deredden:
                 flux_nu = float(flux_nu) * input_flux_scale
         elif effective_mag is not None and zero_point is not None and zero_point > 0:
             flux_nu = float(zero_point) * 10.0 ** (-0.4 * effective_mag)
         else:
             flux_nu = _safe_float(flux_nu_jy)
+            if flux_nu is not None and can_deredden:
+                flux_nu = float(flux_nu) * input_flux_scale
     if flux_nu is None:
         return None
     wavelength = _wavelength_semantics(metadata, bandpass)
