@@ -69,6 +69,7 @@ The notebooks are grouped by workflow purpose. Keep new notebooks in the shallow
 - `analyze_microlensing_results.ipynb`: comprehensive EDA for microlensing result products.
 - `bayes_output_analysis.ipynb`: EDA for Bayesian light-curve excursion outputs.
 - `contamination_analysis.ipynb`: GP residual analysis for a possible contaminating source.
+- `july1_open_cluster_membership_enrichment.ipynb`: exact-ID UCC/Hunt--Reffert coverage, overlap, matched enrichment, balance, sky, probability, and age diagnostics with publication exports.
 - `july1_triggered_dip_systematics.ipynb`: July 1 best-dip night, physical-distance, sky-pair, field, and camera systematics audit with stratified permutation nulls and optional raw event-window attribution proxies.
 - `march18_anomalous_fields.ipynb`: March 18 anomalous ASAS-SN fields audit.
 

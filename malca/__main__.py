@@ -32,6 +32,8 @@ COMMAND_GROUPS = {
     "gaia-binary": "Enrichment",
     "gaia-id-repair": "Discovery",
     "gaia-banyan-backfill": "Discovery",
+    "open-cluster-download": "Enrichment",
+    "open-cluster-backfill": "Enrichment",
     "characterize": "Discovery",
     "classify": "Discovery",
     "review": "Review",
@@ -55,6 +57,7 @@ COMMAND_GROUPS = {
     "audit": "Evaluation",
     "bad-photometry": "Evaluation",
     "false-positive": "Evaluation",
+    "open-cluster-test": "Evaluation",
     "neighbors": "Enrichment",
     "spectra": "Enrichment",
     "vsx-filter": "Enrichment",
@@ -144,9 +147,9 @@ def main():
         "nuclear-injection",
         "detection-rate", "validate", "stv-plot", "audit",
         "bad-photometry",
-        "stv-events", "lc-plot", "gaia-fetch", "gaia-binary", "gaia-id-repair", "gaia-banyan-backfill", "characterize", "classify", "stv-filter", "stv-tag",
+        "stv-events", "lc-plot", "gaia-fetch", "gaia-binary", "gaia-id-repair", "gaia-banyan-backfill", "open-cluster-download", "open-cluster-backfill", "characterize", "classify", "stv-filter", "stv-tag",
         "attrition", "review", "review-tui", "review-refresh", "review-merge", "review-sync", "review-taxonomy", "review-maint",
-        "neighbors", "spectra", "false-positive", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "sed-image-photometry", "sed-r24-inputs", "sed-fit", "sed-bandpasses", "sed-excess", "nuclear-context",
+        "neighbors", "spectra", "false-positive", "open-cluster-test", "vsx-filter", "vsx-crossmatch", "external-lcs", "multi-survey-features", "feature-layers", "migrate", "sed-photometry", "sed-image-photometry", "sed-r24-inputs", "sed-fit", "sed-bandpasses", "sed-excess", "nuclear-context",
         "vetting",
         "ltv-pipeline", "ltv-injection", "ltv-new",
         "dev", "malcat-train",
@@ -201,6 +204,10 @@ def main():
             _run_module_main("malca.catalogs.gaia_id_repair", remaining)
         elif command == "gaia-banyan-backfill":
             _run_module_main("malca.catalogs.gaia_banyan_backfill", remaining)
+        elif command == "open-cluster-download":
+            _run_module_main("malca.catalogs.open_cluster_download", remaining)
+        elif command == "open-cluster-backfill":
+            _run_module_main("malca.catalogs.open_cluster_backfill", remaining)
         elif command == "characterize":
             _run_module_main("malca.enrichment.characterize", remaining)
         elif command == "classify":
@@ -235,6 +242,8 @@ def main():
             fp = importlib.import_module("malca.evaluation.false_positive")
             sys.argv = [sys.argv[0]] + remaining
             fp.main()
+        elif command == "open-cluster-test":
+            _run_module_main("malca.evaluation.open_cluster_enrichment", remaining)
         elif command == "vsx-filter":
             sys.argv = [sys.argv[0]] + remaining
             vsx_filter = importlib.import_module("malca.vsx.filter")
@@ -311,6 +320,8 @@ def main():
     subparsers.add_parser("gaia-fetch", description="Download Gaia DR3 data for candidates (AIP TAP mirror)")
     subparsers.add_parser("gaia-id-repair", description="Canonicalize stale Gaia DR2 IDs in review artifacts")
     subparsers.add_parser("gaia-banyan-backfill", description="Backfill Gaia astrometry and BANYAN Sigma for review cohorts")
+    subparsers.add_parser("open-cluster-download", description="Download pinned UCC/Hunt-Reffert bulk catalogues")
+    subparsers.add_parser("open-cluster-backfill", description="Join pinned UCC/Hunt-Reffert members by exact Gaia DR3 ID")
     subparsers.add_parser("characterize", description="Characterize candidates with external catalogs")
     subparsers.add_parser("classify", description="Classify candidates by variability type")
     # Review
@@ -341,6 +352,7 @@ def main():
     subparsers.add_parser("audit", description="Audit result tables, LTV status, and baseline comparison commands")
     subparsers.add_parser("bad-photometry", description="Train/apply v1-v2 bad-photometry dropout models")
     subparsers.add_parser("false-positive", description="Run false-positive contaminant benchmark")
+    subparsers.add_parser("open-cluster-test", description="Run matched dipper open-cluster membership enrichment tests")
     # Enrichment
     subparsers.add_parser("neighbors", description="Run bulk nearest-neighbor enrichment")
     subparsers.add_parser("spectra", description="Run bulk spectra-availability enrichment")

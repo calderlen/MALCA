@@ -1428,12 +1428,54 @@ def _render_vetting_banner(payload: dict | None, radius_arcsec: float = 30.0) ->
         sep_str = f" ({sfr_sep:.1f}')" if sfr_sep and not pd.isna(sfr_sep) else ""
         cards.append(_cell("Nearest SFR", f"{sfr_name}{sep_str}", hit=True))
 
-    # Cluster cell
-    cluster_name = payload.get('cluster_name')
-    if _ok(cluster_name):
-        cluster_dist = payload.get('cluster_dist_pc')
-        d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
-        cards.append(_cell("Cluster", f"{cluster_name}{d_str}", hit=True))
+    # Exact-ID cluster membership is distinct from nearest-cluster proximity.
+    ucc_cluster = payload.get('ucc_cluster')
+    if _ok(ucc_cluster):
+        ucc_prob = payload.get('ucc_pmem')
+        ucc_good = _coerce_bool(payload.get('ucc_good_member'))
+        prob_str = (
+            f" (P={float(ucc_prob):.0%})"
+            if ucc_prob is not None and not pd.isna(ucc_prob)
+            else ""
+        )
+        cards.append(
+            _cell(
+                "UCC member" if ucc_good else "UCC listed",
+                f"{ucc_cluster}{prob_str}",
+                hit=bool(ucc_good),
+            )
+        )
+    else:
+        cluster_name = payload.get('cluster_name')
+        if _ok(cluster_name):
+            cluster_dist = payload.get('cluster_dist_pc')
+            d_str = f" ({cluster_dist:.0f} pc)" if cluster_dist and not pd.isna(cluster_dist) else ""
+            cards.append(_cell("Legacy cluster", f"{cluster_name}{d_str}", hit=True))
+
+    hr24_cluster = payload.get('hr24_cluster')
+    if _ok(hr24_cluster):
+        hr24_prob = payload.get('hr24_pmem')
+        high_quality = _coerce_bool(payload.get('hr24_high_quality_member'))
+        bound = _coerce_bool(payload.get('hr24_bound_member'))
+        quality = "high-quality bound" if high_quality else "bound" if bound else "listed"
+        prob_str = (
+            f", P={float(hr24_prob):.0%}"
+            if hr24_prob is not None and not pd.isna(hr24_prob)
+            else ""
+        )
+        cards.append(_cell("H&R cluster", f"{hr24_cluster} ({quality}{prob_str})", hit=bool(bound)))
+
+    nearest_cluster = payload.get('ucc_nearest_cluster')
+    if _ok(nearest_cluster):
+        nearest_sep = payload.get('ucc_nearest_sep_arcmin')
+        nearest_ratio = payload.get('ucc_nearest_sep_r50')
+        diagnostics = []
+        if nearest_sep is not None and not pd.isna(nearest_sep):
+            diagnostics.append(f"{float(nearest_sep):.1f}'")
+        if nearest_ratio is not None and not pd.isna(nearest_ratio):
+            diagnostics.append(f"{float(nearest_ratio):.2f} r50")
+        suffix = f" ({', '.join(diagnostics)})" if diagnostics else ""
+        cards.append(_cell("Nearest UCC (context)", f"{nearest_cluster}{suffix}", hit=False))
 
     # Separate cloud-environment overlap from stellar-association membership.
     environment_matches = payload.get('sfr_environment_matches')

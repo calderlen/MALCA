@@ -40,6 +40,9 @@ from malca.catalogs.evidence import (
 )
 from malca.ltv.multi_survey import LTV_MS_FEATURE_COLUMN_SPECS
 from malca.enrichment.multi_survey_features import MS_FEATURE_COLUMN_SPECS
+from malca.enrichment.open_clusters import (
+    OPEN_CLUSTER_OUTPUT_COLUMNS as OPEN_CLUSTER_REVIEW_COLUMNS,
+)
 from malca.microlensing.schema import MICROLENSING_JOINT_COLUMN_SPECS
 from malca.review.filter_schema import REVIEW_FILTER_COLUMN_TYPES
 from malca.review.dipper_recurrence import (
@@ -72,7 +75,7 @@ SQLITE_BUSY_TIMEOUT_MS = 30_000
 REVIEW_CANDIDATES_SCHEMA_KEY = "review_candidates_schema"
 REVIEW_CANDIDATES_SCHEMA_VERSION = "flat_v1"
 REVIEW_DB_SCHEMA_KEY = "review_db_schema_version"
-REVIEW_DB_SCHEMA_VERSION = 23
+REVIEW_DB_SCHEMA_VERSION = 24
 REVIEW_CONTENT_REVISION_SCOPE = "candidates_reviews"
 STATUS_OPTIONS = ["unreviewed", "reviewed", "needs_followup"]
 EVENT_CLASS_OPTIONS = [
@@ -1148,6 +1151,81 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("sfr_sep_arcmin",           "REAL",    "float"),
     ("cluster_name",             "TEXT",    "text"),
     ("cluster_membership_prob",  "REAL",    "float"),
+    ("cluster_age_myr",          "REAL",    "float"),
+    ("cluster_dist_pc",          "REAL",    "float"),
+    ("cluster_catalog",          "TEXT",    "text"),
+    ("open_cluster_match_version", "TEXT",  "text"),
+    ("open_cluster_gaia_id",     "TEXT",    "text"),
+    ("ucc_match_status",         "TEXT",    "select"),
+    ("ucc_catalog_release",      "TEXT",    "text"),
+    ("ucc_catalog_doi",          "TEXT",    "text"),
+    ("ucc_n_matches",            "INTEGER", "int"),
+    ("ucc_listed_member",        "INTEGER", "bool"),
+    ("ucc_p50_member",           "INTEGER", "bool"),
+    ("ucc_good_cluster",         "INTEGER", "bool"),
+    ("ucc_good_member",          "INTEGER", "bool"),
+    ("ucc_cluster",              "TEXT",    "text"),
+    ("ucc_pmem",                 "REAL",    "float"),
+    ("ucc_n_members",            "INTEGER", "int"),
+    ("ucc_r50_arcmin",           "REAL",    "float"),
+    ("ucc_core_radius_pc",       "REAL",    "float"),
+    ("ucc_cluster_ra_deg",       "REAL",    "float"),
+    ("ucc_cluster_dec_deg",      "REAL",    "float"),
+    ("ucc_cluster_parallax_mas", "REAL",    "float"),
+    ("ucc_cluster_pmra_masyr",   "REAL",    "float"),
+    ("ucc_cluster_pmdec_masyr",  "REAL",    "float"),
+    ("ucc_cluster_rv_kms",       "REAL",    "float"),
+    ("ucc_distance_kpc",         "REAL",    "float"),
+    ("ucc_distance_std",         "REAL",    "float"),
+    ("ucc_av_mag",               "REAL",    "float"),
+    ("ucc_av_std",               "REAL",    "float"),
+    ("ucc_age_myr",              "REAL",    "float"),
+    ("ucc_age_std",              "REAL",    "float"),
+    ("ucc_feh_dex",              "REAL",    "float"),
+    ("ucc_feh_std",              "REAL",    "float"),
+    ("ucc_mass_msun",            "REAL",    "float"),
+    ("ucc_mass_std",             "REAL",    "float"),
+    ("ucc_c3",                   "TEXT",    "text"),
+    ("ucc_pdup",                 "REAL",    "float"),
+    ("ucc_uti",                  "REAL",    "float"),
+    ("ucc_bad_oc",               "INTEGER", "bool"),
+    ("ucc_nearest_cluster",      "TEXT",    "text"),
+    ("ucc_nearest_sep_arcmin",   "REAL",    "float"),
+    ("ucc_nearest_r50_arcmin",   "REAL",    "float"),
+    ("ucc_nearest_sep_r50",      "REAL",    "float"),
+    ("ucc_nearest_age_myr",      "REAL",    "float"),
+    ("ucc_nearest_distance_kpc", "REAL",    "float"),
+    ("ucc_nearest_uti",          "REAL",    "float"),
+    ("ucc_nearest_dparallax_mas", "REAL",   "float"),
+    ("ucc_nearest_dpmra_masyr",  "REAL",    "float"),
+    ("ucc_nearest_dpmdec_masyr", "REAL",    "float"),
+    ("hr24_match_status",        "TEXT",    "select"),
+    ("hr24_catalog_id",          "TEXT",    "text"),
+    ("hr24_n_matches",           "INTEGER", "int"),
+    ("hr24_listed_member",       "INTEGER", "bool"),
+    ("hr24_p50_member",          "INTEGER", "bool"),
+    ("hr24_bound_member",        "INTEGER", "bool"),
+    ("hr24_high_quality_member", "INTEGER", "bool"),
+    ("hr24_cluster",             "TEXT",    "text"),
+    ("hr24_pmem",                "REAL",    "float"),
+    ("hr24_cluster_type",        "TEXT",    "select"),
+    ("hr24_cst",                 "REAL",    "float"),
+    ("hr24_cmd_class_median",    "REAL",    "float"),
+    ("hr24_n_members",           "INTEGER", "int"),
+    ("hr24_r50_deg",             "REAL",    "float"),
+    ("hr24_r50_pc",              "REAL",    "float"),
+    ("hr24_cluster_ra_deg",      "REAL",    "float"),
+    ("hr24_cluster_dec_deg",     "REAL",    "float"),
+    ("hr24_cluster_parallax_mas", "REAL",   "float"),
+    ("hr24_cluster_pmra_masyr",  "REAL",    "float"),
+    ("hr24_cluster_pmdec_masyr", "REAL",    "float"),
+    ("hr24_distance_pc",         "REAL",    "float"),
+    ("hr24_log_age_yr",          "REAL",    "float"),
+    ("hr24_prob_jacobi",         "REAL",    "float"),
+    ("hr24_mass_jacobi_msun",    "REAL",    "float"),
+    ("hr24_mass_total_msun",     "REAL",    "float"),
+    ("hr24_inside_jacobi_radius", "INTEGER", "bool"),
+    ("hr24_inside_tidal_radius", "INTEGER", "bool"),
     # -- nuclear context and scoring --
     ("gaia_parallax_snr",        "REAL",    "float"),
     ("gaia_pm_snr",              "REAL",    "float"),
@@ -1447,7 +1525,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     # -- compact multi-survey microlensing fit summary --
     *MICROLENSING_JOINT_COLUMN_SPECS,
     # -- vetting details: other --
-    ("cluster_dist_pc",          "REAL",    "float"),
     ("iphas_ha_excess",          "REAL",    "float"),
     ("vphas_ha_excess",          "REAL",    "float"),
     # -- light curve basics --
@@ -4087,7 +4164,7 @@ VETTING_COLUMNS = [
     "nearby_vsx_dipper_contaminant", "nearby_vsx_dipper_class",
     "nearby_vsx_dipper_sep_arcsec", "nearby_vsx_dipper_period",
     "sfr_name", "sfr_sep_arcmin",
-    "cluster_name", "cluster_dist_pc",
+    *OPEN_CLUSTER_REVIEW_COLUMNS,
     "banyan_best_assoc", "banyan_field_prob", "banyan_ya_prob",
     "banyan_best_assoc_prob", "banyan_probabilities_json", "banyan_input_mode",
     "banyan_status", "banyan_error", "banyan_version", "banyan_adapter_version",

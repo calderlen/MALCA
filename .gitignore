@@ -77,3 +77,4 @@ malca/notebooks/**/output/
 
 .env
 data/dustmaps/
+/data/external/open_clusters/
