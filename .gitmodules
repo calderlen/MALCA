@@ -1,6 +1,6 @@
 [submodule "external/dustycult"]
 	path = external/dustycult
-	url = git@github.com:calderlen/dustycult.git
+	url = git@github.com:calderlen/DustyCult.git
 [submodule "external/malcat"]
 	path = external/malcat
 	url = git@github.com:calderlen/malcat.git
