@@ -12,6 +12,7 @@ from malca.meta_analysis.ml.plotting import (
     apply_ml_plot_style,
     plot_fraction_count_heatmap,
     row_fraction_frame,
+    suppress_categorical_tick_marks,
 )
 
 
@@ -55,6 +56,10 @@ def test_fraction_count_heatmap_uses_two_line_cell_annotations() -> None:
     ]
     assert ax.texts[0].get_position()[1] < ax.texts[1].get_position()[1]
     assert ax.texts[0].get_fontsize() > ax.texts[1].get_fontsize()
+    for axis in (ax.xaxis, ax.yaxis):
+        for tick in [*axis.get_major_ticks(), *axis.get_minor_ticks()]:
+            assert not tick.tick1line.get_visible()
+            assert not tick.tick2line.get_visible()
     plt.close(fig)
 
 
@@ -66,6 +71,39 @@ def test_apply_ml_plot_style_uses_computer_modern_bright() -> None:
         assert "CMU Bright" in plt.rcParams["font.sans-serif"]
         assert plt.rcParams["text.usetex"] is True
         assert r"\usepackage{cmbright}" in plt.rcParams["text.latex.preamble"]
+
+
+def test_suppress_categorical_tick_marks_preserves_labels() -> None:
+    fig, ax = plt.subplots()
+    ax.set_xticks([0, 1], labels=["first", "second"])
+    ax.set_yticks([0, 1], labels=["upper", "lower"])
+    ax.minorticks_on()
+    ax.tick_params(
+        axis="both",
+        which="both",
+        bottom=True,
+        top=True,
+        left=True,
+        right=True,
+    )
+
+    returned_ax = suppress_categorical_tick_marks(ax, x=True, y=True)
+    fig.canvas.draw()
+
+    assert returned_ax is ax
+    assert [label.get_text() for label in ax.get_xticklabels()] == [
+        "first",
+        "second",
+    ]
+    assert [label.get_text() for label in ax.get_yticklabels()] == [
+        "upper",
+        "lower",
+    ]
+    for axis in (ax.xaxis, ax.yaxis):
+        for tick in [*axis.get_major_ticks(), *axis.get_minor_ticks()]:
+            assert not tick.tick1line.get_visible()
+            assert not tick.tick2line.get_visible()
+    plt.close(fig)
 
 
 def test_feature_importance_plots_are_capped_at_ten_features() -> None:

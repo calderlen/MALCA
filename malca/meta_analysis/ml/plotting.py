@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib.axes import Axes
+from matplotlib.ticker import NullLocator
 
 from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
 
@@ -27,6 +28,20 @@ def apply_ml_plot_style() -> None:
     sns.set_context("notebook")
     # Apply this last because seaborn also changes several Matplotlib rcParams.
     plt.rcParams.update(ML_PLOT_STYLE)
+
+
+def suppress_categorical_tick_marks(
+    ax: Axes, *, x: bool = False, y: bool = False
+) -> Axes:
+    """Hide tick marks on categorical axes while preserving their labels."""
+
+    if x:
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.tick_params(axis="x", which="both", bottom=False, top=False)
+    if y:
+        ax.yaxis.set_minor_locator(NullLocator())
+        ax.tick_params(axis="y", which="both", left=False, right=False)
+    return ax
 
 
 def row_fraction_frame(counts: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
@@ -120,4 +135,5 @@ def plot_fraction_count_heatmap(
                 color=color,
                 fontsize=count_fontsize,
             )
+    suppress_categorical_tick_marks(ax, x=True, y=True)
     return ax
