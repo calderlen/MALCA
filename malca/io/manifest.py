@@ -209,7 +209,9 @@ def iter_light_curve_entries(
         idx_dir = index_root / mag_bin
         if not idx_dir.exists():
             raise FileNotFoundError(f"Missing index directory for requested mag bin {mag_bin}: {idx_dir}")
-        csv_paths = sorted(idx_dir.glob("index*.csv"))
+        csv_paths = sorted(
+            path for path in idx_dir.glob("index*.csv") if path.name != "index.csv"
+        )
         if not csv_paths:
             raise FileNotFoundError(f"No index CSVs found for requested mag bin {mag_bin}: {idx_dir}")
 

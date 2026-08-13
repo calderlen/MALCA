@@ -126,3 +126,41 @@ def test_hierarchical_manifest_rejects_source_mapped_to_two_locations(tmp_path: 
             id_column="asas_sn_id",
             show_progress=False,
         )
+
+
+def test_hierarchical_manifest_ignores_aggregate_index_csv(tmp_path: Path) -> None:
+    mag_bin = "12_12.5"
+    index_dir = tmp_path / "indexes" / mag_bin
+    lc_root = tmp_path / "lcs"
+    index_dir.mkdir(parents=True)
+
+    pd.DataFrame({"asas_sn_id": ["1001", "1002"]}).to_csv(
+        index_dir / "index.csv",
+        index=False,
+    )
+    pd.DataFrame({"asas_sn_id": ["1001"]}).to_csv(
+        index_dir / "index0.csv",
+        index=False,
+    )
+    pd.DataFrame({"asas_sn_id": ["1002"]}).to_csv(
+        index_dir / "index1.csv",
+        index=False,
+    )
+    _write_mock_lc(lc_root / mag_bin / "lc0_cal" / "1001.dat3")
+    _write_mock_lc(lc_root / mag_bin / "lc1_cal" / "1002.dat3")
+
+    manifest = build_manifest(
+        tmp_path / "indexes",
+        lc_root,
+        mag_bins=[mag_bin],
+        id_column="asas_sn_id",
+        show_progress=False,
+    )
+
+    assert manifest["source_id"].tolist() == ["1001", "1002"]
+    assert manifest["index_num"].tolist() == [0, 1]
+    assert manifest["index_csv"].map(lambda value: Path(value).name).tolist() == [
+        "index0.csv",
+        "index1.csv",
+    ]
+    assert manifest["dat_exists"].tolist() == [True, True]
