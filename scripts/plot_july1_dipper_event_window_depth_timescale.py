@@ -23,9 +23,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.lines import Line2D
+from matplotlib.ticker import (
+    FixedLocator,
+    FuncFormatter,
+    LogLocator,
+    MultipleLocator,
+    NullFormatter,
+)
 
-from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
+from malca.plotting.lightcurve_publication import (
+    FIG_SINGLE_COL_WIDTH,
+    PUBLICATION_STYLE,
+)
 from malca.stv.dimming_window import DIMMING_WINDOW_METHOD_VERSION
 
 
@@ -48,11 +57,30 @@ RESOLVED_COLOR = "#0072B2"
 INTERVAL_COLOR = "#E69F00"
 LIMIT_COLOR = "#009E73"
 NEUTRAL_COLOR = "#333333"
+BLACK_COLOR = "#000000"
+
+SINGLE_COLUMN_FIGURE_SIZE = (FIG_SINGLE_COL_WIDTH, 3.15)
+SINGLE_COLUMN_STYLE = {
+    "font.size": 9.0,
+    "axes.labelsize": 11.0,
+    "axes.linewidth": 0.9,
+    "xtick.labelsize": 9.0,
+    "ytick.labelsize": 9.0,
+    "xtick.major.size": 5.0,
+    "ytick.major.size": 5.0,
+    "xtick.major.width": 0.9,
+    "ytick.major.width": 0.9,
+    "xtick.minor.size": 2.7,
+    "ytick.minor.size": 2.7,
+    "xtick.minor.width": 0.7,
+    "ytick.minor.width": 0.7,
+}
 
 
 plt.rcParams.update(
     {
         **PUBLICATION_STYLE,
+        **SINGLE_COLUMN_STYLE,
         "axes.formatter.use_mathtext": True,
     }
 )
@@ -64,6 +92,7 @@ def _apply_plot_style(style: str) -> str | None:
         plt.rcParams.update(
             {
                 **PUBLICATION_STYLE,
+                **SINGLE_COLUMN_STYLE,
                 "axes.formatter.use_mathtext": True,
             }
         )
@@ -74,7 +103,8 @@ def _apply_plot_style(style: str) -> str | None:
         style_path = Path(smplotlib.__file__).resolve().parent / "smplot.mplstyle"
         plt.style.use(style_path)
         smplotlib.set_style()
-        plt.rcParams["savefig.bbox"] = "tight"
+        plt.rcParams.update(SINGLE_COLUMN_STYLE)
+        plt.rcParams["savefig.bbox"] = None
         return str(getattr(smplotlib, "__version__", "unknown"))
     raise ValueError(f"Unsupported plot style: {style}")
 
@@ -155,6 +185,10 @@ def _load_plot_values(review_db: Path, metrics_csv: Path) -> pd.DataFrame:
     required = {
         "tau_peak",
         "delta_mag_peak",
+        "dimming_complex_duration_lower_days",
+        "dimming_complex_duration_upper_days",
+        "dimming_complex_duration_plot_days",
+        "dimming_complex_is_lower_limit",
         "duration_status",
         "duration_lower_days",
         "duration_upper_days",
@@ -170,6 +204,9 @@ def _load_plot_values(review_db: Path, metrics_csv: Path) -> pd.DataFrame:
     numeric = [
         "tau_peak",
         "delta_mag_peak",
+        "dimming_complex_duration_lower_days",
+        "dimming_complex_duration_upper_days",
+        "dimming_complex_duration_plot_days",
         "duration_lower_days",
         "duration_upper_days",
         "duration_plot_days",
@@ -182,17 +219,35 @@ def _load_plot_values(review_db: Path, metrics_csv: Path) -> pd.DataFrame:
         if column in values:
             values[column] = pd.to_numeric(values[column], errors="coerce")
 
-    values["plot_included"] = (
+    valid_depth = (
         np.isfinite(values["tau_peak"])
         & values["tau_peak"].gt(0)
         & values["tau_peak"].lt(1)
+    )
+    values["fwhm_plot_included"] = (
+        valid_depth
         & np.isfinite(values["duration_lower_days"])
         & values["duration_lower_days"].gt(0)
         & values["duration_status"].ne("measurement_failed")
     )
+    values["full_window_plot_included"] = (
+        valid_depth
+        & np.isfinite(values["dimming_complex_duration_lower_days"])
+        & values["dimming_complex_duration_lower_days"].gt(0)
+    )
+    # Retain the original column as a backwards-compatible alias for the FWHM
+    # product and its summary table.
+    values["plot_included"] = values["fwhm_plot_included"]
     values["plot_x_days"] = values["duration_plot_days"]
     limited = values["duration_is_lower_limit"].eq(True)
     values.loc[limited, "plot_x_days"] = values.loc[limited, "duration_lower_days"]
+    values["full_window_plot_x_days"] = values[
+        "dimming_complex_duration_plot_days"
+    ]
+    full_window_limited = values["dimming_complex_is_lower_limit"].eq(True)
+    values.loc[full_window_limited, "full_window_plot_x_days"] = values.loc[
+        full_window_limited, "dimming_complex_duration_lower_days"
+    ]
     return values
 
 
@@ -220,6 +275,10 @@ def _plot_group(
     *,
     color: str,
     marker: str,
+    facecolor: str | None = None,
+    edgecolor: str = NEUTRAL_COLOR,
+    marker_size: float = 20.0,
+    marker_linewidth: float = 0.4,
     xerr: np.ndarray | None = None,
 ) -> None:
     if rows.empty:
@@ -231,19 +290,20 @@ def _plot_group(
         yerr=_amplitude_yerr(rows),
         fmt="none",
         ecolor=color,
-        elinewidth=0.7,
-        capsize=1.5,
+        elinewidth=0.65,
+        capsize=1.3,
+        capthick=0.65,
         alpha=1.0,
         zorder=2,
     )
     ax.scatter(
         rows["plot_x_days"],
         rows["tau_peak"],
-        s=27,
+        s=marker_size,
         marker=marker,
-        facecolor=color,
-        edgecolor=NEUTRAL_COLOR,
-        linewidth=0.45,
+        facecolor=color if facecolor is None else facecolor,
+        edgecolor=edgecolor,
+        linewidth=marker_linewidth,
         alpha=1.0,
         zorder=3,
     )
@@ -258,104 +318,183 @@ def _mag_to_fractional_depth(delta_mag: np.ndarray | float) -> np.ndarray:
     return 1.0 - np.power(10.0, -0.4 * np.asarray(delta_mag, dtype=float))
 
 
+def _plain_log_decade(value: float, _position: float) -> str:
+    """Format the selected log-axis decades as compact plain numbers."""
+    for tick in (1.0, 10.0, 100.0, 1000.0):
+        if np.isclose(value, tick):
+            return str(int(tick))
+    return ""
+
+
+def _compact_decimal_tick(value: float, _position: float) -> str:
+    """Keep zero compact while retaining one decimal elsewhere."""
+    return "0" if np.isclose(value, 0.0) else f"{value:.1f}"
+
+
 def _plot(
     values: pd.DataFrame,
     output_dir: Path,
     *,
     plot_style: str,
-) -> tuple[Path, Path]:
-    plotted = values.loc[values["plot_included"]].copy()
-    resolved = plotted.loc[plotted["duration_status"].eq("resolved")]
-    interval = plotted.loc[plotted["duration_status"].eq("interval_censored")]
-    limited = plotted.loc[plotted["duration_is_lower_limit"].eq(True)]
+    x_axis: str,
+) -> Path:
+    if x_axis == "fwhm":
+        plotted = values.loc[values["fwhm_plot_included"]].copy()
+        x_column = "plot_x_days"
+        upper_column = "duration_upper_days"
+        resolved = plotted.loc[plotted["duration_status"].eq("resolved")]
+        interval = plotted.loc[plotted["duration_status"].eq("interval_censored")]
+        limited = plotted.loc[plotted["duration_is_lower_limit"].eq(True)]
 
-    resolved_xerr = np.zeros((2, len(resolved)), dtype=float)
-    reported = resolved.get(
-        "duration_mc_reporting_status",
-        pd.Series("", index=resolved.index, dtype=object),
-    ).eq("reported_resolved")
-    if reported.any():
-        resolved_xerr[0, reported.to_numpy()] = pd.to_numeric(
-            resolved.loc[reported, "duration_mc_err_minus"], errors="coerce"
-        ).fillna(0.0)
-        resolved_xerr[1, reported.to_numpy()] = pd.to_numeric(
-            resolved.loc[reported, "duration_mc_err_plus"], errors="coerce"
-        ).fillna(0.0)
+        resolved_xerr = np.zeros((2, len(resolved)), dtype=float)
+        reported = resolved.get(
+            "duration_mc_reporting_status",
+            pd.Series("", index=resolved.index, dtype=object),
+        ).eq("reported_resolved")
+        if reported.any():
+            resolved_xerr[0, reported.to_numpy()] = pd.to_numeric(
+                resolved.loc[reported, "duration_mc_err_minus"], errors="coerce"
+            ).fillna(0.0)
+            resolved_xerr[1, reported.to_numpy()] = pd.to_numeric(
+                resolved.loc[reported, "duration_mc_err_plus"], errors="coerce"
+            ).fillna(0.0)
 
-    interval_x = interval["plot_x_days"].to_numpy(float)
-    interval_xerr = np.vstack(
-        [
-            np.maximum(
-                interval_x - interval["duration_lower_days"].to_numpy(float),
-                0.0,
-            ),
-            np.maximum(
-                interval["duration_upper_days"].to_numpy(float) - interval_x,
-                0.0,
-            ),
-        ]
-    )
+        interval_x = interval[x_column].to_numpy(float)
+        interval_xerr = np.vstack(
+            [
+                np.maximum(
+                    interval_x
+                    - interval["duration_lower_days"].to_numpy(float),
+                    0.0,
+                ),
+                np.maximum(
+                    interval["duration_upper_days"].to_numpy(float) - interval_x,
+                    0.0,
+                ),
+            ]
+        )
+        xlabel = r"$T_{\rm window,FWHM}$ [d]"
+        stem_suffix = "fwhm_depth_timescale"
+        resolved_color = RESOLVED_COLOR
+        resolved_facecolor = RESOLVED_COLOR
+        resolved_edgecolor = NEUTRAL_COLOR
+        limited_color = LIMIT_COLOR
+        limited_facecolor = LIMIT_COLOR
+        limited_edgecolor = NEUTRAL_COLOR
+        resolved_marker_size = 20.0
+        limited_marker_size = 20.0
+        limited_marker_linewidth = 0.4
+    elif x_axis == "full_window":
+        plotted = values.loc[values["full_window_plot_included"]].copy()
+        x_column = "full_window_plot_x_days"
+        upper_column = "dimming_complex_duration_upper_days"
+        full_window_limited = plotted["dimming_complex_is_lower_limit"].eq(True)
+        resolved = plotted.loc[~full_window_limited]
+        interval = plotted.iloc[0:0]
+        limited = plotted.loc[full_window_limited]
+        resolved_xerr = None
+        interval_xerr = None
+        xlabel = r"$T_{\rm window}$ [d]"
+        stem_suffix = "full_window_depth_timescale"
+        resolved_color = BLACK_COLOR
+        resolved_facecolor = BLACK_COLOR
+        resolved_edgecolor = BLACK_COLOR
+        limited_color = BLACK_COLOR
+        # A white face preserves the hollow appearance on the white panel while
+        # masking the error-bar segment underneath the triangle.
+        limited_facecolor = "white"
+        limited_edgecolor = BLACK_COLOR
+        resolved_marker_size = 12.0
+        limited_marker_size = 15.0
+        limited_marker_linewidth = 0.55
+    else:
+        raise ValueError(f"Unsupported x-axis definition: {x_axis}")
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.2), layout="constrained")
+    fig, ax = plt.subplots(figsize=SINGLE_COLUMN_FIGURE_SIZE, layout="constrained")
     fig.patch.set_facecolor("white")
     ax.set_facecolor("white")
+    ax.set_box_aspect(1.0)
 
+    resolved_for_plot = resolved.copy()
+    resolved_for_plot["plot_x_days"] = resolved_for_plot[x_column]
     _plot_group(
         ax,
-        resolved,
-        color=RESOLVED_COLOR,
+        resolved_for_plot,
+        color=resolved_color,
         marker="o",
+        facecolor=resolved_facecolor,
+        edgecolor=resolved_edgecolor,
+        marker_size=resolved_marker_size,
         xerr=resolved_xerr,
     )
+    interval_for_plot = interval.copy()
+    interval_for_plot["plot_x_days"] = interval_for_plot[x_column]
     _plot_group(
         ax,
-        interval,
+        interval_for_plot,
         color=INTERVAL_COLOR,
         marker="D",
         xerr=interval_xerr,
     )
-    _plot_group(ax, limited, color=LIMIT_COLOR, marker=">")
-    for row in limited.itertuples(index=False):
-        start = float(row.plot_x_days)
-        stop = 1.42 * start
-        ax.annotate(
-            "",
-            xy=(stop, float(row.tau_peak)),
-            xytext=(start, float(row.tau_peak)),
-            arrowprops={
-                "arrowstyle": "-|>",
-                "color": LIMIT_COLOR,
-                "lw": 0.75,
-                "mutation_scale": 7.0,
-                "shrinkA": 2.0,
-                "shrinkB": 0.0,
-                "alpha": 0.72,
-            },
-            zorder=2.5,
-        )
+    limited_for_plot = limited.copy()
+    limited_for_plot["plot_x_days"] = limited_for_plot[x_column]
+    _plot_group(
+        ax,
+        limited_for_plot,
+        color=limited_color,
+        marker=">",
+        facecolor=limited_facecolor,
+        edgecolor=limited_edgecolor,
+        marker_size=limited_marker_size,
+        marker_linewidth=limited_marker_linewidth,
+    )
 
     xmax = 1.75 * float(
         np.nanmax(
             [
-                plotted["plot_x_days"].max(),
-                plotted["duration_upper_days"].max(skipna=True),
+                plotted[x_column].max(),
+                plotted[upper_column].max(skipna=True),
             ]
         )
     )
     ax.set_xscale("log")
-    ax.set_xlim(1.0, max(1500.0, xmax))
+    ax.set_xlim(0.8, max(1500.0, xmax))
+    ax.xaxis.set_major_locator(FixedLocator([1.0, 10.0, 100.0, 1000.0]))
+    ax.xaxis.set_major_formatter(FuncFormatter(_plain_log_decade))
+    ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=(2.0, 5.0)))
+    ax.xaxis.set_minor_formatter(NullFormatter())
     fractional_depth_at_one_mag = float(_mag_to_fractional_depth(1.0))
     ax.set_ylim(0.0, fractional_depth_at_one_mag)
-    ax.set_xlabel(r"$T_{\rm window,FWHM}$ [d]", fontsize=14)
-    ax.set_ylabel(r"$\delta$", fontsize=14)
+    ax.yaxis.set_major_locator(MultipleLocator(0.1))
+    ax.yaxis.set_minor_locator(MultipleLocator(0.05))
+    ax.yaxis.set_major_formatter(FuncFormatter(_compact_decimal_tick))
+    ax.set_xlabel(xlabel, fontsize=11, labelpad=2)
+    ax.set_ylabel(r"$\delta$", fontsize=11, labelpad=2)
     ax.grid(visible=False, which="both", axis="both")
-    ax.tick_params(which="both", direction="in", top=True, right=False)
+    ax.tick_params(
+        which="major",
+        direction="in",
+        top=True,
+        right=False,
+        labelsize=9,
+        length=5.0,
+        width=0.9,
+        pad=2,
+    )
+    ax.tick_params(
+        which="minor",
+        direction="in",
+        top=True,
+        right=False,
+        length=2.7,
+        width=0.7,
+    )
 
     secondary = ax.secondary_yaxis(
         "right",
         functions=(_fractional_depth_to_mag, _mag_to_fractional_depth),
     )
-    secondary.set_ylabel(r"$\Delta m$ [mag]", fontsize=12)
+    secondary.set_ylabel(r"$\Delta m$ [mag]", fontsize=10, labelpad=3)
     major_mag_ticks = np.linspace(0.0, 1.0, 6)
     minor_mag_ticks = np.asarray(
         [
@@ -367,8 +506,25 @@ def _plot(
     )
     secondary.set_yticks(major_mag_ticks)
     secondary.set_yticks(minor_mag_ticks, minor=True)
-    secondary.tick_params(axis="y", which="minor", right=True, direction="in")
-    secondary.tick_params(axis="y", which="major", right=True, direction="in", pad=4)
+    secondary.yaxis.set_major_formatter(FuncFormatter(_compact_decimal_tick))
+    secondary.tick_params(
+        axis="y",
+        which="minor",
+        right=True,
+        direction="in",
+        length=2.7,
+        width=0.7,
+    )
+    secondary.tick_params(
+        axis="y",
+        which="major",
+        right=True,
+        direction="in",
+        labelsize=9,
+        length=5.0,
+        width=0.9,
+        pad=2,
+    )
     for tick_value, tick_label in zip(
         secondary.get_yticks(), secondary.get_yticklabels()
     ):
@@ -377,74 +533,14 @@ def _plot(
             tick_label.set_horizontalalignment("left")
             tick_label.set_y(1.0)
 
-    if plot_style != "smplotlib":
-        legend_handles = [
-            Line2D(
-                [],
-                [],
-                marker="o",
-                linestyle="none",
-                markerfacecolor=RESOLVED_COLOR,
-                markeredgecolor=NEUTRAL_COLOR,
-                markeredgewidth=0.45,
-                markersize=6,
-                label=f"Resolved ({len(resolved)})",
-            ),
-            Line2D(
-                [],
-                [],
-                marker="D",
-                linestyle="-",
-                color=INTERVAL_COLOR,
-                markerfacecolor=INTERVAL_COLOR,
-                markeredgecolor=NEUTRAL_COLOR,
-                markeredgewidth=0.45,
-                linewidth=0.8,
-                markersize=5.5,
-                label=f"Gap-bracketed interval ({len(interval)})",
-            ),
-            Line2D(
-                [],
-                [],
-                marker=">",
-                linestyle="-",
-                color=LIMIT_COLOR,
-                markerfacecolor=LIMIT_COLOR,
-                markeredgecolor=NEUTRAL_COLOR,
-                markeredgewidth=0.45,
-                linewidth=0.8,
-                markersize=6,
-                label=f"Lower limit ({len(limited)})",
-            ),
-        ]
-        unavailable = values.loc[~values["plot_included"]]
-        legend = ax.legend(
-            handles=legend_handles,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 1.01),
-            ncol=3,
-            frameon=True,
-            fontsize=9.0,
-            title=(
-                f"Event-window measurements: {len(plotted)}/{len(values)}"
-                + (f"; unavailable: {len(unavailable)}" if len(unavailable) else "")
-            ),
-            title_fontsize=9.2,
-        )
-        legend.get_frame().set_edgecolor("#bdbdbd")
-        legend.get_frame().set_linewidth(0.7)
-        legend.get_frame().set_alpha(0.95)
-
     suffix = "_smplotlib" if plot_style == "smplotlib" else ""
     stem = output_dir / (
-        "july1_malca_dipper_event_window_fwhm_depth_timescale" + suffix
+        "july1_malca_dipper_event_window_" + stem_suffix + suffix
     )
-    png_path = stem.with_suffix(".png")
     pdf_path = stem.with_suffix(".pdf")
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(pdf_path)
     plt.close(fig)
-    return png_path, pdf_path
+    return pdf_path
 
 
 def _sha256(path: Path) -> str:
@@ -486,10 +582,17 @@ def main() -> None:
 
     style_version = _apply_plot_style(args.plot_style)
     values = _load_plot_values(review_db, metrics_csv)
-    png_path, pdf_path = _plot(
+    fwhm_pdf_path = _plot(
         values,
         output_dir,
         plot_style=args.plot_style,
+        x_axis="fwhm",
+    )
+    full_window_pdf_path = _plot(
+        values,
+        output_dir,
+        plot_style=args.plot_style,
+        x_axis="full_window",
     )
     suffix = "_smplotlib" if args.plot_style == "smplotlib" else ""
     values_path = output_dir / (
@@ -497,8 +600,10 @@ def main() -> None:
     )
     values.to_csv(values_path, index=False)
 
-    plotted = values.loc[values["plot_included"]]
-    unavailable = values.loc[~values["plot_included"]]
+    plotted = values.loc[values["fwhm_plot_included"]]
+    full_window_plotted = values.loc[values["full_window_plot_included"]]
+    unavailable = values.loc[~values["fwhm_plot_included"]]
+    full_window_unavailable = values.loc[~values["full_window_plot_included"]]
     summary = {
         "review_db": str(review_db),
         "event_window_metrics_csv": str(metrics_csv),
@@ -507,6 +612,8 @@ def main() -> None:
         "n_dippers": int(len(values)),
         "n_measured": int(len(plotted)),
         "n_unavailable": int(len(unavailable)),
+        "n_full_window_measured": int(len(full_window_plotted)),
+        "n_full_window_unavailable": int(len(full_window_unavailable)),
         "unavailable_candidate_ids": unavailable["candidate_id"].tolist(),
         "unavailable_errors": dict(
             zip(
@@ -524,10 +631,23 @@ def main() -> None:
         "fwhm_plot_days_min": _json_float(plotted["plot_x_days"].min()),
         "fwhm_plot_days_median": _json_float(plotted["plot_x_days"].median()),
         "fwhm_plot_days_max": _json_float(plotted["plot_x_days"].max()),
+        "full_window_plot_days_min": _json_float(
+            full_window_plotted["full_window_plot_x_days"].min()
+        ),
+        "full_window_plot_days_median": _json_float(
+            full_window_plotted["full_window_plot_x_days"].median()
+        ),
+        "full_window_plot_days_max": _json_float(
+            full_window_plotted["full_window_plot_x_days"].max()
+        ),
         "depth_definition": "tau_peak = 1 - 10**(-0.4 * delta_mag_peak)",
-        "timescale_definition": (
+        "fwhm_timescale_definition": (
             "persistent half-depth FWHM within the selected recovery-anchored "
             "event window; finite gaps are intervals and open sides are lower limits"
+        ),
+        "full_window_timescale_definition": (
+            "full recovery-anchored dimming-complex span; open event-window "
+            "boundaries are lower limits"
         ),
         "dimming_window_method_version": DIMMING_WINDOW_METHOD_VERSION,
         "fwhm_method_version": EXPECTED_FWHM_METHOD_VERSION,
@@ -535,21 +655,50 @@ def main() -> None:
         "plot_style": args.plot_style,
         "smplotlib_version": style_version,
         "rendering": {
+            "figure_size_inches": list(SINGLE_COLUMN_FIGURE_SIZE),
+            "axes_box_aspect": 1.0,
+            "aastex_target": "single_column_square_axes",
+            "axis_label_fontsize_points": 11.0,
+            "tick_label_fontsize_points": 9.0,
+            "secondary_axis_label_fontsize_points": 10.0,
+            "major_tick_length_points": 5.0,
+            "minor_tick_length_points": 2.7,
+            "marker_area_points_squared": 20.0,
+            "fwhm_point_style": {
+                "resolved": "filled_blue_circle",
+                "interval": "filled_orange_diamond",
+                "lower_limit": "filled_green_right_triangle",
+            },
+            "full_window_point_style": {
+                "bounded": "small_filled_black_circle",
+                "lower_limit": "small_hollow_appearance_black_right_triangle",
+            },
+            "full_window_marker_area_points_squared": {
+                "bounded": 12.0,
+                "lower_limit": 15.0,
+            },
+            "full_window_triangle_errorbar_masked_inside_marker": True,
             "point_alpha": 1.0,
             "errorbar_alpha": 1.0,
             "grid": False,
-            "legend": args.plot_style != "smplotlib",
+            "legend": False,
+            "lower_limit_arrows": False,
+            "lower_limit_marker": ">",
             "right_axis_max_mag": 1.0,
             "left_axis_label": "delta",
             "right_axis_label": "Delta m [mag]",
             "right_axis_minor_tick_interval_mag": 0.05,
+            "x_major_tick_labels": ["1", "10", "100", "1000"],
+            "x_minor_ticks_per_decade": [2, 5],
+            "zero_tick_label": "0",
             "primary_ticks_mirrored_on_right": False,
-            "right_axis_major_tick_pad_points": 4,
-            "x_axis_min_days": 1.0,
+            "right_axis_major_tick_pad_points": 2,
+            "x_axis_min_days": 0.8,
             "x_axis_unit": "d",
+            "output_format": "pdf_only",
         },
-        "png": str(png_path),
-        "pdf": str(pdf_path),
+        "fwhm_pdf": str(fwhm_pdf_path),
+        "full_window_pdf": str(full_window_pdf_path),
         "values_csv": str(values_path),
     }
     summary_path = output_dir / (
@@ -561,7 +710,7 @@ def main() -> None:
         json.dump(summary, handle, indent=2, sort_keys=True)
 
     print(
-        f"Wrote Event Window Construction depth-timescale plot for "
+        f"Wrote FWHM and full-window depth-timescale PDFs for "
         f"{len(plotted)}/{len(values)} Dippers with {args.plot_style} style "
         f"to {output_dir}"
     )

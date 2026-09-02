@@ -34,13 +34,20 @@ def payload_ra_dec(payload: dict) -> tuple[float, float] | None:
 def format_j_designation(ra_deg: float, dec_deg: float) -> str:
     """Format IAU-style Jhhmmss±ddmmss designation."""
     coord = SkyCoord(ra=float(ra_deg) * u.deg, dec=float(dec_deg) * u.deg, frame="icrs")
-    ra_h, ra_m, ra_s = coord.ra.hms
-    dec_d, dec_m, dec_s = coord.dec.dms
-    ra_str = f"{int(ra_h):02d}{int(ra_m):02d}{int(round(ra_s)):02d}"
-    dec_sign = "+" if float(dec_deg) >= 0.0 else "-"
-    dec_abs = abs(float(dec_d))
-    dec_str = f"{int(dec_abs):02d}{int(abs(dec_m)):02d}{int(round(abs(dec_s))):02d}"
-    return f"J{ra_str}{dec_sign}{dec_str}"
+    ra_str = coord.ra.to_string(
+        unit=u.hourangle,
+        sep="",
+        precision=0,
+        pad=True,
+    )
+    dec_str = coord.dec.to_string(
+        unit=u.deg,
+        sep="",
+        precision=0,
+        pad=True,
+        alwayssign=True,
+    )
+    return f"J{ra_str}{dec_str}"
 
 
 def format_ra_dec_degrees_label(ra_deg: float, dec_deg: float) -> str:
