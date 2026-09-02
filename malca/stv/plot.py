@@ -61,7 +61,13 @@ from malca.io.lightcurve_io import (
     to_asassn_algorithm_frame,
 )
 from malca.core.utils import clean_lc, filter_bad_cameras as filter_bad_camera_observations
-from malca.core.utils import gaussian, paczynski_kernel, read_skypatrol_csv as _read_skypatrol_csv
+from malca.core.utils import (
+    fred,
+    gaussian,
+    paczynski_kernel,
+    skew_gaussian,
+    read_skypatrol_csv as _read_skypatrol_csv,
+)
 
 read_skypatrol_csv = _read_skypatrol_csv
 
@@ -1037,13 +1043,33 @@ def plot_bayes_results(
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", 0.1)
-                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
-                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline_val)
+                        residual_fit = gaussian(t_fit, amp, t0, sigma, 0.0)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.plot(
+                        ax_resid.plot(
                             t_fit_plot,
-                            mag_fit,
+                            residual_fit,
+                            color=DIP_EVENT_COLOR,
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                        )
+
+                elif morph == "skew_gaussian" and params:
+                    t0 = params.get("t0", (jd_start + jd_end) / 2)
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color=DIP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        sigma = params.get("sigma", (jd_end - jd_start) / 4)
+                        amp = params.get("amp", 0.1)
+                        alpha = params.get("alpha", 0.0)
+                        t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
+                        residual_fit = skew_gaussian(t_fit, amp, t0, sigma, 0.0, alpha)
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_resid.plot(
+                            t_fit_plot,
+                            residual_fit,
                             color=DIP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
@@ -1058,13 +1084,12 @@ def plot_bayes_results(
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
-                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline_val)
+                        residual_fit = paczynski_kernel(t_fit, amp, t0, tE, 0.0)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.plot(
+                        ax_resid.plot(
                             t_fit_plot,
-                            mag_fit,
+                            residual_fit,
                             color=DIP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
@@ -1095,13 +1120,12 @@ def plot_bayes_results(
                     if plot_fits:
                         sigma = params.get("sigma", (jd_end - jd_start) / 4)
                         amp = params.get("amp", -0.1)
-                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
-                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline_val)
+                        residual_fit = gaussian(t_fit, amp, t0, sigma, 0.0)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.plot(
+                        ax_resid.plot(
                             t_fit_plot,
-                            mag_fit,
+                            residual_fit,
                             color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
@@ -1116,13 +1140,12 @@ def plot_bayes_results(
                     if plot_fits:
                         tE = params.get("tE", (jd_end - jd_start) / 2)
                         amp = params.get("amp", -0.1)
-                        baseline_val = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline_val)
+                        residual_fit = paczynski_kernel(t_fit, amp, t0, tE, 0.0)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.plot(
+                        ax_resid.plot(
                             t_fit_plot,
-                            mag_fit,
+                            residual_fit,
                             color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
@@ -1130,23 +1153,30 @@ def plot_bayes_results(
                         )
 
                 elif morph == "fred" and params:
-                    t0 = params.get("t0", (jd_start + jd_end) / 2)
-                    if t0 is not None and np.isfinite(t0):
-                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.axvline(t0_plot, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
+                    t_peak = params.get("t_peak", (jd_start + jd_end) / 2)
+                    if t_peak is not None and np.isfinite(t_peak):
+                        t_peak_plot = t_peak - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t_peak_plot, color=JUMP_EVENT_COLOR, linestyle="--", alpha=0.7, linewidth=1.0)
                     if plot_fits:
-                        tau = params.get("tau", 0.05)
-                        amp = params.get("amp", -0.1)
-                        baseline_val = params.get("baseline", band_df["mag"].median())
-                        t_fit = np.linspace(jd_start - 3 * tau, jd_end + 3 * tau, 100)
-                        dt = t_fit - t0
-                        decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
-                        mag_fit = baseline_val + amp * decay
-
+                        tau_rise = params.get("tau_rise", 0.05)
+                        tau_fall = params.get("tau_fall", max(0.1, 2.0 * tau_rise))
+                        delta_m_peak = params.get("delta_m_peak", -0.1)
+                        t_fit = np.linspace(
+                            jd_start - 3 * tau_rise,
+                            jd_end + 3 * tau_fall,
+                            200,
+                        )
+                        residual_fit = fred(
+                            t_fit,
+                            delta_m_peak,
+                            t_peak,
+                            tau_rise,
+                            tau_fall,
+                        )
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
-                        ax_main.plot(
+                        ax_resid.plot(
                             t_fit_plot,
-                            mag_fit,
+                            residual_fit,
                             color=JUMP_EVENT_COLOR,
                             linestyle="-",
                             linewidth=2,
@@ -1611,7 +1641,7 @@ def main():
     g_baseline.add_argument(
         "--plot-fits",
         action="store_true",
-        help="Plot Gaussian/Paczynski fit curves in addition to peak markers.",
+        help="Plot the winning residual-space morphology fit in addition to peak markers.",
     )
     g_baseline.add_argument(
         "--format",

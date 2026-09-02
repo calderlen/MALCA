@@ -765,7 +765,7 @@ Example usage:
     parser.add_argument(
         "--plot-fits",
         action="store_true",
-        help="Overlay Gaussian/Paczynski fit curves",
+        help="Overlay the winning residual-space morphology fit",
     )
     parser.add_argument(
         "--format",

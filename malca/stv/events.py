@@ -85,7 +85,7 @@ def _curve_fit_quiet(*args, **kwargs):
 
 
 EventKind: TypeAlias = Literal["dip", "jump"]
-EVENT_SCHEMA_VERSION = 2
+EVENT_SCHEMA_VERSION = 3
 
 DEFAULT_BASELINE_KWARGS = dict(
     S0=BASELINE_S0,
@@ -158,6 +158,8 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "dip_best_t0",
     "dip_best_alpha",
     "dip_best_tau",
+    "dip_best_tau_rise",
+    "dip_best_tau_fall",
     "jump_best_morph",
     "jump_best_delta_bic",
     "jump_best_width_param",
@@ -165,6 +167,8 @@ EVENTS_CORE_COLUMNS: tuple[str, ...] = (
     "jump_best_t0",
     "jump_best_alpha",
     "jump_best_tau",
+    "jump_best_tau_rise",
+    "jump_best_tau_fall",
     "dip_count",
     "jump_count",
     "dip_run_count",
@@ -818,10 +822,21 @@ def classify_run_morphology(
     baseline: np.ndarray | None = None,
     kind: EventKind = "dip",
 ):
+    """Classify a padded event run in GP-residual magnitude space.
+
+    The quiescent GP is fixed before morphology fitting.  Consequently the
+    null model has no local free parameters, while the Gaussian,
+    skew-Gaussian, Paczynski kernel, and Bazin FRED have 3, 4, 3, and 4 free
+    parameters, respectively.
     """
-    Fits gaussian / skew_gaussian / paczynski / fred / noise to a padded run segment.
-    *baseline* – full-length baseline array (use baseline[slice] as baseline_guess).
-    """
+    jd = np.asarray(jd, dtype=float)
+    mag = np.asarray(mag, dtype=float)
+    sigma_eff = np.asarray(sigma_eff, dtype=float)
+    run_idx = np.asarray(run_idx, dtype=int)
+    run_idx = run_idx[(run_idx >= 0) & (run_idx < jd.size)]
+    if run_idx.size == 0:
+        raise ValueError("Cannot fit morphology for an empty event run")
+
     pad = 5
     start_i = int(max(0, run_idx[0] - pad))
     end_i = int(min(len(jd), run_idx[-1] + pad + 1))
@@ -830,44 +845,62 @@ def classify_run_morphology(
     mag_padded = mag[start_i:end_i]
     sigma_eff_padded = sigma_eff[start_i:end_i]
 
-    # Use sliced GP baseline as guess when available; fall back to nanmedian
+    # The event models are defined relative to the already-fitted quiescent GP.
     if baseline is not None:
-        baseline_guess = float(np.nanmedian(baseline[start_i:end_i]))
+        baseline_arr = np.asarray(baseline, dtype=float)
+        if baseline_arr.shape != mag.shape:
+            raise ValueError("Morphology baseline must align with the light curve")
     else:
-        baseline_guess = float(np.nanmedian(mag_padded))
+        baseline_arr = np.full_like(mag, float(np.nanmedian(mag_padded)))
 
-    abs_diff = np.abs(mag_padded - baseline_guess)
-    peak_local_idx = int(np.argmax(abs_diff))
-    t0_guess = t_padded[peak_local_idx]
-    amp_guess_raw = float(mag_padded[peak_local_idx] - baseline_guess)
-    amp_guess_dip = abs(amp_guess_raw) if np.isfinite(amp_guess_raw) else 0.1
-    amp_guess_jump = -abs(amp_guess_raw) if np.isfinite(amp_guess_raw) else -0.1
-    sigma_guess = max((t_padded[-1] - t_padded[0]) / 4.0, 0.01)
+    baseline_padded = baseline_arr[start_i:end_i]
+    residual_padded = mag_padded - baseline_padded
+    residual_full = mag - baseline_arr
+    baseline_reference = float(np.nanmedian(baseline_padded))
+
+    if kind == "dip":
+        peak_idx = int(run_idx[np.nanargmax(residual_full[run_idx])])
+    else:
+        peak_idx = int(run_idx[np.nanargmin(residual_full[run_idx])])
+    t0_guess = float(jd[peak_idx])
+    amp_guess_raw = float(residual_full[peak_idx])
+    amp_guess_dip = max(abs(amp_guess_raw), 1e-3) if np.isfinite(amp_guess_raw) else 0.1
+    amp_guess_jump = -max(abs(amp_guess_raw), 1e-3) if np.isfinite(amp_guess_raw) else -0.1
+    run_span = float(np.nanmax(jd[run_idx]) - np.nanmin(jd[run_idx]))
+    sigma_guess = max(run_span / 4.0, 0.01)
     delta_bic_threshold = 10.0
 
-    resid_null = mag_padded - baseline_guess
-    bic_null = bic(resid_null, sigma_eff_padded, 1)
+    bic_null = bic(residual_padded, sigma_eff_padded, 0)
 
     best_bic = bic_null
     best_model = "noise"
     best_params = {}
+    model_bics = {"null": float(bic_null)}
 
     if kind == "dip":
         try:
+            def gaussian_residual(t, amp, t0, sigma):
+                return gaussian(t, amp, t0, sigma, 0.0)
+
             popt_g, _ = _curve_fit_quiet(
-                gaussian, t_padded, mag_padded,
-                p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess],
-                sigma=sigma_eff_padded, maxfev=2000
+                gaussian_residual,
+                t_padded,
+                residual_padded,
+                p0=[amp_guess_dip, t0_guess, sigma_guess],
+                sigma=sigma_eff_padded,
+                bounds=([0.0, t_padded[0], 1e-5], [np.inf, t_padded[-1], np.inf]),
+                maxfev=2000,
             )
-            resid_g = mag_padded - gaussian(t_padded, *popt_g)
-            bic_g = bic(resid_g, sigma_eff_padded, 4)
+            resid_g = residual_padded - gaussian_residual(t_padded, *popt_g)
+            bic_g = bic(resid_g, sigma_eff_padded, 3)
+            model_bics["gaussian"] = float(bic_g)
 
             if (popt_g[0] > 0) and bic_g < (best_bic - delta_bic_threshold):
                 best_bic = bic_g
                 best_model = "gaussian"
                 best_params = {
                     "amp": popt_g[0], "t0": popt_g[1],
-                    "sigma": popt_g[2], "baseline": popt_g[3]
+                    "sigma": popt_g[2],
                 }
         except Exception:
             pass
@@ -875,65 +908,109 @@ def classify_run_morphology(
     # skew_gaussian for dips (asymmetric profiles)
     if kind == "dip":
         try:
+            def skew_gaussian_residual(t, amp, t0, sigma, alpha):
+                return skew_gaussian(t, amp, t0, sigma, 0.0, alpha)
+
             popt_sg, _ = _curve_fit_quiet(
-                skew_gaussian, t_padded, mag_padded,
-                p0=[amp_guess_dip, t0_guess, sigma_guess, baseline_guess, 0.0],
-                sigma=sigma_eff_padded, maxfev=3000,
+                skew_gaussian_residual,
+                t_padded,
+                residual_padded,
+                p0=[amp_guess_dip, t0_guess, sigma_guess, 0.0],
+                sigma=sigma_eff_padded,
+                maxfev=3000,
                 bounds=(
-                    [-np.inf, t_padded[0], 1e-5, -np.inf, -10],
-                    [np.inf, t_padded[-1], np.inf, np.inf, 10]
-                )
+                    [0.0, t_padded[0], 1e-5, -10.0],
+                    [np.inf, t_padded[-1], np.inf, 10.0],
+                ),
             )
-            resid_sg = mag_padded - skew_gaussian(t_padded, *popt_sg)
-            bic_sg = bic(resid_sg, sigma_eff_padded, 5)
+            resid_sg = residual_padded - skew_gaussian_residual(t_padded, *popt_sg)
+            bic_sg = bic(resid_sg, sigma_eff_padded, 4)
+            model_bics["skew_gaussian"] = float(bic_sg)
 
             if (popt_sg[0] > 0) and bic_sg < (best_bic - delta_bic_threshold):
                 best_bic = bic_sg
                 best_model = "skew_gaussian"
                 best_params = {
                     "amp": popt_sg[0], "t0": popt_sg[1],
-                    "sigma": popt_sg[2], "baseline": popt_sg[3],
-                    "alpha": popt_sg[4]
+                    "sigma": popt_sg[2], "alpha": popt_sg[3],
                 }
         except Exception:
             pass
 
     if kind == "jump":
         try:
+            def paczynski_residual(t, amp, t0, t_e):
+                return paczynski_kernel(t, amp, t0, t_e, 0.0)
+
             popt_p, _ = _curve_fit_quiet(
-                paczynski_kernel, t_padded, mag_padded,
-                p0=[amp_guess_jump, t0_guess, sigma_guess, baseline_guess],
-                sigma=sigma_eff_padded, maxfev=2000
+                paczynski_residual,
+                t_padded,
+                residual_padded,
+                p0=[amp_guess_jump, t0_guess, sigma_guess],
+                sigma=sigma_eff_padded,
+                bounds=([-np.inf, t_padded[0], 1e-5], [0.0, t_padded[-1], np.inf]),
+                maxfev=2000,
             )
-            resid_p = mag_padded - paczynski_kernel(t_padded, *popt_p)
-            bic_p = bic(resid_p, sigma_eff_padded, 4)
+            resid_p = residual_padded - paczynski_residual(t_padded, *popt_p)
+            bic_p = bic(resid_p, sigma_eff_padded, 3)
+            model_bics["paczynski"] = float(bic_p)
 
             if (popt_p[0] < 0) and bic_p < (best_bic - delta_bic_threshold):
                 best_bic = bic_p
                 best_model = "paczynski"
                 best_params = {
                     "amp": popt_p[0], "t0": popt_p[1],
-                    "tE": popt_p[2], "baseline": popt_p[3]
+                    "tE": popt_p[2],
                 }
         except Exception:
             pass
 
         try:
+            tau_rise_guess = max(run_span / 8.0, 0.01)
+            tau_fall_guess = max(run_span / 2.0, 2.0 * tau_rise_guess)
+
+            def fred_peak_gap(t, delta_m_peak, t_peak, tau_rise, tau_gap):
+                return fred(
+                    t,
+                    delta_m_peak,
+                    t_peak,
+                    tau_rise,
+                    tau_rise + tau_gap,
+                )
+
             popt_f, _ = _curve_fit_quiet(
-                fred, t_padded, mag_padded,
-                p0=[amp_guess_jump, t0_guess, 0.05, baseline_guess],
-                sigma=sigma_eff_padded, maxfev=2000
+                fred_peak_gap,
+                t_padded,
+                residual_padded,
+                p0=[
+                    amp_guess_jump,
+                    t0_guess,
+                    tau_rise_guess,
+                    tau_fall_guess - tau_rise_guess,
+                ],
+                sigma=sigma_eff_padded,
+                bounds=(
+                    [-np.inf, t_padded[0], 1e-5, 1e-5],
+                    [0.0, t_padded[-1], np.inf, np.inf],
+                ),
+                maxfev=5000,
             )
             if popt_f[0] < 0:
-                resid_f = mag_padded - fred(t_padded, *popt_f)
+                tau_rise = float(popt_f[2])
+                tau_fall = tau_rise + float(popt_f[3])
+                fit_f = fred(t_padded, popt_f[0], popt_f[1], tau_rise, tau_fall)
+                resid_f = residual_padded - fit_f
                 bic_f = bic(resid_f, sigma_eff_padded, 4)
+                model_bics["fred"] = float(bic_f)
 
                 if bic_f < (best_bic - delta_bic_threshold):
                     best_bic = bic_f
                     best_model = "fred"
                     best_params = {
-                        "amp": popt_f[0], "t0": popt_f[1],
-                        "tau": popt_f[2], "baseline": popt_f[3]
+                        "delta_m_peak": popt_f[0],
+                        "t_peak": popt_f[1],
+                        "tau_rise": tau_rise,
+                        "tau_fall": tau_fall,
                     }
         except Exception:
             pass
@@ -943,6 +1020,8 @@ def classify_run_morphology(
         "bic": float(best_bic),
         "delta_bic_null": float(bic_null - best_bic),
         "params": best_params,
+        "model_bics": model_bics,
+        "baseline_reference": baseline_reference,
     }
 
 
@@ -2052,11 +2131,12 @@ def process_lightcurve(
         Returns
         -------
         dict with keys: morph, delta_bic, width_param, symmetry,
-                        amp, t0, alpha, tau.
+                        amp, t0, alpha, tau, tau_rise, tau_fall.
         """
         empty = dict(
             morph="none", delta_bic=0.0, width_param=np.nan, symmetry=np.nan,
             amp=np.nan, t0=np.nan, alpha=np.nan, tau=np.nan,
+            tau_rise=np.nan, tau_fall=np.nan,
         )
         if not run_list:
             return empty
@@ -2076,14 +2156,17 @@ def process_lightcurve(
         elif morph == 'paczynski':
             width_param = params.get('tE', np.nan)
         elif morph == 'fred':
-            width_param = params.get('tau', np.nan)
+            width_param = params.get('tau_fall', np.nan)
         else:
             width_param = np.nan
 
-        amp = params.get('amp', np.nan)
-        t0 = params.get('t0', np.nan)
+        amp = params.get('amp', params.get('delta_m_peak', np.nan))
+        t0 = params.get('t0', params.get('t_peak', np.nan))
         alpha = params.get('alpha', np.nan)      # skew_gaussian only
-        tau = params.get('tau', np.nan)           # fred only
+        tau_rise = params.get('tau_rise', np.nan)  # Bazin FRED only
+        tau_fall = params.get('tau_fall', np.nan)  # Bazin FRED only
+        # Backward-compatible scalar width alias; for Bazin this is tau_fall.
+        tau = tau_fall
 
         return dict(
             morph=str(morph),
@@ -2094,6 +2177,8 @@ def process_lightcurve(
             t0=float(t0) if np.isfinite(t0) else np.nan,
             alpha=float(alpha) if np.isfinite(alpha) else np.nan,
             tau=float(tau) if np.isfinite(tau) else np.nan,
+            tau_rise=float(tau_rise) if np.isfinite(tau_rise) else np.nan,
+            tau_fall=float(tau_fall) if np.isfinite(tau_fall) else np.nan,
         )
 
     dip_mi = get_best_morph_info(dip["run_summaries"])
@@ -2210,6 +2295,8 @@ def process_lightcurve(
         dip_best_t0=float(dip_mi["t0"]),
         dip_best_alpha=float(dip_mi["alpha"]),
         dip_best_tau=float(dip_mi["tau"]),
+        dip_best_tau_rise=float(dip_mi["tau_rise"]),
+        dip_best_tau_fall=float(dip_mi["tau_fall"]),
         jump_best_morph=str(jump_mi["morph"]),
         jump_best_delta_bic=float(jump_mi["delta_bic"]),
         jump_best_width_param=float(jump_mi["width_param"]),
@@ -2217,6 +2304,8 @@ def process_lightcurve(
         jump_best_t0=float(jump_mi["t0"]),
         jump_best_alpha=float(jump_mi["alpha"]),
         jump_best_tau=float(jump_mi["tau"]),
+        jump_best_tau_rise=float(jump_mi["tau_rise"]),
+        jump_best_tau_fall=float(jump_mi["tau_fall"]),
         dip_count=int(len(dip["event_indices"])),
         jump_count=int(len(jump["event_indices"])),
 
