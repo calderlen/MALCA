@@ -2,15 +2,39 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from malca.core.baseline import per_camera_gp_baseline_masked
 from malca.core.utils import (
     compute_field_summary,
+    fred,
     filter_bad_cameras,
     identify_bad_cameras,
     identify_offset_cameras,
     identify_residual_bad_cameras,
 )
+
+
+def test_peak_centered_bazin_fred_matches_requested_peak_and_quiescent_tails() -> None:
+    t = np.linspace(-100.0, 100.0, 4001)
+    profile = fred(
+        t,
+        delta_m_peak=-0.75,
+        t_peak=0.0,
+        tau_rise=2.0,
+        tau_fall=12.0,
+    )
+
+    assert np.all(np.isfinite(profile))
+    assert fred(np.array([0.0]), -0.75, 0.0, 2.0, 12.0)[0] == pytest.approx(-0.75)
+    assert t[int(np.argmin(profile))] == pytest.approx(0.0)
+    assert abs(profile[0]) < 1e-8
+    assert abs(profile[-1]) < 5e-4
+
+
+def test_peak_centered_bazin_fred_requires_ordered_positive_timescales() -> None:
+    with pytest.raises(ValueError, match="0 < tau_rise < tau_fall"):
+        fred(np.array([0.0]), -0.5, 0.0, 2.0, 2.0)
 
 
 def _make_camera_df(seed: int = 1) -> pd.DataFrame:

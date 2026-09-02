@@ -24,6 +24,7 @@ from malca.stv.events import (
     signal_amplitude_pass_mask,
 )
 from malca.core.baseline import per_camera_gp_baseline
+from malca.core.utils import fred
 from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
 
 
@@ -590,6 +591,90 @@ class TestEdgeCases:
 
 
 class TestMorphology:
+    @pytest.mark.parametrize(
+        ("kind", "expected_counts"),
+        [("dip", [0, 3, 4]), ("jump", [0, 3, 4])],
+    )
+    def test_paper_parameter_counts_are_used_for_bic(
+        self,
+        monkeypatch,
+        kind,
+        expected_counts,
+    ):
+        jd = np.linspace(0.0, 20.0, 80)
+        baseline = np.full_like(jd, 14.0)
+        sign = 1.0 if kind == "dip" else -1.0
+        mag = baseline + sign * 0.3 * np.exp(-0.5 * ((jd - 10.0) / 2.0) ** 2)
+        err = np.full_like(jd, 0.02)
+        run_idx = np.arange(30, 50)
+        seen_counts = []
+
+        def fake_curve_fit(_model, _x, _y, *, p0, **_kwargs):
+            return np.asarray(p0, dtype=float), np.eye(len(p0))
+
+        def fake_bic(_resid, _err, n_params):
+            seen_counts.append(n_params)
+            return [100.0, 80.0, 60.0][len(seen_counts) - 1]
+
+        monkeypatch.setattr("malca.stv.events._curve_fit_quiet", fake_curve_fit)
+        monkeypatch.setattr("malca.stv.events.bic", fake_bic)
+
+        classify_run_morphology(
+            jd,
+            mag,
+            err,
+            run_idx,
+            baseline=baseline,
+            kind=kind,
+        )
+
+        assert seen_counts == expected_counts
+
+    def test_dip_morphology_is_fit_in_gp_residual_space(self):
+        jd = np.linspace(0.0, 30.0, 160)
+        baseline = 14.0 + 0.02 * jd
+        injected = 0.45 * np.exp(-0.5 * ((jd - 15.0) / 2.0) ** 2)
+        mag = baseline + injected
+        err = np.full_like(jd, 0.01)
+        run_idx = np.flatnonzero(injected > 0.08)
+
+        out = classify_run_morphology(
+            jd,
+            mag,
+            err,
+            run_idx,
+            baseline=baseline,
+            kind="dip",
+        )
+
+        assert out["morphology"] == "gaussian"
+        assert "baseline" not in out["params"]
+        assert out["params"]["amp"] == pytest.approx(0.45, rel=0.02)
+        assert out["model_bics"].keys() >= {"null", "gaussian", "skew_gaussian"}
+
+    def test_jump_bazin_fred_persists_paper_parameters(self):
+        jd = np.linspace(0.0, 40.0, 240)
+        baseline = 14.0 + 0.002 * jd
+        injected = fred(jd, -0.65, 18.0, 1.5, 8.0)
+        mag = baseline + injected
+        err = np.full_like(jd, 0.008)
+        run_idx = np.flatnonzero(injected < -0.04)
+
+        out = classify_run_morphology(
+            jd,
+            mag,
+            err,
+            run_idx,
+            baseline=baseline,
+            kind="jump",
+        )
+
+        assert out["morphology"] == "fred"
+        assert out["params"]["delta_m_peak"] == pytest.approx(-0.65, rel=0.05)
+        assert out["params"]["t_peak"] == pytest.approx(18.0, abs=0.3)
+        assert out["params"]["tau_rise"] == pytest.approx(1.5, rel=0.15)
+        assert out["params"]["tau_fall"] == pytest.approx(8.0, rel=0.15)
+
     def test_jump_morphology_never_returns_gaussian(self):
         """Gaussian is not a valid winner for jump morphology."""
         jd = np.linspace(0.0, 30.0, 120)

@@ -739,6 +739,30 @@ def _mask_excursions(
             else:
                 in_flare = False
 
+    # Preserve the forward state machine, then extend each seeded run backward
+    # while earlier points remain beyond the same-sign continuation threshold.
+    flagged_idx = np.flatnonzero(flags)
+    if flagged_idx.size:
+        runs = np.split(
+            flagged_idx, np.flatnonzero(np.diff(flagged_idx) > 1) + 1
+        )
+        for run in runs:
+            seed = int(run[0])
+            seed_baseline = float(base_rough[seed])
+            seed_sig = (float(mag[seed]) - seed_baseline) / s0
+            is_dip = seed_sig > thresh_dip
+            is_flare = seed_sig < thresh_bright
+            if not (is_dip or is_flare):
+                continue
+
+            earlier = seed - 1
+            while earlier >= 0 and finite[earlier]:
+                sig = (float(mag[earlier]) - seed_baseline) / s0
+                if (is_dip and sig <= 1.0) or (is_flare and sig >= -1.0):
+                    break
+                flags[earlier] = True
+                earlier -= 1
+
     event_flag = finite & flags
     keep = finite.copy()
     intervals: list[tuple[float, float]] = []
@@ -767,6 +791,59 @@ def _union_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, 
         else:
             merged.append((lo, hi))
     return merged
+
+
+def _corroborated_intervals(
+    intervals_by_camera: dict,
+    *,
+    min_cameras: int = 2,
+) -> list[tuple[float, float]]:
+    """Return connected excursion intervals supported by multiple cameras."""
+    tagged = sorted(
+        (float(lo), float(hi), cam_id)
+        for cam_id, intervals in intervals_by_camera.items()
+        for lo, hi in intervals
+    )
+    if not tagged:
+        return []
+
+    components: list[tuple[float, float]] = []
+    current_lo, current_hi, current_cam = tagged[0]
+    current_cameras = {current_cam}
+    for lo, hi, cam_id in tagged[1:]:
+        if lo <= current_hi:
+            current_hi = max(current_hi, hi)
+            current_cameras.add(cam_id)
+            continue
+        if len(current_cameras) >= int(min_cameras):
+            components.append((current_lo, current_hi))
+        current_lo, current_hi = lo, hi
+        current_cameras = {cam_id}
+
+    if len(current_cameras) >= int(min_cameras):
+        components.append((current_lo, current_hi))
+    return components
+
+
+def _flagged_run_intervals(
+    t: np.ndarray,
+    flags: np.ndarray,
+    *,
+    pad_days: float,
+) -> list[tuple[float, float]]:
+    """Return padded first-to-last time envelopes for contiguous flagged runs."""
+    flagged_indices = np.flatnonzero(np.asarray(flags, dtype=bool))
+    if flagged_indices.size == 0:
+        return []
+    runs = np.split(
+        flagged_indices,
+        np.flatnonzero(np.diff(flagged_indices) > 1) + 1,
+    )
+    return [
+        (float(t[run[0]]) - float(pad_days), float(t[run[-1]]) + float(pad_days))
+        for run in runs
+        if run.size
+    ]
 
 
 def _time_in_intervals(t_val: float, intervals: list[tuple[float, float]]) -> bool:
@@ -1025,8 +1102,10 @@ def per_camera_gp_baseline_masked(
     cross_band_clip_sigma=3.5,
     **kwargs,
 ):
-    """Per-camera GP baseline with dip masking (excludes significant dips from fit).
+    """Per-camera GP baseline with excursion masking.
 
+    Excursion intervals independently identified by at least two same-band
+    cameras are propagated to every overlapping camera before the final fit.
     Cameras that start late within a band and lack sufficient quiet baseline
     borrow the median anchor final baseline for masking and as their own
     baseline, preventing stiff/loose GP tracking of excursions at camera onset.
@@ -1158,9 +1237,45 @@ def per_camera_gp_baseline_masked(
             "t_last": t_last,
             "quiet_span": quiet_span,
             "excursion_intervals": excursion_intervals,
+            "flagged_run_intervals": _flagged_run_intervals(
+                t, flags, pad_days=pad_days
+            ),
             "mask_s0": mask_s0,
             "mag_at_first": float(mag[finite][0]) if finite.any() else np.nan,
         }
+
+    # Propagate connected excursion intervals corroborated by at least two
+    # cameras in the same band.  The intervals already include pad_days.
+    for cached in cam_cache.values():
+        cached["corroborated_intervals"] = []
+    if has_band_col:
+        for _band_id, band_sub in df_out.groupby(band_col, group_keys=False):
+            band_cam_ids = list(band_sub[cam_col].unique())
+            shared_intervals = _corroborated_intervals(
+                {
+                    cam_id: cam_meta[cam_id]["flagged_run_intervals"]
+                    for cam_id in band_cam_ids
+                },
+                min_cameras=2,
+            )
+            if not shared_intervals:
+                continue
+            for cam_id in band_cam_ids:
+                meta = cam_meta[cam_id]
+                overlapping = [
+                    (lo, hi)
+                    for lo, hi in shared_intervals
+                    if hi >= meta["t_first"] and lo <= meta["t_last"]
+                ]
+                if not overlapping:
+                    continue
+                cam_cache[cam_id]["corroborated_intervals"] = overlapping
+                meta["excursion_intervals"] = _union_intervals(
+                    meta["excursion_intervals"] + overlapping
+                )
+                meta["quiet_span"] = _quiet_span_before_first_excursion(
+                    meta["t_first"], meta["t_last"], meta["excursion_intervals"]
+                )
 
     # ---- Pass 2: per-band anchor bootstrapping and consensus classification ----
     band_anchors: dict = {}
@@ -1346,6 +1461,8 @@ def per_camera_gp_baseline_masked(
             bright_sigma_thresh=bright_sigma_thresh,
             pad_days=pad_days,
         )
+        for lo, hi in cached["corroborated_intervals"]:
+            keep &= ~((t >= float(lo)) & (t <= float(hi)))
 
         df_out.loc[idx, "is_masked"] = ~keep
         if keep.sum() < min_gp_points:

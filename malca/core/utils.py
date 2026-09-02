@@ -87,33 +87,43 @@ def paczynski_kernel(t, amp, t0, tE, baseline):
     return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
 
 
-def fred(t, amp, t0, tau, baseline):
-    """
-    Fast Rise Exponential Decay (FRED) kernel + baseline term.
+def fred(t, delta_m_peak, t_peak, tau_rise, tau_fall):
+    """Peak-centered, peak-normalized Bazin FRED in residual magnitudes.
 
-    Parameters
-    ----------
-    t : array-like
-        Time values
-    amp : float
-        Amplitude
-    t0 : float
-        Time of peak (start of decay)
-    tau : float
-        Decay timescale
-    baseline : float
-        Baseline magnitude
+    This is the morphology profile described in the methodology.  The
+    quiescent GP has already been subtracted, so the profile approaches zero
+    away from the event and has no fitted baseline term.  ``delta_m_peak`` is
+    the residual magnitude at ``t_peak`` (negative for a brightening).
 
-    Returns
-    -------
-    array-like
-        Model magnitudes
+    The reparameterization requires ``0 < tau_rise < tau_fall``.  Evaluation is
+    performed in log space so epochs far before a fast rise do not overflow.
     """
-    tau = np.maximum(np.abs(tau), 1e-5)
-    dt = t - t0
-    # Mask out values before t0
-    decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
-    return baseline + amp * decay
+    tau_rise = float(tau_rise)
+    tau_fall = float(tau_fall)
+    if not np.isfinite(tau_rise) or not np.isfinite(tau_fall):
+        raise ValueError("Bazin timescales must be finite")
+    if tau_rise <= 0.0 or tau_fall <= tau_rise:
+        raise ValueError("Bazin timescales must satisfy 0 < tau_rise < tau_fall")
+
+    t = np.asarray(t, dtype=float)
+    dt = t - float(t_peak)
+    q = tau_rise / tau_fall
+
+    # F_peak/F_quiescent - 1, expressed from the requested peak magnitude.
+    peak_excess = float(np.expm1(-0.4 * np.log(10.0) * float(delta_m_peak)))
+    if peak_excess == 0.0:
+        return np.zeros_like(t, dtype=float)
+
+    log_denominator = np.logaddexp(
+        np.log1p(-q),
+        np.log(q) - dt / tau_rise,
+    )
+    log_abs_excess = (
+        np.log(abs(peak_excess)) - dt / tau_fall - log_denominator
+    )
+    excess = np.sign(peak_excess) * np.exp(np.clip(log_abs_excess, -745.0, 700.0))
+    flux_ratio = np.maximum(1.0 + excess, np.finfo(float).tiny)
+    return -2.5 * np.log10(flux_ratio)
 
 
 def skew_gaussian(t, amp, t0, sigma, baseline, alpha):

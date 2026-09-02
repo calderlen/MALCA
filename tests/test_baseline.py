@@ -7,12 +7,39 @@ import pandas as pd
 import pytest
 
 from malca.core.baseline import (
+    _mask_excursions,
     global_median_baseline,
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
     per_camera_median_baseline,
     phase_template_baseline,
 )
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_excursion_mask_expands_backward_for_both_signs(sign):
+    residual = np.concatenate(
+        [np.zeros(10), sign * np.array([1.2, 2.0, 3.5, 2.0]), np.zeros(10)]
+    )
+    time = np.arange(residual.size, dtype=float)
+    finite = np.ones(residual.size, dtype=bool)
+
+    flags, keep, _intervals, _s0 = _mask_excursions(
+        time,
+        residual,
+        np.zeros_like(residual),
+        finite,
+        0.0,
+        mag_err=np.ones_like(residual),
+        dip_sigma_thresh=3.0,
+        bright_sigma_thresh=-3.0,
+        pad_days=0.0,
+    )
+
+    assert flags[10:14].all()
+    assert not flags[9]
+    assert not flags[14]
+    assert np.array_equal(~keep, flags)
 
 
 def make_synthetic_lc(
@@ -249,6 +276,38 @@ class TestPhaseTemplateBaseline:
         assert set(result["baseline_source"].astype(str)) == {"phase_template"}
         assert np.nanstd(result.loc[~event_mask, "resid"]) < 0.08
         assert float(result.loc[event_mask, "resid"].min()) < -0.18
+
+
+def test_corroborated_excursion_mask_propagates_within_band_only():
+    jd = np.arange(2458000.0, 2458300.0, 3.0)
+    rows = []
+    for camera in ("a", "b", "c"):
+        mag = np.full(len(jd), 14.0)
+        if camera in {"a", "b"}:
+            mag[(jd >= 2458140.0) & (jd <= 2458160.0)] += 0.5
+        rows.extend(
+            {
+                "JD": t,
+                "mag": m,
+                "error": 0.02,
+                "camera#": camera,
+                "v_g_band": 0,
+                "saturated": 0,
+            }
+            for t, m in zip(jd, mag)
+        )
+
+    lightcurve = pd.DataFrame(rows).sort_values("JD").reset_index(drop=True)
+    result = per_camera_gp_baseline_masked(lightcurve, late_onset_buffer_days=0)
+    event_window = (result["JD"] >= 2458140.0) & (result["JD"] <= 2458160.0)
+    camera_c = result["camera#"] == "c"
+    assert result.loc[event_window & camera_c, "is_masked"].all()
+
+    lightcurve.loc[lightcurve["camera#"] == "c", "v_g_band"] = 1
+    cross_band = per_camera_gp_baseline_masked(lightcurve, late_onset_buffer_days=0)
+    event_window = (cross_band["JD"] >= 2458140.0) & (cross_band["JD"] <= 2458160.0)
+    camera_c = cross_band["camera#"] == "c"
+    assert not cross_band.loc[event_window & camera_c, "is_masked"].any()
 
 
 def _make_late_onset_lc(
