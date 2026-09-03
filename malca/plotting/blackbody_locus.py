@@ -225,12 +225,12 @@ def _extend_locus_to_frame(
         )
 
 
-def _fixed_above_offset(rotation: float) -> tuple[float, float]:
-    """Return one constant display-space offset normal to the local locus."""
+def _normal_offset(rotation: float, distance_points: float) -> tuple[float, float]:
+    """Return a display-space offset normal to the local locus."""
     angle = np.radians(rotation)
     return (
-        float(-_TEMPERATURE_LABEL_OFFSET_POINTS * np.sin(angle)),
-        float(_TEMPERATURE_LABEL_OFFSET_POINTS * np.cos(angle)),
+        float(-distance_points * np.sin(angle)),
+        float(distance_points * np.cos(angle)),
     )
 
 
@@ -367,12 +367,23 @@ def add_blackbody_locus(
     label: str = r"Blackbody $T_{\rm BB}$",
     label_placement: Literal["alternating", "above", "below"] = "above",
     label_fontsize: float = 10.5,
+    avoid_points: Iterable[tuple[float, float]] | None = None,
 ) -> BlackbodyColorLocus:
     """Draw a blackbody track without allowing it to change the data limits."""
     xlim = ax.get_xlim()
     ylim = ax.get_ylim()
     ax.figure.canvas.draw()
     axes_bbox = ax.get_window_extent(ax.figure.canvas.get_renderer())
+    finite_avoid_points = [
+        (float(x), float(y))
+        for x, y in (avoid_points or ())
+        if np.isfinite(x) and np.isfinite(y)
+    ]
+    avoid_display_points = (
+        ax.transData.transform(np.asarray(finite_avoid_points, dtype=float))
+        if finite_avoid_points
+        else np.empty((0, 2), dtype=float)
+    )
     locus = blackbody_color_color_locus(
         x_bands,
         y_bands,
@@ -380,7 +391,7 @@ def add_blackbody_locus(
         allow_download=allow_download,
     )
     rotation = _display_rotation(ax, locus, xlim, ylim)
-    locus_linewidth = 2.9
+    locus_linewidth = 1.5
     locus_zorder = 0.5
     ax.plot(
         locus.x,
@@ -542,25 +553,50 @@ def add_blackbody_locus(
         annotation.set_in_layout(False)
         label_is_visible = True
         if label_placement in {"above", "below"}:
-            ax.figure.canvas.draw()
-            offset = _fixed_above_offset(rotation)
-            if label_placement == "below":
-                offset = (-offset[0], -offset[1])
-            annotation.set_position(offset)
-            ax.figure.canvas.draw()
-            actual_bbox = annotation.get_window_extent(ax.figure.canvas.get_renderer())
-            padded_actual = _padded_bbox(actual_bbox, 8.0)
-            overlaps_label = any(
-                padded_actual.overlaps(_padded_bbox(other, 8.0))
-                for other in placed_labels
-            )
-            if _outside_distance(padded_actual, axes_bbox) > 0.0 or overlaps_label:
-                # Omit the complete label-marker pair when the label cannot be
-                # placed cleanly inside the axes.
+            preferred_sign = 1.0 if label_placement == "above" else -1.0
+            candidate_offsets = []
+            for distance in (
+                _TEMPERATURE_LABEL_OFFSET_POINTS,
+                _TEMPERATURE_LABEL_OFFSET_POINTS + 10.0,
+                _TEMPERATURE_LABEL_OFFSET_POINTS + 20.0,
+            ):
+                base_offset = _normal_offset(rotation, distance)
+                candidate_offsets.extend(
+                    [
+                        (preferred_sign * base_offset[0], preferred_sign * base_offset[1]),
+                        (-preferred_sign * base_offset[0], -preferred_sign * base_offset[1]),
+                    ]
+                )
+
+            chosen_bbox = None
+            for offset in candidate_offsets:
+                annotation.set_position(offset)
+                ax.figure.canvas.draw()
+                actual_bbox = annotation.get_window_extent(ax.figure.canvas.get_renderer())
+                padded_actual = _padded_bbox(actual_bbox, 7.0)
+                overlaps_label = any(
+                    padded_actual.overlaps(_padded_bbox(other, 7.0))
+                    for other in placed_labels
+                )
+                overlaps_point = any(
+                    padded_actual.contains(float(point[0]), float(point[1]))
+                    for point in avoid_display_points
+                )
+                if (
+                    _outside_distance(padded_actual, axes_bbox) == 0.0
+                    and not overlaps_label
+                    and not overlaps_point
+                ):
+                    chosen_bbox = actual_bbox
+                    break
+
+            if chosen_bbox is None:
+                # Omit the complete label-marker pair when no collision-free
+                # placement exists inside the axes.
                 annotation.remove()
                 label_is_visible = False
             else:
-                placed_labels.append(actual_bbox)
+                placed_labels.append(chosen_bbox)
         if label_is_visible:
             ax.scatter(
                 [x],

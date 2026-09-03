@@ -49,6 +49,7 @@ from malca.config import (
 from malca.core.baseline import per_camera_gp_baseline_masked
 from malca.core.utils import clean_lc
 from malca.io.lightcurve_io import load_lightcurve_df, to_asassn_algorithm_frame
+from malca.plotting.blackbody_locus import add_blackbody_locus
 from malca.plotting.color_color_labels import (
     LABEL_H_KS,
     LABEL_R_HALPHA,
@@ -3788,6 +3789,7 @@ def plot_2mass_wise(frame: pd.DataFrame, output_dir: Path) -> int:
     ax.text(0.02, 0.96, "MALCA heuristic boundaries", transform=ax.transAxes, va="top", fontsize=9.5)
     ax.set_xlabel(LABEL_W1_W2, fontsize=17)
     ax.set_ylabel(LABEL_H_KS, fontsize=17)
+    add_blackbody_locus(ax, ("W1", "W2"), ("H", "Ks"))
     ax.legend(
         handles=_class_handles(white_face=True, neutral_edges=True),
         loc="upper center",

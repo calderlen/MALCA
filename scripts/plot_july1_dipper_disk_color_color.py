@@ -24,6 +24,7 @@ from malca.plotting.extinction import (
 )
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
+from malca.plotting.blackbody_locus import add_blackbody_locus
 from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
 
 
@@ -259,6 +260,12 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
     ax.set_ylim(-0.75, 4.6)
     ax.set_xlabel(LABEL_KS_W4_0, fontsize=18)
     ax.set_ylabel(LABEL_KS_W3_0, fontsize=18)
+    add_blackbody_locus(
+        ax,
+        ("Ks", "W4"),
+        ("Ks", "W3"),
+        label_placement="above",
+    )
 
     ax.xaxis.set_major_locator(MultipleLocator(1.0))
     ax.yaxis.set_major_locator(MultipleLocator(1.0))

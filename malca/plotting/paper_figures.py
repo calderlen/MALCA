@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,6 +22,7 @@ from matplotlib.ticker import AutoMinorLocator
 from malca.evaluation.dip_injection import load_efficiency_grid_depth_timescale
 from malca.io.notebook_paths import find_repo_root
 from malca.ltv.cmd import dustmaps_cmd_from_fields
+from malca.plotting.blackbody_locus import add_blackbody_locus
 from malca.plotting.color_color_labels import (
     LABEL_KS_W3,
     LABEL_KS_W4,
@@ -35,6 +37,7 @@ from malca.plotting.lightcurve_publication import (
     FIG_SINGLE_COL_WIDTH,
     PUBLICATION_STYLE,
     apply_publication_rcparams,
+    finalize_publication_figure,
     save_publication_figure,
 )
 from malca.plotting.notebook_display import show_figure
@@ -641,6 +644,8 @@ def _plot_disk_color_color(
     *,
     xlabel: str,
     ylabel: str,
+    blackbody_bands: tuple[tuple[str, str], tuple[str, str]],
+    blackbody_label_placement: Literal["alternating", "above"] = "above",
 ) -> FigureResult:
     plotted = frame.dropna(subset=[x_col, y_col]).copy()
     fig, ax = plt.subplots(figsize=(7.0, 6.5), layout="constrained")
@@ -651,6 +656,13 @@ def _plot_disk_color_color(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     _style_axis(ax)
+    finalize_publication_figure(fig)
+    add_blackbody_locus(
+        ax,
+        *blackbody_bands,
+        color="#b2182b",
+        label_placement=blackbody_label_placement,
+    )
     return _save_figure(ctx, fig, stem)
 
 
@@ -664,6 +676,7 @@ def plot_ks_w2_w4_dered(ctx: PaperFigureContext, dippers: pd.DataFrame | None = 
         "tier_a_ks_w2_w4_dered",
         xlabel=dereddened_color_color_mag_label(r"K_s", r"W_2", "Ks", "W2"),
         ylabel=LABEL_KS_W4_0,
+        blackbody_bands=(("Ks", "W2"), ("Ks", "W4")),
     )
 
 
@@ -679,6 +692,8 @@ def plot_ks_w3_w4_observed(ctx: PaperFigureContext, dippers: pd.DataFrame | None
         "tier_b_ks_w3_w4_observed",
         xlabel=LABEL_KS_W4,
         ylabel=LABEL_KS_W3,
+        blackbody_bands=(("Ks", "W4"), ("Ks", "W3")),
+        blackbody_label_placement="above",
     )
 
 

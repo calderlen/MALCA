@@ -2,11 +2,13 @@ import argparse
 import json
 import sqlite3
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.ticker import AutoMinorLocator
+from matplotlib.lines import Line2D
+from matplotlib.ticker import AutoMinorLocator, FuncFormatter, MultipleLocator
 
 from malca.enrichment.characterize import crossmatch_2mass, crossmatch_allwise
 from malca.catalogs.gaia_ids import normalize_gaia_source_ids, parse_gaia_source_id
@@ -20,6 +22,7 @@ from malca.enrichment.sed_alpha import (
     _prepared_alpha_points,
     compute_sed_alpha_features,
 )
+from malca.plotting.blackbody_locus import add_blackbody_locus
 from malca.plotting.color_color_labels import (
     LABEL_H_KS_0,
     LABEL_IRAC1_IRAC2,
@@ -38,7 +41,10 @@ from malca.plotting.color_color_labels import (
 )
 from malca.plotting.extinction import add_dereddened_ir_magnitudes, dereddened_color
 from malca.plotting.irac import irac_vega_magnitude, irac_vega_magnitude_error
-from malca.plotting.lightcurve_publication import apply_publication_rcparams
+from malca.plotting.lightcurve_publication import (
+    FIG_SINGLE_COL_WIDTH,
+    apply_publication_rcparams,
+)
 
 
 RUN_ROOT = Path("output/runs/runs_march18_bundle_all")
@@ -49,9 +55,53 @@ REVIEW_DB = REVIEW_DIR / "review.taxonomy_filled.db"
 SED_PHOTOMETRY = REVIEW_DIR / "review.taxonomy_filled_sed_photometry.parquet"
 SED_EXCESS_SUMMARY: Path | None = None
 SPITZER_PHOTOMETRY: Path | None = None
+REFERENCE_PHOTOMETRY: Path | None = Path(
+    "output/dipper_color_reference_sources/dipper_reference_photometry.csv"
+)
 
 # Compact markers retain the error bars while reducing overlap in the colour planes.
-COLOR_POINT_MARKERSIZE = 4.0
+COLOR_POINT_MARKERSIZE = 3.0
+REFERENCE_POINT_MARKERSIZE = 8.0
+COLOR_ERRORBAR_LINEWIDTH = 0.55
+REFERENCE_ERRORBAR_LINEWIDTH = 1.50
+TEFF_SED_SINGLE_COLUMN_FIGSIZE = (FIG_SINGLE_COL_WIDTH, 3.3)
+REFERENCE_COLORS = tuple(plt.get_cmap("tab20").colors) + (
+    "#332288",
+    "#117733",
+    "#AA4499",
+)
+REFERENCE_MECHANISM_STYLES = {
+    "periodic_yso": ("o", "Periodic/QP YSO"),
+    "aperiodic_yso": ("s", "Aperiodic/clumpy YSO"),
+    "long_dust": ("D", "Long/single dust event"),
+    "evolved_ms_dust": ("p", "Evolved/MS dust"),
+    "circumbinary": ("^", "Circumbinary disk"),
+    "circumsecondary": ("v", "Circumsecondary disk/rings"),
+    "tidal_arm": ("P", "Tidal-arm occultation"),
+    "corotating": ("X", "Diskless co-rotating"),
+    "other": ("h", "Other/uncertain"),
+}
+REFERENCE_MORPHOLOGY_TO_MECHANISM = {
+    "periodic_inner_disk_warp": "periodic_yso",
+    "quasi_periodic_yso_dipper": "periodic_yso",
+    "aperiodic_yso_dipper": "aperiodic_yso",
+    "young_star_dipper": "aperiodic_yso",
+    "high_inclination_clumpy_disk": "aperiodic_yso",
+    "uxor_prototype": "aperiodic_yso",
+    "single_asymmetric_dust_occultation": "long_dust",
+    "long_duration_dust_occultation": "long_dust",
+    "long_duration_yso_dipper": "long_dust",
+    "evolved_disk_uxor": "evolved_ms_dust",
+    "main_sequence_dust_occultation": "evolved_ms_dust",
+    "aperiodic_main_sequence_dipper": "evolved_ms_dust",
+    "circumbinary_disk_occultation": "circumbinary",
+    "circumbinary_disk_occultation_candidate": "circumbinary",
+    "circumsecondary_ring_occultation": "circumsecondary",
+    "giant_star_circumsecondary_occultation": "circumsecondary",
+    "circumsecondary_disk_occultation": "circumsecondary",
+    "tidal_arm_disk_occultation": "tidal_arm",
+    "diskless_corotating_material": "corotating",
+}
 
 WISE_COLS = ["w1", "w1_err", "w2", "w2_err", "w3", "w3_err", "w4", "w4_err"]
 TMASS_COLS = ["tmass_j", "tmass_j_err", "tmass_h", "tmass_h_err", "tmass_k", "tmass_k_err"]
@@ -568,9 +618,9 @@ def _plot_errorbar_points(
             fmt="o",
             color="k",
             ecolor="0.25",
-            elinewidth=0.8,
+            elinewidth=COLOR_ERRORBAR_LINEWIDTH,
             capsize=3,
-            capthick=0.8,
+            capthick=COLOR_ERRORBAR_LINEWIDTH,
             markerfacecolor="k",
             markeredgecolor="k",
             markersize=COLOR_POINT_MARKERSIZE,
@@ -592,6 +642,131 @@ def _finish_color_axis(ax: plt.Axes) -> None:
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
 
 
+def _reference_quality_column(value_column: str) -> str:
+    if value_column.startswith("irac_"):
+        return "irac_color_plot_ok"
+    base = value_column[:-2] if value_column.endswith("_0") else value_column
+    return f"{base}_plot_ok"
+
+
+def _plot_reference_points(
+    ax: plt.Axes,
+    references: pd.DataFrame,
+    *,
+    x: str,
+    y: str,
+    xerr: str,
+    yerr: str,
+) -> tuple[int, int, list[Line2D], list[Line2D], list[tuple[float, float]]]:
+    if references.empty or x not in references or y not in references:
+        return 0, 0, [], [], []
+
+    plot_df = references.copy()
+    plot_df["_reference_style_index"] = np.arange(len(plot_df), dtype=int)
+    plot_df["_reference_mechanism"] = (
+        plot_df.get("morphology_family", pd.Series("", index=plot_df.index))
+        .astype(str)
+        .map(REFERENCE_MORPHOLOGY_TO_MECHANISM)
+        .fillna("other")
+    )
+    mechanism_order = {
+        mechanism: order
+        for order, mechanism in enumerate(REFERENCE_MECHANISM_STYLES)
+    }
+    plot_df["_reference_mechanism_order"] = plot_df["_reference_mechanism"].map(
+        mechanism_order
+    )
+    for column in (x, y, xerr, yerr):
+        if column in plot_df:
+            plot_df[column] = pd.to_numeric(plot_df[column], errors="coerce")
+    plot_df = plot_df[np.isfinite(plot_df[x]) & np.isfinite(plot_df[y])].copy()
+    if plot_df.empty:
+        return 0, 0, [], [], []
+    # Keep each source's color stable, but group the legend and draw order by
+    # physical mechanism so identical marker shapes appear together.
+    plot_df = plot_df.sort_values(
+        ["_reference_mechanism_order", "_reference_style_index"], kind="stable"
+    )
+
+    x_quality = _reference_quality_column(x)
+    y_quality = _reference_quality_column(y)
+    quality_ok = pd.Series(True, index=plot_df.index)
+    for column in (x_quality, y_quality):
+        if column not in plot_df:
+            quality_ok &= False
+        else:
+            quality_ok &= pd.to_numeric(plot_df[column], errors="coerce").fillna(0).astype(bool)
+
+    handles: list[Line2D] = []
+    points: list[tuple[float, float]] = []
+    present_mechanisms: set[str] = set()
+    for _, row in plot_df.iterrows():
+        style_index = int(row["_reference_style_index"])
+        color = REFERENCE_COLORS[style_index % len(REFERENCE_COLORS)]
+        mechanism = str(row["_reference_mechanism"])
+        marker, _ = REFERENCE_MECHANISM_STYLES[mechanism]
+        present_mechanisms.add(mechanism)
+        marker_edge_color = "black"
+        x_error = row.get(xerr)
+        y_error = row.get(yerr)
+        x_error = float(x_error) if x_error is not None and np.isfinite(x_error) and x_error >= 0 else None
+        y_error = float(y_error) if y_error is not None and np.isfinite(y_error) and y_error >= 0 else None
+        marker_size = REFERENCE_POINT_MARKERSIZE
+        ax.errorbar(
+            [float(row[x])],
+            [float(row[y])],
+            xerr=x_error,
+            yerr=y_error,
+            fmt=marker,
+            color=color,
+            ecolor=color,
+            elinewidth=REFERENCE_ERRORBAR_LINEWIDTH,
+            capsize=2.2,
+            capthick=REFERENCE_ERRORBAR_LINEWIDTH,
+            markerfacecolor=color,
+            markeredgecolor=marker_edge_color,
+            markeredgewidth=0.55,
+            markersize=marker_size,
+            linestyle="none",
+            zorder=8,
+        )
+        display_name = str(
+            row.get("display_name", row.get("canonical_name", row.get("candidate_id", "")))
+        )
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=color,
+                marker=marker,
+                linestyle="none",
+                markerfacecolor=color,
+                markeredgecolor=marker_edge_color,
+                markeredgewidth=0.55,
+                markersize=marker_size,
+                label=display_name,
+            )
+        )
+        points.append((float(row[x]), float(row[y])))
+    mechanism_handles = [
+        Line2D(
+            [],
+            [],
+            color="0.2",
+            marker=REFERENCE_MECHANISM_STYLES[mechanism][0],
+            linestyle="none",
+            markerfacecolor="white",
+            markeredgecolor="0.2",
+            markeredgewidth=0.75,
+            markersize=REFERENCE_POINT_MARKERSIZE,
+            label=REFERENCE_MECHANISM_STYLES[mechanism][1],
+        )
+        for mechanism in REFERENCE_MECHANISM_STYLES
+        if mechanism in present_mechanisms
+    ]
+    return len(plot_df), int(quality_ok.sum()), handles, mechanism_handles, points
+
+
 def _save_color_plot(
     df: pd.DataFrame,
     *,
@@ -605,16 +780,33 @@ def _save_color_plot(
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
     annotation: str | None = None,
+    blackbody_bands: tuple[tuple[str, str], tuple[str, str]] | None = None,
+    blackbody_label_placement: Literal["above", "below"] = "above",
+    references: pd.DataFrame | None = None,
 ) -> int:
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots(figsize=(7.35, 5.0))
     n = _plot_errorbar_points(ax, df, x=x, y=y, xerr=xerr, yerr=yerr, label=f"Dippers ({_finite_xy_count(df, x, y)})")
-    if n == 0:
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    (
+        reference_count,
+        reference_quality_count,
+        reference_handles,
+        mechanism_handles,
+        reference_points,
+    ) = _plot_reference_points(
+        ax,
+        references if references is not None else pd.DataFrame(),
+        x=x,
+        y=y,
+        xerr=xerr,
+        yerr=yerr,
+    )
+    if n == 0 and reference_count == 0:
         plt.close(fig)
         raise RuntimeError(
             f"Refusing to save empty color plot {output}: no finite {x}/{y} pairs"
         )
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
     if xlim is not None:
         ax.set_xlim(*xlim)
     if ylim is not None:
@@ -631,10 +823,77 @@ def _save_color_plot(
             color="0.25",
         )
     _finish_color_axis(ax)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.11, right=0.805, bottom=0.15, top=0.97)
+    main_points = []
+    if x in df and y in df:
+        main_x = pd.to_numeric(df[x], errors="coerce")
+        main_y = pd.to_numeric(df[y], errors="coerce")
+        main_mask = np.isfinite(main_x) & np.isfinite(main_y)
+        main_points = list(zip(main_x[main_mask].astype(float), main_y[main_mask].astype(float)))
+    if blackbody_bands is not None:
+        add_blackbody_locus(
+            ax,
+            *blackbody_bands,
+            label_placement=blackbody_label_placement,
+            avoid_points=[*main_points, *reference_points],
+        )
+    legend_handles: list[Line2D] = []
+    if n:
+        legend_handles.append(
+            Line2D(
+                [],
+                [],
+                color="black",
+                marker="o",
+                linestyle="none",
+                markerfacecolor="black",
+                markeredgecolor="black",
+                markersize=COLOR_POINT_MARKERSIZE,
+                label=f"MALCA dippers ({n})",
+            )
+        )
+    legend_handles.extend(reference_handles)
+    mechanism_anchor_y = 1.0
+    if legend_handles:
+        source_legend = ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            bbox_to_anchor=(1.01, 1.0),
+            borderaxespad=0.0,
+            frameon=False,
+            fontsize=6.75,
+            handlelength=1.0,
+            handletextpad=0.45,
+            labelspacing=0.75,
+            numpoints=1,
+        )
+        ax.add_artist(source_legend)
+        fig.canvas.draw()
+        source_bbox_axes = source_legend.get_window_extent(
+            fig.canvas.get_renderer()
+        ).transformed(ax.transAxes.inverted())
+        mechanism_anchor_y = source_bbox_axes.y0 - 0.025
+    if mechanism_handles:
+        ax.legend(
+            handles=mechanism_handles,
+            title="Marker family",
+            loc="upper left",
+            bbox_to_anchor=(1.01, mechanism_anchor_y),
+            borderaxespad=0.0,
+            frameon=False,
+            fontsize=6.2,
+            title_fontsize=6.6,
+            handlelength=1.0,
+            handletextpad=0.45,
+            labelspacing=0.55,
+            numpoints=1,
+        )
     fig.savefig(output)
     plt.close(fig)
-    print(f"Saved {output} ({n} finite points)")
+    print(
+        f"Saved {output} ({n} finite dippers; {reference_count} references, "
+        f"{reference_quality_count} quality-ok)"
+    )
     _print_missing_error_summary(df, x, y, xerr, yerr)
     return n
 
@@ -810,7 +1069,7 @@ def _shade_sed_alpha_bands(ax: plt.Axes, y_min: float, y_max: float, *, labels: 
                     zorder=2,
                 )
     for value in (-1.6, -0.3, 0.3):
-        ax.axhline(value, color="0.25", linestyle="--", linewidth=0.8, zorder=1)
+        ax.axhline(value, color="0.25", linestyle="--", linewidth=0.65, zorder=1)
 
 
 def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: float) -> None:
@@ -833,17 +1092,22 @@ def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: flo
             fmt="o",
             color="black",
             ecolor="black",
-            elinewidth=0.7,
-            capsize=2.5,
-            capthick=0.7,
+            elinewidth=0.45,
+            capsize=1.2,
+            capthick=0.45,
             markerfacecolor="black" if has_complete_errors else "none",
             markeredgecolor="black",
-            markeredgewidth=1.0 if has_complete_errors else 0.6,
+            markeredgewidth=0.65 if has_complete_errors else 0.5,
             markersize=markersize,
             linestyle="none",
             alpha=1.0,
             zorder=5,
         )
+
+
+def _teff_thousands_formatter(value: float, _position: float) -> str:
+    """Format Kelvin values compactly in units of 10^3 K."""
+    return f"{value / 1000.0:g}"
 
 
 def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
@@ -855,16 +1119,39 @@ def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
     y_min = min(-3.1, float(finite["sed_alpha"].min()) - 0.3)
     y_max = max(0.6, float(finite["sed_alpha"].max()) + 0.3)
 
-    fig, ax = plt.subplots(figsize=(7.6, 5.8))
+    fig, ax = plt.subplots(
+        figsize=TEFF_SED_SINGLE_COLUMN_FIGSIZE,
+        layout="constrained",
+    )
+    ax.set_box_aspect(1.0)
     _shade_sed_alpha_bands(ax, y_min, y_max, labels=False)
-    _draw_teff_alpha_points(ax, finite, markersize=7.0)
-    ax.set_xlabel(r"$T_{\rm eff}$ [K]")
-    ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]")
+    _draw_teff_alpha_points(ax, finite, markersize=3.6)
+    ax.set_xlabel(r"$T_{\rm eff}$ [$10^3$ K]", fontsize=10.5, labelpad=2)
+    ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]", fontsize=10.5, labelpad=2)
     ax.set_ylim(y_min, y_max)
-    ax.xaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.xaxis.set_major_locator(MultipleLocator(5000.0))
+    ax.xaxis.set_major_formatter(FuncFormatter(_teff_thousands_formatter))
+    ax.xaxis.set_minor_locator(MultipleLocator(2500.0))
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.tick_params(
+        which="major",
+        direction="in",
+        top=True,
+        right=True,
+        labelsize=9,
+        length=4.5,
+        width=0.8,
+        pad=2,
+    )
+    ax.tick_params(
+        which="minor",
+        direction="in",
+        top=True,
+        right=True,
+        length=2.4,
+        width=0.6,
+    )
 
-    fig.subplots_adjust(left=0.12, right=0.98, top=0.97, bottom=0.14)
     out_path = out_dir / "dipper_sed_alpha_teff.pdf"
     fig.savefig(out_path)
     plt.close(fig)
@@ -919,6 +1206,15 @@ def _default_spitzer_photometry(results_dir: Path) -> Path | None:
 
 def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
     """Load complete four-band IRAC colours from the optional archive cache."""
+    empty = pd.DataFrame(
+        {
+            "candidate_id": pd.Series(dtype="string"),
+            "irac_36_45": pd.Series(dtype=float),
+            "irac_36_45_err": pd.Series(dtype=float),
+            "irac_58_80": pd.Series(dtype=float),
+            "irac_58_80_err": pd.Series(dtype=float),
+        }
+    )
     columns = [
         "candidate_id",
         "band",
@@ -927,7 +1223,7 @@ def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
         "sep_arcsec",
     ]
     if SPITZER_PHOTOMETRY is None:
-        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+        return empty
 
     raw = pd.read_parquet(SPITZER_PHOTOMETRY)
     missing = sorted(set(columns) - set(raw.columns))
@@ -941,7 +1237,7 @@ def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
         columns,
     ].copy()
     if rows.empty:
-        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+        return empty
 
     rows["sep_arcsec"] = pd.to_numeric(rows["sep_arcsec"], errors="coerce")
     rows = rows.sort_values(["candidate_id", "band", "sep_arcsec"], na_position="last")
@@ -951,7 +1247,7 @@ def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
     )
     rows = rows[rows["candidate_id"].isin(complete_ids)]
     if rows.empty:
-        return pd.DataFrame(columns=["candidate_id", "irac_36_45", "irac_36_45_err", "irac_58_80", "irac_58_80_err"])
+        return empty
 
     wide = rows.set_index(["candidate_id", "band"])[["observed_flux_nu_jy", "observed_flux_nu_jy_err"]].unstack("band")
     out = pd.DataFrame(index=wide.index)
@@ -965,6 +1261,21 @@ def _load_spitzer_irac_colors(candidate_ids: pd.Series) -> pd.DataFrame:
     out["irac_58_80"] = out["irac3_mag"] - out["irac4_mag"]
     out["irac_58_80_err"] = _hypot2(out["irac3_mag_err"], out["irac4_mag_err"])
     return out.reset_index()
+
+
+def _load_reference_photometry() -> pd.DataFrame:
+    if REFERENCE_PHOTOMETRY is None:
+        return pd.DataFrame()
+    if REFERENCE_PHOTOMETRY.suffix.lower() == ".parquet":
+        references = pd.read_parquet(REFERENCE_PHOTOMETRY)
+    else:
+        references = pd.read_csv(REFERENCE_PHOTOMETRY)
+    if "display_name" not in references:
+        raise ValueError(
+            f"Reference photometry requires a display_name column: {REFERENCE_PHOTOMETRY}"
+        )
+    print(f"Loaded {len(references)} reference sources from {REFERENCE_PHOTOMETRY}")
+    return references
 
 
 def _parse_args() -> argparse.Namespace:
@@ -998,11 +1309,24 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Query remote AllWISE/2MASS services for missing stored measurements.",
     )
+    parser.add_argument(
+        "--reference-photometry",
+        type=Path,
+        default=REFERENCE_PHOTOMETRY,
+        help="Plot-ready CSV or parquet containing labeled literature reference sources.",
+    )
+    parser.add_argument(
+        "--color-plots-only",
+        action="store_true",
+        help="Regenerate only the infrared color-color PDFs affected by reference overlays.",
+    )
     return parser.parse_args()
 
 
 def _configure_paths(args: argparse.Namespace) -> None:
-    global RUN_ROOT, RESULTS_DIR, REVIEW_DIR, LABELS_CSV, REVIEW_DB, SED_PHOTOMETRY, SED_EXCESS_SUMMARY, SPITZER_PHOTOMETRY
+    global RUN_ROOT, RESULTS_DIR, REVIEW_DIR, LABELS_CSV, REVIEW_DB, SED_PHOTOMETRY, SED_EXCESS_SUMMARY, SPITZER_PHOTOMETRY, REFERENCE_PHOTOMETRY
+
+    REFERENCE_PHOTOMETRY = args.reference_photometry
 
     if args.run_root is not None:
         RUN_ROOT = args.run_root
@@ -1036,6 +1360,8 @@ def _configure_paths(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Missing SED-excess summary: {SED_EXCESS_SUMMARY}")
     if SPITZER_PHOTOMETRY is not None and not SPITZER_PHOTOMETRY.exists():
         raise FileNotFoundError(f"Missing Spitzer photometry cache: {SPITZER_PHOTOMETRY}")
+    if REFERENCE_PHOTOMETRY is not None and not REFERENCE_PHOTOMETRY.exists():
+        raise FileNotFoundError(f"Missing reference photometry: {REFERENCE_PHOTOMETRY}")
 
     print(f"Run root: {RUN_ROOT}")
     print(f"Review DB: {REVIEW_DB}")
@@ -1043,6 +1369,7 @@ def _configure_paths(args: argparse.Namespace) -> None:
     print(f"SED photometry: {SED_PHOTOMETRY}")
     print(f"SED-excess summary: {SED_EXCESS_SUMMARY or 'not supplied'}")
     print(f"Spitzer photometry: {SPITZER_PHOTOMETRY or 'not supplied'}")
+    print(f"Reference photometry: {REFERENCE_PHOTOMETRY or 'not supplied'}")
     print(f"Results directory: {RESULTS_DIR}")
 
 
@@ -1064,6 +1391,7 @@ def main() -> None:
     if "sed_alpha_n_points" in summary:
         summary["sed_alpha_band_count"] = summary["sed_alpha_n_points"]
     summary = _add_missing_flags(summary)
+    references = _load_reference_photometry()
 
     print(f"(W1-W2)_0/(H-Ks)_0 finite points: {_finite_xy_count(summary, 'w1_w2_0', 'H_K_0')}")
     print(f"(W1-W2)_0/(W2-W3)_0 finite points: {_finite_xy_count(summary, 'w1_w2_0', 'w2_w3_0')}")
@@ -1079,7 +1407,8 @@ def main() -> None:
     print(f"SED alpha uncertainty finite points: {_finite_count(summary, 'sed_alpha_err')}/{len(summary)}")
     print(f"Teff lower/upper uncertainty finite points: {_finite_count(summary, 'teff_err_lower')}/{len(summary)}")
 
-    _plot_vphas(summary, RESULTS_DIR)
+    if not args.color_plots_only:
+        _plot_vphas(summary, RESULTS_DIR)
     _save_color_plot(
         summary,
         x="w1_w2_0",
@@ -1089,8 +1418,10 @@ def main() -> None:
         xlabel=LABEL_W1_W2_0,
         ylabel=LABEL_H_KS_0,
         output=RESULTS_DIR / "dipper_wise_color_color.pdf",
-        xlim=(-0.2, 1.0),
+        xlim=(-0.5, 1.1),
         ylim=(0.0, 1.0),
+        blackbody_bands=(("W1", "W2"), ("H", "Ks")),
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1101,6 +1432,9 @@ def main() -> None:
         xlabel=LABEL_W1_W2_0,
         ylabel=LABEL_W2_W3_0,
         output=RESULTS_DIR / "dipper_wise_w1w2_w2w3.pdf",
+        blackbody_bands=(("W1", "W2"), ("W2", "W3")),
+        blackbody_label_placement="below",
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1111,17 +1445,20 @@ def main() -> None:
         xlabel=LABEL_W1_W2_0,
         ylabel=LABEL_W1_W4_0,
         output=RESULTS_DIR / "dipper_wise_w1w2_w1w4.pdf",
+        blackbody_bands=(("W1", "W2"), ("W1", "W4")),
+        references=references,
     )
-    _save_color_plot(
-        summary,
-        x="w1_w2_0",
-        y="w1_0",
-        xerr="w1_w2_err",
-        yerr="w1_err",
-        xlabel=LABEL_W1_W2_0,
-        ylabel=LABEL_W1_0,
-        output=RESULTS_DIR / "dipper_wise_w1_w1w2.pdf",
-    )
+    if not args.color_plots_only:
+        _save_color_plot(
+            summary,
+            x="w1_w2_0",
+            y="w1_0",
+            xerr="w1_w2_err",
+            yerr="w1_err",
+            xlabel=LABEL_W1_W2_0,
+            ylabel=LABEL_W1_0,
+            output=RESULTS_DIR / "dipper_wise_w1_w1w2.pdf",
+        )
     _save_color_plot(
         summary,
         x="ks_w4_0",
@@ -1131,6 +1468,8 @@ def main() -> None:
         xlabel=LABEL_KS_W4_0,
         ylabel=LABEL_J_KS_0,
         output=RESULTS_DIR / "dipper_2mass_wise_ksw4_jks.pdf",
+        blackbody_bands=(("Ks", "W4"), ("J", "Ks")),
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1141,6 +1480,8 @@ def main() -> None:
         xlabel=LABEL_KS_W2_0,
         ylabel=LABEL_J_KS_0,
         output=RESULTS_DIR / "dipper_2mass_wise_ksw2_jks.pdf",
+        blackbody_bands=(("Ks", "W2"), ("J", "Ks")),
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1151,6 +1492,8 @@ def main() -> None:
         xlabel=LABEL_KS_W2_0,
         ylabel=LABEL_KS_W3_0,
         output=RESULTS_DIR / "dipper_2mass_wise_ksw2_ksw3.pdf",
+        blackbody_bands=(("Ks", "W2"), ("Ks", "W3")),
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1161,6 +1504,8 @@ def main() -> None:
         xlabel=LABEL_J_H_0,
         ylabel=LABEL_H_KS_0,
         output=RESULTS_DIR / "dipper_2mass_jh_hks.pdf",
+        blackbody_bands=(("J", "H"), ("H", "Ks")),
+        references=references,
     )
     _save_color_plot(
         summary,
@@ -1171,29 +1516,33 @@ def main() -> None:
         xlabel=LABEL_W3_W4_0,
         ylabel=LABEL_W1_W2_0,
         output=RESULTS_DIR / "dipper_wise_w3w4_w1w2.pdf",
+        blackbody_bands=(("W3", "W4"), ("W1", "W2")),
+        references=references,
     )
     spitzer_irac = _load_spitzer_irac_colors(summary["candidate_id"])
     print(
         "Spitzer IRAC diagnostic complete four-band points: "
         f"{_finite_xy_count(spitzer_irac, 'irac_36_45', 'irac_58_80')}/{len(summary)}"
     )
-    if not spitzer_irac.empty:
-        _save_color_plot(
-            spitzer_irac,
-            x="irac_36_45",
-            y="irac_58_80",
-            xerr="irac_36_45_err",
-            yerr="irac_58_80_err",
-            xlabel=LABEL_IRAC1_IRAC2,
-            ylabel=LABEL_IRAC3_IRAC4,
-            output=RESULTS_DIR / "dipper_spitzer_irac_color_color_diagnostic.pdf",
-        )
-    _plot_sed_alpha(summary, RESULTS_DIR)
-    _plot_teff_sed_alpha(summary, RESULTS_DIR)
+    _save_color_plot(
+        spitzer_irac,
+        x="irac_36_45",
+        y="irac_58_80",
+        xerr="irac_36_45_err",
+        yerr="irac_58_80_err",
+        xlabel=LABEL_IRAC1_IRAC2,
+        ylabel=LABEL_IRAC3_IRAC4,
+        output=RESULTS_DIR / "dipper_spitzer_irac_color_color_diagnostic.pdf",
+        blackbody_bands=(("IRAC1", "IRAC2"), ("IRAC3", "IRAC4")),
+        references=references,
+    )
+    if not args.color_plots_only:
+        _plot_sed_alpha(summary, RESULTS_DIR)
+        _plot_teff_sed_alpha(summary, RESULTS_DIR)
 
-    csv_path = RESULTS_DIR / "dipper_ir_excess_summary.csv"
-    summary.to_csv(csv_path, index=False)
-    print(f"Saved {csv_path} ({len(summary)} rows)")
+        csv_path = RESULTS_DIR / "dipper_ir_excess_summary.csv"
+        summary.to_csv(csv_path, index=False)
+        print(f"Saved {csv_path} ({len(summary)} rows)")
 
 
 if __name__ == "__main__":
