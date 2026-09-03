@@ -230,10 +230,6 @@ def _base_args() -> argparse.Namespace:
         dip_morphology="gaussian",
         jump_morphology="paczynski",
         min_delta_bic=10.0,
-        apply_score_filter=True,
-        min_score=0.0,
-        min_dip_score=None,
-        min_jump_score=None,
         apply_periodicity_validation=False,
         periodicity_n_bootstrap=1000,
         periodicity_significance=0.01,
@@ -466,9 +462,6 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
     assert kwargs["significant_min_run_count"] == 1
     assert kwargs["apply_run_robustness"] is True
     assert kwargs["max_run_count"] is None
-    assert kwargs["apply_score"] is True
-    assert kwargs["min_dip_score"] is None
-    assert kwargs["min_jump_score"] is None
     assert kwargs["apply_gaia_ruwe_validation"] is True
     assert kwargs["apply_gaia_pm_validation"] is True
     assert kwargs["apply_periodic_catalog_validation"] is True
@@ -492,7 +485,6 @@ def test_build_filter_kwargs_defaults_match_pipeline_behavior() -> None:
 
 def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args = _base_args()
-    args.apply_score_filter = False
     args.skip_significant_detection = True
     args.significant_no_require_flag = True
     args.significant_min_peak_count = 3
@@ -502,8 +494,6 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args.jump_morphology = "gaussian"
     args.min_delta_bic = 7.5
     args.max_run_count = 4
-    args.min_dip_score = 1.2
-    args.min_jump_score = 0.4
     args.apply_periodicity_validation = True
     args.periodicity_n_bootstrap = 250
     args.periodicity_significance = 0.02
@@ -527,7 +517,6 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
 
     kwargs = _build_filter_kwargs(args)
 
-    assert kwargs["apply_score"] is False
     assert kwargs["apply_significant_detection"] is False
     assert kwargs["significant_require_flag"] is False
     assert kwargs["significant_min_peak_count"] == 3
@@ -537,9 +526,6 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     assert kwargs["dip_morphology"] == "paczynski"
     assert kwargs["jump_morphology"] == "gaussian"
     assert kwargs["min_delta_bic"] == 7.5
-    assert kwargs["min_dip_score"] == 1.2
-    assert kwargs["min_jump_score"] == 0.4
-
     assert kwargs["apply_periodicity_validation"] is True
     assert kwargs["periodicity_n_bootstrap"] == 250
     assert kwargs["periodicity_significance"] == 0.02

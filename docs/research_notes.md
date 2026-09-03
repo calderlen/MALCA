@@ -34,7 +34,6 @@
 
 - **filtering**
     - should add a MAX run count to `filter_run_robustness` in addition to the minimum run count. this may be a cheap way to filter out periodic candidates
-    - `filter_score` does not have a dipping and jumpng minimum score and i think the current minimum is log10(score) >= 0.0? for all of these filtering steps get a notebook set up that explores attrition of these filters, both numerically and visually.
     - filtering order
         `filter_posterior_strength` -> `filter_run_robustness` -> `filter_morphology` -> 
 

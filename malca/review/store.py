@@ -1561,7 +1561,6 @@ _CANDIDATE_COLUMNS: list[tuple[str, str, str]] = [
     ("failed_posterior_strength", "INTEGER", "bool"),
     ("failed_run_robustness",    "INTEGER", "bool"),
     ("failed_morphology",        "INTEGER", "bool"),
-    ("failed_score",             "INTEGER", "bool"),
     ("failed_periodicity",       "INTEGER", "bool"),
     ("failed_gaia_ruwe",         "INTEGER", "bool"),
     ("failed_periodic_catalog",  "INTEGER", "bool"),

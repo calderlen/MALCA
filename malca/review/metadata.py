@@ -749,7 +749,6 @@ REVIEW_METADATA_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("Posterior strength", "failed_posterior_strength"),
         ("Run robustness", "failed_run_robustness"),
         ("Morphology", "failed_morphology"),
-        ("Score", "failed_score"),
         ("Periodicity", "failed_periodicity"),
         ("Gaia PM", "failed_gaia_pm"),
         ("Signal amplitude", "failed_signal_amplitude"),

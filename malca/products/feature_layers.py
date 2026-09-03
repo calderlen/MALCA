@@ -612,7 +612,6 @@ _DERIVED_EXACT_COLUMNS = {
     "failed_posterior_strength",
     "failed_run_robustness",
     "failed_morphology",
-    "failed_score",
     "failed_periodicity",
     "failed_gaia_ruwe",
     "failed_periodic_catalog",

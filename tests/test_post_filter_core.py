@@ -54,19 +54,6 @@ def test_filter_run_robustness_respects_max_run_count() -> None:
     assert list(out["lc_path"]) == ["a.csv"]
 
 
-def test_filter_score_branch_specific_thresholds() -> None:
-    df = pd.DataFrame(
-        {
-            "lc_path": ["dip.csv", "jump.csv", "none.csv"],
-            "dipper_score": [1.2, -1.0, -2.0],
-            "jumper_score": [-1.0, 0.8, -2.0],
-        }
-    )
-
-    out = post_filter.filter_score(df, min_dip_score=0.5, min_jump_score=0.5)
-    assert set(out["lc_path"]) == {"dip.csv", "jump.csv"}
-
-
 def test_filter_significant_detection_explicit_gate() -> None:
     df = pd.DataFrame(
         {
@@ -126,7 +113,6 @@ def test_apply_filters_hydrates_layer_first_event_metrics() -> None:
         apply_significant_detection=False,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=False,
         apply_gaia_ruwe_validation=False,
         apply_gaia_pm_validation=False,
@@ -162,7 +148,6 @@ def test_apply_filters_tags_significant_detection_failures() -> None:
         apply_significant_detection=True,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=False,
         apply_gaia_ruwe_validation=False,
         apply_gaia_pm_validation=False,
@@ -220,7 +205,6 @@ def test_apply_filters_periodicity_checks_only_prereq_passers(monkeypatch: pytes
         apply_significant_detection=True,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=True,
         apply_gaia_ruwe_validation=False,
         apply_gaia_pm_validation=False,
@@ -280,7 +264,6 @@ def test_apply_filters_periodicity_reject_only_marks_checked_rows(monkeypatch: p
         apply_significant_detection=True,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=True,
         periodicity_flag_only=False,
         apply_gaia_ruwe_validation=False,
@@ -336,7 +319,6 @@ def test_apply_filters_periodicity_all_candidates_overrides_prereq_mask(monkeypa
         apply_significant_detection=True,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=True,
         periodicity_all_candidates=True,
         apply_gaia_ruwe_validation=False,

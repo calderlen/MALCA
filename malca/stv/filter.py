@@ -8,7 +8,6 @@ Filters:
 8. filter_significant_detection - require explicit significant run/peak evidence
 9. filter_run_robustness - require sufficient run count and points
 10. filter_morphology - require specific morphology with good BIC
-11. filter_score - require minimum dipper/jumper scores (log10 event score)
 
 Validation filters (expensive, run on candidates only):
 11. validate_periodicity - bootstrap PDM/CE to check if source is periodic
@@ -26,7 +25,6 @@ Required input columns (from events.py):
     dip_max_run_cameras, jump_max_run_cameras,
     dip_best_morph, jump_best_morph,
     dip_best_delta_bic, jump_best_delta_bic,
-    dipper_score (for score filter),
     path (for logging and camera median validation)
 """
 from __future__ import annotations
@@ -63,8 +61,6 @@ from malca.config import (
     POST_FILTER_MAX_SEP_ARCSEC,
     POST_FILTER_REL_TOL,
     POST_FILTER_MIN_DELTA_BIC,
-    POST_FILTER_MIN_DIP_SCORE,
-    POST_FILTER_MIN_JUMP_SCORE,
     POST_FILTER_PDM_SNR_THRESHOLD,
     POST_FILTER_CE_SNR_THRESHOLD,
     POST_FILTER_PDM_METHOD,
@@ -140,7 +136,6 @@ POST_FILTER_FAILURE_LABELS = (
     "significant_detection",
     "run_robustness",
     "morphology",
-    "score",
     "periodic_catalog",
     "gaia_ruwe",
     "gaia_pm",
@@ -813,73 +808,6 @@ def filter_morphology(
     if pbar:
         pbar.update(1)
         pbar.close()
-
-    return out
-
-
-# =============================================================================
-# Filter 10: Event score
-# =============================================================================
-
-def filter_score(
-    df: pd.DataFrame,
-    *,
-    min_dip_score: float | None = None,
-    min_jump_score: float | None = None,
-    min_score: float | None = None,
-    show_tqdm: bool = False,
-    verbose: bool = False,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Require dipper/jumper score thresholds with branch-aware limits.
-
-    If ``min_score`` is provided, it is used as a legacy fallback for both
-    branches unless branch-specific thresholds are also provided.
-
-    Parameters
-    ----------
-    min_dip_score : float | None
-        Minimum dipper_score threshold.
-    min_jump_score : float | None
-        Minimum jumper_score threshold.
-    min_score : float | None
-        Legacy threshold applied to both branches when branch-specific
-        thresholds are not provided.
-    """
-    n0 = len(df)
-
-    if min_score is not None:
-        if min_dip_score is None:
-            min_dip_score = float(min_score)
-        if min_jump_score is None:
-            min_jump_score = float(min_score)
-
-    if min_dip_score is None:
-        min_dip_score = POST_FILTER_MIN_DIP_SCORE
-    if min_jump_score is None:
-        min_jump_score = POST_FILTER_MIN_JUMP_SCORE
-
-    has_dip = "dipper_score" in df.columns
-    has_jump = "jumper_score" in df.columns
-    if not has_dip and not has_jump:
-        if verbose:
-            tqdm.write("[filter_score] WARNING: score columns missing, skipping filter")
-        return df.copy()
-
-    dip_ok = pd.Series(False, index=df.index)
-    jump_ok = pd.Series(False, index=df.index)
-    if has_dip:
-        dip_ok = pd.to_numeric(df["dipper_score"], errors="coerce").fillna(-np.inf) >= float(min_dip_score)
-    if has_jump:
-        jump_ok = pd.to_numeric(df["jumper_score"], errors="coerce").fillna(-np.inf) >= float(min_jump_score)
-
-    mask = dip_ok | jump_ok
-    out = df.loc[mask].reset_index(drop=True)
-
-    if show_tqdm and verbose:
-        tqdm.write(f"[filter_score] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_score", rejected_log_csv)
 
     return out
 
@@ -3194,11 +3122,6 @@ def apply_filters(
     dip_morphology: str = "gaussian",
     jump_morphology: str = "paczynski",
     min_delta_bic: float = POST_FILTER_MIN_DELTA_BIC,
-    # Filter 11: event score
-    apply_score: bool = True,
-    min_dip_score: float | None = 0.0,
-    min_jump_score: float | None = 0.0,
-    min_score: float | None = None,
     # Validation: periodicity
     apply_periodicity_validation: bool = False,
     periodicity_n_bootstrap: int = 1000,
@@ -3288,7 +3211,9 @@ def apply_filters(
         - failed_<filter_name>: bool, True if row failed that filter
         - failed_any: bool, True if row failed any filter
     """
-    df_filtered = df.copy()
+    # Legacy products may still contain the retired score-cut flag.  Remove it
+    # before calculating eligibility or failed_any so it cannot reject rows.
+    df_filtered = df.drop(columns=["failed_score"], errors="ignore").copy()
     n_start = len(df_filtered)
     if "lc_path" not in df_filtered.columns:
         raise ValueError("STV candidate products must include an 'lc_path' column")
@@ -3398,16 +3323,6 @@ def apply_filters(
             "dip_morphology": dip_morphology,
             "jump_morphology": jump_morphology,
             "min_delta_bic": min_delta_bic,
-            "show_tqdm": show_tqdm,
-            "verbose": verbose,
-        }))
-
-    if apply_score:
-        periodicity_prereq_labels.append("score")
-        filters.append(("score", filter_score, {
-            "min_dip_score": min_dip_score,
-            "min_jump_score": min_jump_score,
-            "min_score": min_score,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }))
@@ -3687,7 +3602,6 @@ Example usage:
     g_evidence = parser.add_argument_group("Evidence & significance")
     g_run = parser.add_argument_group("Run robustness")
     g_morph = parser.add_argument_group("Morphology")
-    g_score = parser.add_argument_group("Score")
     g_periodicity = parser.add_argument_group("Periodicity validation")
     g_gaia_ruwe = parser.add_argument_group("Gaia RUWE")
     g_gaia_pm = parser.add_argument_group("Gaia proper motion")
@@ -3733,15 +3647,6 @@ Example usage:
                         help="Required morphology for jumps (default: paczynski)")
     g_morph.add_argument("--min-delta-bic", type=float, default=POST_FILTER_MIN_DELTA_BIC,
                         help="Minimum delta BIC for morphology filter (default: 10)")
-
-    g_score.add_argument("--apply-score-filter", action=argparse.BooleanOptionalAction, default=True,
-                        help="Apply event score filter (default: enabled)")
-    g_score.add_argument("--min-score", type=float, default=POST_FILTER_MIN_DIP_SCORE,
-                        help="Legacy minimum log10 event score applied to dip and jump branches (default: -3.0)")
-    g_score.add_argument("--min-dip-score", type=float, default=None,
-                        help="Minimum dipper_score threshold (overrides --min-score for dips)")
-    g_score.add_argument("--min-jump-score", type=float, default=None,
-                        help="Minimum jumper_score threshold (overrides --min-score for jumps)")
 
     g_periodicity.add_argument("--apply-periodicity-validation", action="store_true",
                         help="Apply bootstrap PDM/CE periodicity validation (off by default)")
@@ -3955,11 +3860,6 @@ Example usage:
         dip_morphology=args.dip_morphology,
         jump_morphology=args.jump_morphology,
         min_delta_bic=args.min_delta_bic,
-        # Score
-        apply_score=args.apply_score_filter,
-        min_dip_score=args.min_dip_score,
-        min_jump_score=args.min_jump_score,
-        min_score=args.min_score,
         # Periodicity validation
         apply_periodicity_validation=args.apply_periodicity_validation,
         periodicity_n_bootstrap=args.periodicity_n_bootstrap,
@@ -4028,7 +3928,6 @@ Example usage:
                     "apply_significant_detection": not args.skip_significant_detection,
                     "apply_run_robustness": not args.skip_run_robustness,
                     "apply_morphology": args.apply_morphology,
-                    "apply_score": args.apply_score_filter,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
                     "periodicity_reject": args.periodicity_reject if args.apply_periodicity_validation else None,
                     "periodicity_all_candidates": args.periodicity_all_candidates if args.apply_periodicity_validation else None,
@@ -4051,9 +3950,6 @@ Example usage:
                     "dip_morphology": args.dip_morphology if args.apply_morphology else None,
                     "jump_morphology": args.jump_morphology if args.apply_morphology else None,
                     "min_delta_bic": args.min_delta_bic if args.apply_morphology else None,
-                    "min_score": args.min_score if args.apply_score_filter else None,
-                    "min_dip_score": args.min_dip_score if args.apply_score_filter else None,
-                    "min_jump_score": args.min_jump_score if args.apply_score_filter else None,
                     "gaia_max_ruwe": args.gaia_max_ruwe if not args.skip_gaia_ruwe_validation else None,
                     "gaia_reject": args.gaia_reject if not args.skip_gaia_ruwe_validation else None,
                     "gaia_max_pm": args.gaia_max_pm if not args.skip_gaia_pm_validation else None,

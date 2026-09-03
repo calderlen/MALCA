@@ -232,10 +232,6 @@ RUN_REUSE_PARAM_ATTRS = (
     "dip_morphology",
     "jump_morphology",
     "min_delta_bic",
-    "apply_score_filter",
-    "min_dip_score",
-    "min_jump_score",
-    "min_score",
     "apply_periodicity_validation",
     "periodicity_n_bootstrap",
     "periodicity_significance",
@@ -459,10 +455,6 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "dip_morphology": "gaussian",
     "jump_morphology": "paczynski",
     "min_delta_bic": 10.0,
-    "apply_score_filter": True,
-    "min_score": 0.0,
-    "min_dip_score": None,
-    "min_jump_score": None,
     "apply_periodicity_validation": False,
     "periodicity_n_bootstrap": 1000,
     "periodicity_significance": 0.01,
@@ -906,10 +898,6 @@ def _stored_run_reuse_fingerprint_matches(params: dict[str, Any], current_finger
     if not isinstance(stored_fingerprint, dict):
         return False
     return json_stable(stored_fingerprint) == json_stable(current_fingerprint)
-
-
-def _score_filter_enabled(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "apply_score_filter", getattr(args, "apply_score", False)))
 
 
 def _gaia_cache_arg(args: argparse.Namespace) -> Path:
@@ -1526,10 +1514,6 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "dip_morphology": args.dip_morphology,
         "jump_morphology": args.jump_morphology,
         "min_delta_bic": args.min_delta_bic,
-        "apply_score": _score_filter_enabled(args),
-        "min_dip_score": args.min_dip_score,
-        "min_jump_score": args.min_jump_score,
-        "min_score": args.min_score,
         # Validation filters
         "apply_periodicity_validation": args.apply_periodicity_validation,
         "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
@@ -2253,10 +2237,6 @@ def main():
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
-            "apply_score": _score_filter_enabled(args),
-            "min_dip_score": args.min_dip_score,
-            "min_jump_score": args.min_jump_score,
-            "min_score": args.min_score,
             "apply_periodicity_validation": args.apply_periodicity_validation,
             "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
             "periodicity_significance": args.periodicity_significance,
@@ -2450,10 +2430,6 @@ def main():
             "dip_morphology": args.dip_morphology,
             "jump_morphology": args.jump_morphology,
             "min_delta_bic": args.min_delta_bic,
-            "apply_score_filter": _score_filter_enabled(args),
-            "min_dip_score": args.min_dip_score,
-            "min_jump_score": args.min_jump_score,
-            "min_score": args.min_score,
             "apply_periodicity_validation": args.apply_periodicity_validation,
             "periodicity_n_bootstrap": args.periodicity_n_bootstrap,
             "periodicity_significance": args.periodicity_significance,

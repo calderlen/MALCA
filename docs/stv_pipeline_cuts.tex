@@ -1,0 +1,108 @@
+% STV discovery and filtering cuts.
+%
+% This fragment follows the working two-column table wrapper in
+% malca/review/data/eight_class_ml_features.tex.  For an exact historical
+% configuration, cite that run's run_params.json as command-line/config
+% overrides take precedence over the defaults below.
+%
+% Required preamble: \usepackage{array,booktabs,longtable}
+%
+% For a non-REVTeX two-column document, replace
+% \onecolumngrid/\twocolumngrid with \onecolumn/\twocolumn.
+% Use \input{docs/stv_pipeline_cuts.tex}; do not wrap it in a table environment.
+\clearpage
+\onecolumngrid
+\begingroup
+\let\stvSavedClearpage\clearpage
+\def\clearpage{\stvSavedClearpage\onecolumngrid}
+\setlength{\LTcapwidth}{\textwidth}
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\setlength{\LTleft}{0pt}
+\setlength{\LTright}{0pt}
+\setlength{\emergencystretch}{1.5em}
+\renewcommand{\arraystretch}{1.15}
+
+% REVTeX's longtable support accepts l columns but not p columns.  The
+% parboxes retain the same fixed-width, wrapped four-column layout.
+\newcommand{\stvcutrow}[4]{%
+  \parbox[t]{0.14\linewidth}{\raggedright #1} &
+  \parbox[t]{0.37\linewidth}{\raggedright #2} &
+  \parbox[t]{0.15\linewidth}{\raggedright #3} &
+  \parbox[t]{0.26\linewidth}{\raggedright #4} \\
+}
+
+\begin{longtable}{@{}l l l l@{}}
+\caption{Selection, routing, and quality-control criteria in the default MALCA short-timescale-variability (STV) discovery pipeline. ``Hard'' means the criterion contributes to eligibility for the stochastic-event product; ``route'' diverts a source to a separate branch; and ``flag'' is retained as provenance without rejecting the source by default. The table covers the discovery and post-detection filtering path, not downstream characterization/classification annotations.}\label{tab:stv-pipeline-cuts} \\
+\toprule
+\stvcutrow{\textbf{Stage}}{\textbf{Criterion (effective default)}}{\textbf{Action}}{\textbf{Recorded decision / implementation}}
+\midrule
+\endfirsthead
+
+\multicolumn{4}{c}{\tablename\ \thetable\ -- continued from previous page} \\
+\toprule
+\stvcutrow{\textbf{Stage}}{\textbf{Criterion (effective default)}}{\textbf{Action}}{\textbf{Recorded decision / implementation}}
+\midrule
+\endhead
+
+\midrule
+\multicolumn{4}{r}{Continued on next page} \\
+\midrule
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+\multicolumn{4}{@{}l}{\textit{Input and observation-level quality control}} \\
+\addlinespace[2pt]
+\stvcutrow{Light-curve availability}{A manifest row is processed only when its expected ASAS-SN light-curve file exists.}{Hard}{\texttt{dat\_exists}; \texttt{build\_manifest()} in \texttt{malca/io/manifest.py}.}
+\stvcutrow{Canonical row quality}{When present, require \texttt{good\_bad}=1 and \texttt{saturated}=0. Always require finite JD, magnitude, and uncertainty, with uncertainty $>0$.}{Hard (row removal)}{Applied by \texttt{clean\_lc()} before tag statistics and event scoring. Missing quality/saturation columns are tolerated for compatible input formats.}
+\stvcutrow{Uncertainty quality}{Require $\sigma_m < 1.0$ mag, then remove uncertainty outliers by median-centered, MAD-based $5\sigma$ clipping. The clipping is on the reported \emph{uncertainty}, not on magnitude.}{Hard (row removal)}{\texttt{clean\_lc()} with \texttt{CLEAN\_LC\_MAX\_ERROR\_ABSOLUTE}=1.0 and \texttt{CLEAN\_LC\_MAX\_ERROR\_SIGMA}=5.}
+\stvcutrow{Event-preparation validity}{After baseline construction, use only points with finite JD, magnitude, baseline, and effective uncertainty, and require $\sigma_{\rm eff}>0$.}{Hard (row removal; error if none remain)}{\texttt{score\_lightcurve()} / \texttt{score\_events\_bayesian()} in \texttt{malca/stv/events.py}.}
+
+\addlinespace[2pt]
+\multicolumn{4}{@{}l}{\textit{Source-level tags before event finding}} \\
+\addlinespace[2pt]
+\stvcutrow{Tag-stat computation}{A source whose light curve cannot be read, cleaned, and summarized has \texttt{failed\_tag\_stats}=\texttt{True}.}{Hard}{The standard pipeline excludes every active \texttt{failed\_*} tag unless \texttt{--pass-all-tags} or a narrower \texttt{--enforce-tags} policy is requested.}
+\stvcutrow{Time baseline and sampling}{From the cleaned light curve, require time span $\geq100$ d and mean sampling density $N/\Delta t\geq0.05$ points d$^{-1}$.}{Hard}{\texttt{failed\_sparse}; \texttt{filter\_sparse\_lightcurves()} in \texttt{malca/stv/tag.py}.}
+\stvcutrow{Multi-camera support}{Require at least two cameras, each represented by at least two cleaned observations.}{Hard}{\texttt{failed\_multi\_camera}; \texttt{filter\_multi\_camera()}.}
+\stvcutrow{Magnitude-bin overlap}{Keep a source when its catalogued \texttt{mag\_bin} overlaps $[10,18]$ mag (inclusive). An unparsable bin is retained.}{Hard}{\texttt{failed\_mag\_range}; \texttt{filter\_mag\_range()}. This is a bin-selection rule, not a cut on the measured light-curve median.}
+\stvcutrow{VSX crossmatch}{Match within $3$ arcsec and attach VSX metadata. No VSX class is excluded by the default pipeline configuration.}{Flag}{\texttt{attach\_vsx\_info()}; it does not create a default \texttt{failed\_*} decision.}
+\stvcutrow{Raw camera-median audit}{Flag a camera when its \texttt{.raw2} median lies outside its magnitude bin expanded by $\pm0.2$ mag.}{Flag}{\texttt{raw\_median\_suspect\_cameras}; \texttt{filter\_camera\_medians()}. Raw-space suspect cameras are not removed.}
+
+\addlinespace[2pt]
+\multicolumn{4}{@{}l}{\textit{Camera handling and optional pre-event routing}} \\
+\addlinespace[2pt]
+\stvcutrow{Catastrophic camera excursions}{Remove a whole camera when it has $\geq30$ points and contains at least one rare ($\leq3\%$ of its points), unsupported $\geq3$ mag deviation from its camera median. Support is checked within 2 d against other-camera deviations of $<0.75$ mag.}{Hard (camera removal)}{Enabled by default in \texttt{events}; \texttt{identify\_catastrophic\_\allowbreak outlier\_cameras()}.}
+\stvcutrow{Residual-camera quality}{After the first baseline, remove a whole camera with persistently excessive residual scatter (median overlap-window scatter ratio $>2.5$) or residual median offset $>15\sigma$. Comparisons use 100-d windows, $\geq10$ points/camera, and preserve at least one camera.}{Hard (camera removal)}{Enabled by default in \texttt{events}; \texttt{filter\_residual\_bad\_cameras()}. Raw \texttt{.raw2} scatter/offset statistics are not hard cuts.}
+\stvcutrow{Pre-event periodicity router}{\emph{Off by default.} If enabled, route a source to the periodic branch when CE evidence over 0.2--100 d meets the router criteria: normally CE S/N $\geq10$, folded-scatter ratio $\leq0.8$, and at most two phase-peak regions; documented near-threshold rescues are also allowed. Require at least 50 cleaned points.}{Route, not rejection}{\texttt{pre\_periodic\_flag}; the periodic branch is saved separately and excluded from stochastic event finding. \texttt{apply\_pre\_periodicity\_gate()}.}
+
+\addlinespace[2pt]
+\multicolumn{4}{@{}l}{\textit{Event construction}} \\
+\addlinespace[2pt]
+\stvcutrow{Point trigger}{For each dip and jump model, require leave-one-out event posterior probability $\geq99.99997\%$ ($0.9999997$).}{Hard for event membership}{Default \texttt{trigger\_mode=posterior\_prob}; \texttt{resolve\_trigger\_indices()}. The alternate \texttt{logbf} mode uses $\log\mathrm{BF}_{\rm local}\geq5$.}
+\stvcutrow{Run continuity}{Group triggered points only if they are separated by no more than five non-triggered index positions and by an automatically inferred local-cadence time gap (capped at 30 d to avoid bridging seasonal gaps).}{Hard for event membership}{\texttt{build\_runs()} with \texttt{RUN\_MAX\_GAP\_POINTS}=5.}
+\stvcutrow{Run eligibility}{Retain a triggered run only if it contains at least two points, has non-negative duration in the standard pipeline, and has a maximum point significance meeting the trigger threshold.}{Hard for event membership}{\texttt{filter\_runs()} with \texttt{RUN\_MIN\_POINTS}=2 and pipeline \texttt{run\_min\_duration\_days}=0.0.}
+\stvcutrow{Fitted event amplitude}{At least one significant dip or jump must have $|\Delta m_{\rm fit}|\geq0.1$ mag.}{Hard candidate flag}{\texttt{failed\_signal\_amplitude}; written by \texttt{events.py} and retained when post-filters recompute \texttt{failed\_any}.}
+
+\addlinespace[2pt]
+\multicolumn{4}{@{}l}{\textit{Default post-detection candidate filters}} \\
+\addlinespace[2pt]
+\stvcutrow{Bayesian evidence}{At least one branch must have global event Bayes factor $>10$ and, by default, a finite maximum local log-Bayes factor.}{Hard}{\texttt{failed\_posterior\_strength}; \texttt{filter\_evidence\_strength()}.}
+\stvcutrow{Significant-detection gate}{At least one branch must be marked significant and have $\geq1$ retained run and $\geq1$ triggered peak.}{Hard}{\texttt{failed\_significant\_detection}; \texttt{filter\_significant\_detection()}.}
+\stvcutrow{Run robustness}{At least one branch must have $\geq1$ retained run, a maximum run with $\geq2$ points, and a maximum run represented by $\geq2$ cameras. No maximum run count is set by default.}{Hard}{\texttt{failed\_run\_robustness}; \texttt{filter\_run\_robustness()}.}
+\stvcutrow{Morphology gate}{\emph{Off by default.} If enabled, require a Gaussian dip or Paczy\'nski jump and $\Delta\mathrm{BIC}\geq10$.}{Optional hard filter}{\texttt{failed\_morphology}; \texttt{filter\_morphology()}.}
+
+\addlinespace[2pt]
+\multicolumn{4}{@{}l}{\textit{External periodic/astrometric validation and final eligibility}} \\
+\addlinespace[2pt]
+\stvcutrow{Post-detection periodicity}{\emph{Off by default.} If enabled, PDM/CE/LS and consensus diagnostics identify significant periodicity using 1000 bootstrap trials, significance $\leq0.01$, and alias evidence.}{Flag by default; optional hard filter}{\texttt{periodic\_flag}/\texttt{failed\_periodicity}. Rejection requires both \texttt{--apply-periodicity-validation} and \texttt{--periodicity-reject}.}
+\stvcutrow{Gaia astrometric quality}{Gaia RUWE $>1.4$ and total proper motion $\sqrt{\mu_\alpha^2+\mu_\delta^2}>100$ mas yr$^{-1}$ are evaluated for otherwise passing rows.}{Flags by default; optional hard filters}{\texttt{high\_ruwe\_flag} and \texttt{high\_pm\_flag}; rejection requires \texttt{--gaia-reject} and/or \texttt{--gaia-pm-reject}.}
+\stvcutrow{Known periodic-catalog match}{Match to enabled Gaia EB, ASAS-SN variable, ZTF periodic, VSX, or OGLE catalog evidence; coordinate fallback radius is 3 arcsec and period-consensus tolerance is 10\%.}{Flag by default; optional hard filter}{\texttt{catalog\_match}; rejection requires \texttt{--periodic-catalog-reject}.}
+\stvcutrow{Final candidate eligibility}{A candidate is a pipeline passer exactly when no active upstream, event, or post-filter failure column is true.}{Hard}{\texttt{failed\_any=False}; passing rows alone feed the standard plots, enrichment, and review-bundle candidate set.}
+\end{longtable}
+\endgroup
+\endgroup
+\clearpage
+\twocolumngrid

@@ -154,7 +154,7 @@ def test_alias_matching_uses_frequency_resolution_when_span_is_known() -> None:
     assert not period_alias_matches(1.05, time_span_days=1000.0)
 
 
-def test_disabled_postfilter_does_not_retain_stale_failure() -> None:
+def test_retired_score_failure_is_removed_from_legacy_products() -> None:
     frame = pd.DataFrame(
         {
             "lc_path": ["one.dat3"],
@@ -170,7 +170,6 @@ def test_disabled_postfilter_does_not_retain_stale_failure() -> None:
         apply_significant_detection=False,
         apply_run_robustness=False,
         apply_morphology=False,
-        apply_score=False,
         apply_periodicity_validation=False,
         apply_gaia_ruwe_validation=False,
         apply_gaia_pm_validation=False,
@@ -178,7 +177,7 @@ def test_disabled_postfilter_does_not_retain_stale_failure() -> None:
         show_tqdm=False,
     )
 
-    assert not bool(out.loc[0, "failed_score"])
+    assert "failed_score" not in out.columns
     assert not bool(out.loc[0, "failed_any"])
 
 

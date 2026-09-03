@@ -1480,7 +1480,6 @@ SIDEBAR_GROUPS = [
         ("bool", "failed_posterior_strength"),
         ("bool", "failed_run_robustness"),
         ("bool", "failed_morphology"),
-        ("bool", "failed_score"),
         ("bool", "failed_periodicity"),
         ("bool", "failed_signal_amplitude"),
         ("bool", "bad_cameras_filtered"),
