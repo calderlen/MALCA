@@ -461,6 +461,22 @@ class TestLateOnsetConsensus:
             f"Late-onset baseline tracks dip: mean={np.mean(late_baseline):.3f}"
         )
 
+    def test_late_onset_bright_start_uses_consensus(self):
+        """A sustained bright start should not be absorbed as the camera baseline."""
+        df = _make_late_onset_lc(dip_amplitude=0.0)
+        late_mask = df["camera#"].str.startswith("late_")
+        df.loc[late_mask, "mag"] -= 0.5
+
+        result = per_camera_gp_baseline_masked(
+            df, late_onset_buffer_days=300.0, min_anchor_overlap_days=30.0,
+        )
+        late_result = result[result["camera#"].str.startswith("late_")]
+
+        assert late_result["needs_consensus"].all()
+        assert set(late_result["baseline_source"]) == {"same_band_consensus"}
+        assert np.nanmedian(late_result["baseline"]) == pytest.approx(14.0, abs=0.1)
+        assert np.nanmedian(late_result["resid"]) == pytest.approx(-0.5, abs=0.1)
+
     def test_anchor_cameras_unaffected(self):
         """Anchor and mid-band cameras with long baselines match disabled consensus."""
         df = _make_late_onset_lc()

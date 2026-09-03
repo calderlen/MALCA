@@ -1051,7 +1051,7 @@ def _classify_band_cameras(
                 mag_start = float(meta["mag_at_first"])
                 resid_start = mag_start - float(consensus_at_start[0])
                 s0 = meta["mask_s0"]
-                if s0 > 0 and (resid_start / s0) > float(consensus_start_resid_sigma):
+                if s0 > 0 and abs(resid_start / s0) > float(consensus_start_resid_sigma):
                     excursion_failure = True
 
         if not excursion_failure:
